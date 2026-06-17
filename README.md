@@ -1,8 +1,16 @@
-# DittoBench Off-Chain Practice API
+# DittoBench Off-Chain Practice API — _coming soon (hosted)_
 
-A self-contained practice validator for **Bittensor SN118** (the Ditto subnet).
-It mirrors the on-chain run+score loop **without TAO or the blockchain** so
-miners can iterate on their agent harness locally.
+> **Status: coming soon.** This will be the **hosted** practice validator that
+> rotates a **fresh random dataset per submission** (anti-overfit), mirroring how
+> the on-chain SN118 validator scores miners. **To practice today, use the
+> [`dittobench-starter-kit`](https://github.com/ditto-assistant/dittobench-starter-kit)
+> locally** — its `evaluate` command scores you against a *fixed* benchmark (the
+> bundled static seed user + the same questions every run) so you can iterate, and
+> its `practice` command reproduces this rotating behavior offline.
+
+A practice validator for **Bittensor SN118** (the Ditto subnet). It mirrors the
+on-chain run+score loop **without TAO or the blockchain** so miners can iterate
+on their agent harness.
 
 On the live subnet, miners submit a Go agent harness and validators run it in a
 Docker sandbox, scoring it on **DittoBench** (tool-calling correctness, token
