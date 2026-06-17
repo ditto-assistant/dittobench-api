@@ -65,18 +65,41 @@ curl localhost:8000/v1/catalog
 ```
 
 ### `POST /v1/submit`
-The full practice loop: health-check the harness, generate a **fresh random
-dataset (rotating seed)**, run the harness over it, score, store, and return a
-summary. Runs synchronously for v1 (small `n`).
+Generate a **fresh random dataset (rotating seed)**, run the harness over it,
+score, store, and return. Two modes:
+
+**Direct** — you run your own harness, the API just scores it (synchronous):
 ```sh
 curl -X POST localhost:8000/v1/submit \
   -H 'Content-Type: application/json' \
   -d '{"harness_url":"http://localhost:9000","n":30}'
-# {"run_id":"...","composite":0.93,"tool_mean":0.93,"median_ms":42,"n":30,"seed":...}
+# {"run_id":"...","status":"done","composite":0.93,"tool_mean":0.93,"median_ms":42,"n":30,"seed":...}
 ```
 
+**Sandbox** — the API builds your submission in Docker and runs it, closer to
+the on-chain validator (asynchronous; build is slow). Returns `202` + a
+`run_id`; poll `GET /v1/runs/{id}` for status (`queued → building → running →
+scoring → done`/`failed`). `env` is forwarded to the container (model + keys
+the harness reads):
+```sh
+curl -X POST localhost:8000/v1/submit \
+  -H 'Content-Type: application/json' \
+  -d '{"git_url":"https://github.com/<you>/<harness>","git_ref":"main","n":30,
+       "env":{"OPENROUTER_API_KEY":"sk-or-...","DITTOBENCH_MODEL":"openai/gpt-5.4-nano"}}'
+# {"run_id":"...","status":"queued","poll":"/v1/runs/..."}
+```
+The sandbox (`internal/sandbox`) clones the submission, builds it (a `gh_token`
+BuildKit secret authenticates the private `ditto-harness` dependency until it is
+public — see [ditto-harness#1](https://github.com/ditto-assistant/ditto-harness/issues/1)),
+runs the container with resource caps on a random loopback port, health-checks
+`/run`, evaluates, and tears the container down. Set `GITHUB_TOKEN_FILE` on the
+server to enable the private-dep build. The `Sandbox` interface leaves room for
+a Cloud Build + Cloud Run Jobs backend when the API is deployed to Cloud Run
+(Cloud Run has no local Docker daemon).
+
 ### `GET /v1/runs/{id}`
-Fetch the full stored `ScoreReport` (per-case breakdown). 404 if unknown.
+Fetch the job: `status`, `mode`, and (when `done`) the full `ScoreReport` with
+per-case breakdown. 404 if unknown.
 ```sh
 curl localhost:8000/v1/runs/<run_id>
 ```

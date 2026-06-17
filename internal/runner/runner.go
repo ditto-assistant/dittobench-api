@@ -46,6 +46,31 @@ func Health(ctx context.Context, harnessURL string) error {
 	return nil
 }
 
+// WaitHealthy polls <harnessURL>/health until it returns 2xx or the deadline
+// passes. Used by the sandbox path to wait for a freshly started container to
+// come up before spending the evaluation on it.
+func WaitHealthy(ctx context.Context, harnessURL string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var last error
+	for time.Now().Before(deadline) {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if last = Health(ctx, harnessURL); last == nil {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Second):
+		}
+	}
+	if last == nil {
+		last = fmt.Errorf("timeout")
+	}
+	return fmt.Errorf("harness not healthy after %s: %w", timeout, last)
+}
+
 // RunHarness evaluates every case in ds against the harness and returns a map
 // keyed by case ID. The returned map always contains an entry for every case
 // (failed cases get a zero-value RunResponse). The error is non-nil only for a
