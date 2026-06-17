@@ -1,0 +1,22 @@
+# Binaries
+/dittobench-api
+*.exe
+*.out
+
+# Env / secrets
+.env
+.env.*
+
+# Go build/test artifacts
+/bin/
+/dist/
+*.test
+coverage.out
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Scratch
+.tmp/
