@@ -8,6 +8,7 @@ package datagen
 import (
 	"fmt"
 	"math/rand"
+	"strings"
 	"time"
 
 	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
@@ -139,6 +140,44 @@ var categories = []category{
 		},
 	},
 	{
+		// Hard routing trap: phrased like a web search but the right action is a
+		// memory lookup (the user is asking about THEIR past, not the public web).
+		name: "route_memory_not_web", tool: "search_memories",
+		templates: []string{
+			"Search for what I told you about %s.",
+			"Look up %s — I mentioned it before.",
+			"Find that thing I saved about %s.",
+		},
+	},
+	{
+		// Hard routing trap: looks like a memory query but needs the live web
+		// (current/real-time info the user can't have stored).
+		name: "route_web_not_memory", tool: "search_web",
+		templates: []string{
+			"Remind me what the latest news on %s is.",
+			"Do you recall the current price of %s?",
+			"What's the up-to-date status of %s right now?",
+		},
+	},
+	{
+		// Run-vs-read trap: dispatch a NEW background job (not check existing).
+		name: "agent_run_not_read", tool: "execute_agent_job",
+		templates: []string{
+			"Go ahead and %s for me now.",
+			"Please actually %s, don't just tell me how.",
+			"Start working on this: %s.",
+		},
+	},
+	{
+		// Run-vs-read trap: check status of EXISTING jobs (not start a new one).
+		name: "agent_read_not_run", tool: "list_agent_jobs",
+		templates: []string{
+			"What background jobs do I have running?",
+			"Show me my recent agent jobs.",
+			"Did any of my dispatched tasks finish yet?",
+		},
+	},
+	{
 		name: "no_tool", tool: "", // chit-chat, answer directly
 		templates: []string{
 			"%s",
@@ -169,6 +208,14 @@ func fillerFor(r *rand.Rand, cat string) string {
 		return agentTasks[r.Intn(len(agentTasks))]
 	case "settings":
 		return themes[r.Intn(len(themes))]
+	case "route_memory_not_web":
+		return subjects[r.Intn(len(subjects))]
+	case "route_web_not_memory":
+		return topics[r.Intn(len(topics))]
+	case "agent_run_not_read":
+		return agentTasks[r.Intn(len(agentTasks))]
+	case "agent_read_not_run":
+		return "" // templates have no placeholder
 	case "no_tool":
 		return chitchat[r.Intn(len(chitchat))]
 	case "abstention":
@@ -189,13 +236,29 @@ func Generate(seed int64, n int) protocol.Dataset {
 		n = 200
 	}
 	r := rand.New(rand.NewSource(seed))
+	return protocol.Dataset{
+		Seed:        seed,
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		ToolCases:   GenerateCases(r, seed, n),
+	}
+}
 
+// GenerateCases emits n raw tool cases from an existing RNG. Exported so the
+// anti-cheat generator (internal/gen) can reuse the same templated ground-truth
+// and then LLM-paraphrase the prompts. seed is only used for stable case IDs.
+func GenerateCases(r *rand.Rand, seed int64, n int) []protocol.ToolCase {
+	if n < 1 {
+		n = 1
+	}
 	cases := make([]protocol.ToolCase, 0, n)
 	for i := 0; i < n; i++ {
 		cat := categories[r.Intn(len(categories))]
 		tmpl := cat.templates[r.Intn(len(cat.templates))]
 		filler := fillerFor(r, cat.name)
-		prompt := fmt.Sprintf(tmpl, filler)
+		prompt := tmpl
+		if strings.Contains(tmpl, "%s") {
+			prompt = fmt.Sprintf(tmpl, filler)
+		}
 
 		tc := protocol.ToolCase{
 			ID:              fmt.Sprintf("%s-%d-%04d", cat.name, seed, i),
@@ -220,10 +283,5 @@ func Generate(seed int64, n int) protocol.Dataset {
 
 		cases = append(cases, tc)
 	}
-
-	return protocol.Dataset{
-		Seed:        seed,
-		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
-		ToolCases:   cases,
-	}
+	return cases
 }

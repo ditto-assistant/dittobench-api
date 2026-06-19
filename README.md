@@ -96,6 +96,43 @@ curl -X POST localhost:8000/v1/submit \
        "env":{"OPENROUTER_API_KEY":"sk-or-...","DITTOBENCH_MODEL":"openai/gpt-5.4-nano"}}'
 # {"run_id":"...","status":"queued","poll":"/v1/runs/..."}
 ```
+**Full pipeline (`run_size`)** — the complete SN118 evaluation: build the crate
+in Docker, generate a **fresh anti-cheat dataset** (paraphrased tool cases +
+a freshly assembled LongMemEval memory haystack), push the haystack to the
+crate's `POST /seed`, run every tool + memory case, score with the deterministic
+tool-accuracy half **plus an LLM judge** (tool response-quality + memory yes/no),
+and aggregate. Requires `OPENROUTER_API_KEY` on the server (used for the
+generator + judge **and** forwarded into the crate container). Asynchronous;
+returns `202` + a `run_id`. Poll `GET /v1/runs/{id}` for
+`queued → building → generating → seeding → running → scoring → done`/`failed`,
+with live `progress` + `partial` per-case scores.
+
+```sh
+curl -X POST localhost:8000/v1/submit \
+  -H 'Content-Type: application/json' \
+  -d '{"git_url":"https://github.com/<you>/<harness>","git_ref":"main",
+       "run_size":"small"}'   # small | medium | full ; "seed":N pins the dataset
+# {"run_id":"...","status":"queued","poll":"/v1/runs/..."}
+```
+
+| run_size | tool cases | memory cases | distractor pairs | paraphrase frac |
+| -------- | ---------- | ------------ | ---------------- | --------------- |
+| small    | 6          | 6            | 20               | 0.3             |
+| medium   | 20         | 20           | 100              | 0.5             |
+| full     | 60         | 50           | 300              | 0.7             |
+
+`small` is intentionally cheap (few LLM calls) for fast local iteration.
+
+**Server env** for the `run_size` path:
+
+| Env var               | Default                              | Purpose                                  |
+| --------------------- | ------------------------------------ | ---------------------------------------- |
+| `OPENROUTER_API_KEY`  | _(required)_                         | generator + judge + crate agent          |
+| `GENERATOR_MODEL`     | `qwen/qwen3-32b`                     | paraphrases tool prompts + memory pairs  |
+| `SCORER_MODEL`        | `google/gemini-3.1-flash-lite`       | LLM judge (tool quality + memory yes/no) |
+| `DITTOBENCH_SEED_DIR` | `…/ditto-backend-ops-log/longmemeval`| LongMemEval seed pairs/subjects/manifest |
+| `DITTOBENCH_ORACLE`   | `…/dittobench-testdata/…oracle.json` | LongMemEval oracle (~500 questions)      |
+
 The sandbox (`internal/sandbox`) clones the submission, builds it (a `gh_token`
 BuildKit secret authenticates the private `ditto-harness` dependency until it is
 public — see [ditto-harness#1](https://github.com/ditto-assistant/ditto-harness/issues/1)),

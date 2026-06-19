@@ -50,6 +50,31 @@ func TestGetReturnsCopy(t *testing.T) {
 	}
 }
 
+func TestRunSizeProgressAndPartial(t *testing.T) {
+	s := New()
+	s.Create("r", "run_size", StatusQueued, 5, 12)
+	s.SetRunSize("r", "small")
+	s.SetStage("r", StatusGenerating, 0, 12)
+
+	got, _ := s.Get("r")
+	if got.RunSize != "small" {
+		t.Fatalf("expected run_size small, got %q", got.RunSize)
+	}
+	if got.Status != StatusGenerating || got.Progress.Stage != string(StatusGenerating) || got.Progress.Total != 12 {
+		t.Fatalf("stage not set: %+v", got)
+	}
+
+	s.AppendPartial("r", protocol.CaseScore{CaseID: "c1", Score: 1.0})
+	s.AppendPartial("r", protocol.CaseScore{CaseID: "c2", Score: 0.0})
+	got, _ = s.Get("r")
+	if len(got.Partial) != 2 {
+		t.Fatalf("expected 2 partials, got %d", len(got.Partial))
+	}
+	if got.Progress.Done != 2 {
+		t.Fatalf("expected progress done 2, got %d", got.Progress.Done)
+	}
+}
+
 func TestConcurrentAccess(t *testing.T) {
 	s := New()
 	s.Create("r", "direct", StatusRunning, 0, 0)

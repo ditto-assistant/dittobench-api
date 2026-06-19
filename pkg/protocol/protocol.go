@@ -26,11 +26,64 @@ type ToolCase struct {
 	ExpectedBehavior string     `json:"expected_behavior,omitempty"`
 }
 
-// Dataset is a (fresh, seeded) set of tool-calling cases.
+// MemoryCase is one memory-recall (LongMemEval) benchmark case. The harness is
+// first seeded with a fresh haystack (see SeedRequest); then for each case the
+// validator POSTs a normal RunRequest whose user_input is Question, and the
+// agent must answer from its seeded memory. ExpectedAnswer is the oracle answer
+// (judged for containment, not exact match).
+type MemoryCase struct {
+	ID             string `json:"id"`
+	QuestionID     string `json:"question_id"`
+	QuestionType   string `json:"question_type"`
+	Question       string `json:"question"`
+	ExpectedAnswer string `json:"expected_answer"`
+}
+
+// Dataset is a (fresh, seeded) set of tool-calling + memory cases.
 type Dataset struct {
-	Seed        int64      `json:"seed"`
-	GeneratedAt string     `json:"generated_at"`
-	ToolCases   []ToolCase `json:"tool_cases"`
+	Seed        int64        `json:"seed"`
+	GeneratedAt string       `json:"generated_at"`
+	ToolCases   []ToolCase   `json:"tool_cases"`
+	MemoryCases []MemoryCase `json:"memory_cases,omitempty"`
+}
+
+// MemoryPair is one conversation pair in a fresh haystack pushed to the harness
+// via POST /seed. The harness embeds prompt+response and stores it for recall.
+type MemoryPair struct {
+	PairID    string `json:"pair_id"`
+	SessionID string `json:"session_id"`
+	Timestamp string `json:"timestamp"` // RFC3339
+	Prompt    string `json:"prompt"`
+	Response  string `json:"response"`
+}
+
+// Subject is one subject/topic cluster linked to memory pairs in a haystack.
+type Subject struct {
+	ID              string `json:"id"`
+	SubjectText     string `json:"subject_text"`
+	DescriptionText string `json:"description_text"`
+}
+
+// SubjectLink ties a Subject to a MemoryPair (many-to-many).
+type SubjectLink struct {
+	SubjectID string `json:"subject_id"`
+	PairID    string `json:"pair_id"`
+}
+
+// SeedRequest is the fresh haystack the validator POSTs to <harness>/seed before
+// running memory cases. UserID defaults to "miner" if empty.
+type SeedRequest struct {
+	UserID   string        `json:"user_id,omitempty"`
+	Pairs    []MemoryPair  `json:"pairs"`
+	Subjects []Subject     `json:"subjects"`
+	Links    []SubjectLink `json:"links"`
+}
+
+// SeedResponse is what <harness>/seed returns: counts actually loaded.
+type SeedResponse struct {
+	Pairs    int `json:"pairs"`
+	Subjects int `json:"subjects"`
+	Links    int `json:"links"`
 }
 
 // ToolDefinition is a tool schema sent to the harness for a case.
@@ -64,24 +117,47 @@ type RunResponse struct {
 	LatencyMs    int64              `json:"latency_ms"`
 }
 
-// CaseScore is the score for one case.
+// Kind discriminates a CaseScore between the two case families.
+const (
+	KindTool   = "tool"
+	KindMemory = "memory"
+)
+
+// CaseScore is the score for one case (tool OR memory).
+//
+// For a tool case: Score = 0.5*ToolAccuracy + 0.5*Quality (the LLM judge half).
+// For a memory case: Score is 1.0 or 0.0 from the LongMemEval yes/no judge, and
+// ToolAccuracy/Quality are unused.
 type CaseScore struct {
 	CaseID    string   `json:"case_id"`
 	Category  string   `json:"category"`
-	ToolScore float64  `json:"tool_score"` // 0..1
+	Kind      string   `json:"kind"`              // "tool" | "memory"
+	Score     float64  `json:"score"`             // 0..1 composite for this case
+	ToolScore float64  `json:"tool_score"`        // 0..1 deterministic tool accuracy (tool cases)
+	Quality   float64  `json:"quality,omitempty"` // 0..1 LLM response-quality judge (tool cases)
+	Correct   bool     `json:"correct,omitempty"` // memory judge verdict (memory cases)
 	LatencyMs int64    `json:"latency_ms"`
 	Called    []string `json:"called"`
 	Expected  []string `json:"expected"`
 	Notes     []string `json:"notes,omitempty"`
 }
 
+// CategoryStat is the mean composite score for one category.
+type CategoryStat struct {
+	Category string  `json:"category"`
+	Count    int     `json:"count"`
+	Mean     float64 `json:"mean"`
+}
+
 // ScoreReport is the full result of scoring a run.
 type ScoreReport struct {
-	RunID       string      `json:"run_id"`
-	GeneratedAt string      `json:"generated_at"`
-	Composite   float64     `json:"composite"` // 0..1, mean tool_score
-	ToolMean    float64     `json:"tool_mean"` // 0..1
-	MedianMs    int64       `json:"median_ms"`
-	N           int         `json:"n"`
-	PerCase     []CaseScore `json:"per_case"`
+	RunID       string         `json:"run_id"`
+	GeneratedAt string         `json:"generated_at"`
+	Composite   float64        `json:"composite"`   // 0..1 weighted composite (tool + memory)
+	ToolMean    float64        `json:"tool_mean"`   // 0..1 mean tool-case composite
+	MemoryMean  float64        `json:"memory_mean"` // 0..1 fraction of memory cases correct
+	MedianMs    int64          `json:"median_ms"`
+	N           int            `json:"n"`
+	PerCase     []CaseScore    `json:"per_case"`
+	PerCategory []CategoryStat `json:"per_category,omitempty"`
 }

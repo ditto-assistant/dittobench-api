@@ -30,6 +30,7 @@ func Score(runID string, cases []protocol.ToolCase, resps map[string]protocol.Ru
 	for _, c := range cases {
 		resp, ok := resps[c.ID]
 		cs := scoreCase(c, resp, ok)
+		cs.Score = cs.ToolScore // direct/legacy mode: composite == tool accuracy
 		perCase = append(perCase, cs)
 		toolSum += cs.ToolScore
 		latencies = append(latencies, cs.LatencyMs)
@@ -53,10 +54,112 @@ func Score(runID string, cases []protocol.ToolCase, resps map[string]protocol.Ru
 	return report
 }
 
+// ScoreToolCase computes the DETERMINISTIC tool-accuracy half of a tool case.
+// ToolScore (0..1) is the accuracy; Score is left for the caller to compose with
+// the LLM quality judge (tool case = 0.5*tool_accuracy + 0.5*quality). ok=false
+// means the harness gave no usable response (scored as a miss).
+func ScoreToolCase(c protocol.ToolCase, resp protocol.RunResponse, ok bool) protocol.CaseScore {
+	cs := scoreCase(c, resp, ok)
+	cs.Kind = protocol.KindTool
+	cs.Score = cs.ToolScore // overwritten once quality is judged
+	return cs
+}
+
+// ComposeTool finishes a tool CaseScore with the LLM quality judge result.
+func ComposeTool(cs protocol.CaseScore, quality float64) protocol.CaseScore {
+	cs.Quality = quality
+	cs.Score = 0.5*cs.ToolScore + 0.5*quality
+	return cs
+}
+
+// ScoreMemoryCase builds a memory CaseScore from the LongMemEval yes/no judge.
+func ScoreMemoryCase(mc protocol.MemoryCase, resp protocol.RunResponse, correct bool) protocol.CaseScore {
+	score := 0.0
+	if correct {
+		score = 1.0
+	}
+	cs := protocol.CaseScore{
+		CaseID:    mc.ID,
+		Category:  mc.QuestionType,
+		Kind:      protocol.KindMemory,
+		Score:     score,
+		Correct:   correct,
+		LatencyMs: resp.LatencyMs,
+		Called:    calledNames(resp.ToolCalls),
+	}
+	if mc.QuestionType == "" {
+		cs.Category = "memory"
+	}
+	return cs
+}
+
+// Aggregate folds per-case scores into a ScoreReport. The composite weights tool
+// and memory means by their case counts (the published DittoBench composite is
+// the mean over all cases); per-category breakdown and median latency included.
+func Aggregate(runID string, perCase []protocol.CaseScore) protocol.ScoreReport {
+	var toolSum, toolN, memSum, memN float64
+	latencies := make([]int64, 0, len(perCase))
+	catSum := map[string]float64{}
+	catCount := map[string]int{}
+	catOrder := make([]string, 0)
+
+	for _, cs := range perCase {
+		latencies = append(latencies, cs.LatencyMs)
+		switch cs.Kind {
+		case protocol.KindMemory:
+			memSum += cs.Score
+			memN++
+		default:
+			toolSum += cs.Score
+			toolN++
+		}
+		if _, seen := catCount[cs.Category]; !seen {
+			catOrder = append(catOrder, cs.Category)
+		}
+		catSum[cs.Category] += cs.Score
+		catCount[cs.Category]++
+	}
+
+	toolMean := 0.0
+	if toolN > 0 {
+		toolMean = toolSum / toolN
+	}
+	memMean := 0.0
+	if memN > 0 {
+		memMean = memSum / memN
+	}
+	composite := 0.0
+	if n := toolN + memN; n > 0 {
+		composite = (toolSum + memSum) / n
+	}
+
+	perCat := make([]protocol.CategoryStat, 0, len(catOrder))
+	for _, cat := range catOrder {
+		perCat = append(perCat, protocol.CategoryStat{
+			Category: cat,
+			Count:    catCount[cat],
+			Mean:     catSum[cat] / float64(catCount[cat]),
+		})
+	}
+
+	return protocol.ScoreReport{
+		RunID:       runID,
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		Composite:   composite,
+		ToolMean:    toolMean,
+		MemoryMean:  memMean,
+		MedianMs:    median(latencies),
+		N:           len(perCase),
+		PerCase:     perCase,
+		PerCategory: perCat,
+	}
+}
+
 func scoreCase(c protocol.ToolCase, resp protocol.RunResponse, ok bool) protocol.CaseScore {
 	cs := protocol.CaseScore{
 		CaseID:    c.ID,
 		Category:  c.Category,
+		Kind:      protocol.KindTool,
 		LatencyMs: resp.LatencyMs,
 		Called:    calledNames(resp.ToolCalls),
 		Expected:  expectedNames(c.ExpectedTools),

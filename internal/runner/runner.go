@@ -22,6 +22,9 @@ const perCaseTimeout = 60 * time.Second
 // healthTimeout bounds the /health probe.
 const healthTimeout = 10 * time.Second
 
+// seedTimeout bounds the /seed call (embedding a haystack can take a while).
+const seedTimeout = 5 * time.Minute
+
 var client = &http.Client{}
 
 // Health probes <harnessURL>/health and returns nil on a 2xx response.
@@ -88,6 +91,50 @@ func RunHarness(ctx context.Context, harnessURL string, ds protocol.Dataset, too
 		out[c.ID] = resp
 	}
 	return out, nil
+}
+
+// Seed POSTs a fresh haystack to <harnessURL>/seed and returns the loaded
+// counts the harness reports. Used by the run_size pipeline before memory cases.
+func Seed(ctx context.Context, harnessURL string, req protocol.SeedRequest) (protocol.SeedResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, seedTimeout)
+	defer cancel()
+
+	buf, err := json.Marshal(req)
+	if err != nil {
+		return protocol.SeedResponse{}, fmt.Errorf("marshal seed request: %w", err)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, harnessURL+"/seed", bytes.NewReader(buf))
+	if err != nil {
+		return protocol.SeedResponse{}, fmt.Errorf("build seed request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	httpResp, err := client.Do(httpReq)
+	if err != nil {
+		return protocol.SeedResponse{}, fmt.Errorf("post /seed: %w", err)
+	}
+	defer httpResp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(httpResp.Body, 1<<20))
+	if err != nil {
+		return protocol.SeedResponse{}, fmt.Errorf("read /seed body: %w", err)
+	}
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		return protocol.SeedResponse{}, fmt.Errorf("/seed returned %d: %s", httpResp.StatusCode, string(body))
+	}
+	var out protocol.SeedResponse
+	if err := json.Unmarshal(body, &out); err != nil {
+		return protocol.SeedResponse{}, fmt.Errorf("decode /seed response: %w", err)
+	}
+	return out, nil
+}
+
+// RunCase POSTs one tool OR memory case to <harnessURL>/run. For a tool case,
+// pass c (the toolcase) and prompt=c.Prompt; for a memory case, pass a synthetic
+// ToolCase with the question as the prompt. Exported so the pipeline can run +
+// score cases one at a time (appending partial results).
+func RunCase(ctx context.Context, harnessURL, caseID, prompt string, tools []protocol.ToolDefinition) (protocol.RunResponse, error) {
+	return runOne(ctx, harnessURL, protocol.ToolCase{ID: caseID, Prompt: prompt}, tools)
 }
 
 func runOne(ctx context.Context, harnessURL string, c protocol.ToolCase, tools []protocol.ToolDefinition) (protocol.RunResponse, error) {
