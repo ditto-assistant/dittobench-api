@@ -11,6 +11,7 @@ import (
 	"flag"
 	"log"
 	"math/rand"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -23,6 +24,8 @@ import (
 	"github.com/ditto-assistant/dittobench-api/internal/datagen"
 	"github.com/ditto-assistant/dittobench-api/internal/gen"
 	"github.com/ditto-assistant/dittobench-api/internal/llm"
+	"github.com/ditto-assistant/dittobench-api/internal/netguard"
+	"github.com/ditto-assistant/dittobench-api/internal/ratelimit"
 	"github.com/ditto-assistant/dittobench-api/internal/runner"
 	"github.com/ditto-assistant/dittobench-api/internal/sandbox"
 	"github.com/ditto-assistant/dittobench-api/internal/scorer"
@@ -36,9 +39,22 @@ const defaultN = 30
 // answer /health before giving up on the submission.
 const sandboxHealthTimeout = 90 * time.Second
 
+// Abuse guards for the public submit endpoint.
+const (
+	maxSubmitBody     = 64 << 10        // request body cap (submissions are tiny)
+	submitsPerWindow  = 15              // per-IP submissions...
+	submitWindow      = 5 * time.Minute // ...per this window
+	maxConcurrentRuns = 8               // global cap on in-flight run_size jobs
+)
+
 type server struct {
 	store   *store.Store
 	sandbox sandbox.Sandbox
+	// allowPrivate relaxes the SSRF guard for local dev + the Docker sandbox
+	// (loopback containers). False in production (hosted Cloud Run).
+	allowPrivate bool
+	limiter      *ratelimit.Limiter
+	runSlots     chan struct{} // bounds concurrent run_size jobs
 }
 
 func main() {
@@ -53,9 +69,19 @@ func main() {
 		}
 	}
 
+	// SSRF guard is ON by default; opt out for local dev / sandbox containers.
+	allowPrivate := envBool("DITTOBENCH_ALLOW_PRIVATE_HARNESS")
+	runner.Configure(allowPrivate)
+	if allowPrivate {
+		log.Printf("WARNING: DITTOBENCH_ALLOW_PRIVATE_HARNESS set — SSRF guard relaxed (local/dev only)")
+	}
+
 	s := &server{
-		store:   store.New(),
-		sandbox: sandbox.NewLocalDocker(),
+		store:        store.New(),
+		sandbox:      sandbox.NewLocalDocker(),
+		allowPrivate: allowPrivate,
+		limiter:      ratelimit.New(submitsPerWindow, submitWindow),
+		runSlots:     make(chan struct{}, maxConcurrentRuns),
 	}
 
 	mux := http.NewServeMux()
@@ -182,9 +208,16 @@ type acceptedResponse struct {
 }
 
 func (s *server) handleSubmit(w http.ResponseWriter, r *http.Request) {
+	// Abuse guard: per-IP rate limit on the expensive submit endpoint.
+	if !s.limiter.Allow(clientIP(r)) {
+		writeError(w, http.StatusTooManyRequests, "rate limit exceeded; slow down and retry shortly")
+		return
+	}
+
 	var req submitRequest
+	r.Body = http.MaxBytesReader(w, r.Body, maxSubmitBody)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		writeError(w, http.StatusBadRequest, "invalid or oversized JSON body")
 		return
 	}
 	if req.HarnessURL == "" && req.GitURL == "" {
@@ -194,6 +227,15 @@ func (s *server) handleSubmit(w http.ResponseWriter, r *http.Request) {
 	if req.HarnessURL != "" && req.GitURL != "" {
 		writeError(w, http.StatusBadRequest, "provide only one of harness_url or git_url")
 		return
+	}
+
+	// SSRF guard: a caller-supplied harness_url must be a public http(s) endpoint
+	// (relaxed for local dev / sandbox via DITTOBENCH_ALLOW_PRIVATE_HARNESS).
+	if req.HarnessURL != "" {
+		if err := netguard.ValidateURL(req.HarnessURL, s.allowPrivate); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
 
 	// run_size selects the full SN118 pipeline (git + fresh anti-cheat dataset +
@@ -348,6 +390,14 @@ func (s *server) submitRunSize(w http.ResponseWriter, r *http.Request, req submi
 	}
 	llmClient := llm.NewWithKey(apiKey)
 
+	// Bound concurrent in-flight runs so a burst can't exhaust the instance.
+	select {
+	case s.runSlots <- struct{}{}:
+	default:
+		writeError(w, http.StatusTooManyRequests, "validator at capacity; retry shortly")
+		return
+	}
+
 	seed := req.Seed
 	if seed == 0 {
 		seed = gen.FreshSeed()
@@ -370,6 +420,7 @@ func (s *server) submitRunSize(w http.ResponseWriter, r *http.Request, req submi
 // runSizeJob is the full SN118 pipeline: building → generating → seeding →
 // running (per-case judge, appending partials) → scoring → done.
 func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest, prof gen.Profile, seed int64, llmClient *llm.Client, apiKey string) {
+	defer func() { <-s.runSlots }() // release the concurrency slot
 	defer func() {
 		if rec := recover(); rec != nil {
 			s.store.Fail(runID, "internal panic during run_size job")
@@ -515,4 +566,28 @@ func parseIntDefault(s string, def int) int {
 // wall-clock and a random component so concurrent requests don't collide.
 func freshSeed() int64 {
 	return time.Now().UnixNano() ^ int64(rand.Uint64())
+}
+
+// envBool reports whether an env var is set to a truthy value.
+func envBool(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+// clientIP returns the caller's IP for rate-limiting, honoring the first hop of
+// X-Forwarded-For (set by Cloud Run / proxies) and falling back to RemoteAddr.
+func clientIP(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		if i := strings.IndexByte(xff, ','); i >= 0 {
+			return strings.TrimSpace(xff[:i])
+		}
+		return strings.TrimSpace(xff)
+	}
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
+	}
+	return r.RemoteAddr
 }

@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/ditto-assistant/dittobench-api/internal/netguard"
 	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
 )
 
@@ -25,7 +26,14 @@ const healthTimeout = 10 * time.Second
 // seedTimeout bounds the /seed call (embedding a haystack can take a while).
 const seedTimeout = 5 * time.Minute
 
-var client = &http.Client{}
+// client is used for all outbound harness calls. It defaults to a guarded client
+// (no private targets); Configure swaps it for local/sandbox use.
+var client = netguard.Client(false)
+
+// Configure sets the outbound HTTP client's SSRF policy. allowPrivate=true (local
+// dev + Docker sandbox, whose containers are on loopback) permits private/loopback
+// targets; false (hosted) blocks them at dial time. Call once at startup.
+func Configure(allowPrivate bool) { client = netguard.Client(allowPrivate) }
 
 // Health probes <harnessURL>/health and returns nil on a 2xx response.
 func Health(ctx context.Context, harnessURL string) error {

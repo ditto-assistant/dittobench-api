@@ -5,10 +5,18 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 
 	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
 )
+
+// TestMain relaxes the SSRF guard so tests can reach loopback httptest servers
+// (the default client blocks private/loopback targets in production).
+func TestMain(m *testing.M) {
+	Configure(true)
+	os.Exit(m.Run())
+}
 
 func TestHealthOK(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
