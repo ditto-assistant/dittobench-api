@@ -94,10 +94,31 @@ gcloud run deploy dittobench-api \
 is `qwen/qwen3-32b`; the deploy above pins both to the cheaper
 `gemini-3.1-flash-lite` validated end-to-end.)
 
+**CI/CD** (`.github/workflows/ci.yml`): every PR runs `build` / `vet` / `test`;
+a **merge to `main` auto-deploys** to Cloud Run. CI authenticates to GCP via the
+org's Workload Identity Federation (the same provider/SA the backend uses) — no
+secrets stored in the repo.
+
 No secrets are configured on the service — miners bring their own OpenRouter key
 per request (BYOK). The repo stays **private**; the deployed URL is public so
 miners can practice. The `git_url` Docker-build path is intentionally inert here
 (Cloud Run has no Docker daemon).
+
+## Security (public endpoint hardening)
+
+The hosted service is public + unauthenticated and dials caller-supplied
+harness URLs, so it ships guards against abuse:
+
+- **SSRF** — `harness_url` must be an `http(s)` URL resolving to a **public**
+  address. Loopback, RFC1918 private, link-local (incl. the `169.254.169.254`
+  metadata IP), CGNAT, and multicast are rejected up front (`internal/netguard`),
+  and the outbound dialer re-checks the connected IP to defeat DNS-rebinding.
+- **Rate limiting** — a per-IP sliding window on `/v1/submit`
+  (`internal/ratelimit`) plus a global cap on concurrent `run_size` jobs; both
+  return `429`. A request body cap rejects oversized payloads.
+- **`DITTOBENCH_ALLOW_PRIVATE_HARNESS`** — set truthy for **local dev / the
+  Docker sandbox** (loopback containers) to relax the SSRF guard. Leave unset in
+  production; the guard is on by default.
 
 ## Endpoints
 
