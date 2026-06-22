@@ -19,23 +19,35 @@ import (
 type Status string
 
 const (
-	StatusQueued   Status = "queued"   // accepted, not yet started
-	StatusBuilding Status = "building" // docker build in progress (sandbox mode)
-	StatusRunning  Status = "running"  // harness up, dataset executing
-	StatusScoring  Status = "scoring"  // computing the score report
-	StatusDone     Status = "done"     // Report is populated
-	StatusFailed   Status = "failed"   // Error is populated
+	StatusQueued     Status = "queued"     // accepted, not yet started
+	StatusBuilding   Status = "building"   // docker build in progress (sandbox mode)
+	StatusGenerating Status = "generating" // generating the fresh anti-cheat dataset
+	StatusSeeding    Status = "seeding"    // pushing the fresh haystack to the harness
+	StatusRunning    Status = "running"    // harness up, dataset executing
+	StatusScoring    Status = "scoring"    // computing the score report
+	StatusDone       Status = "done"       // Report is populated
+	StatusFailed     Status = "failed"     // Error is populated
 )
+
+// Progress is the coarse stage progress surfaced to a polling UI.
+type Progress struct {
+	Stage string `json:"stage"`
+	Done  int    `json:"done"`
+	Total int    `json:"total"`
+}
 
 // Job is one evaluation, in any lifecycle state.
 type Job struct {
 	RunID     string                `json:"run_id"`
 	Status    Status                `json:"status"`
-	Mode      string                `json:"mode"`             // "direct" | "sandbox"
-	Seed      int64                 `json:"seed,omitempty"`   // dataset seed used
-	N         int                   `json:"n,omitempty"`      // case count requested
-	Error     string                `json:"error,omitempty"`  // set when Status == failed
-	Report    *protocol.ScoreReport `json:"report,omitempty"` // set when Status == done
+	Mode      string                `json:"mode"`               // "direct" | "sandbox"
+	RunSize   string                `json:"run_size,omitempty"` // "small" | "medium" | "full"
+	Seed      int64                 `json:"seed,omitempty"`     // dataset seed used
+	N         int                   `json:"n,omitempty"`        // case count requested
+	Error     string                `json:"error,omitempty"`    // set when Status == failed
+	Progress  Progress              `json:"progress"`           // stage/done/total for the UI
+	Partial   []protocol.CaseScore  `json:"partial,omitempty"`  // case scores appended as they complete
+	Report    *protocol.ScoreReport `json:"report,omitempty"`   // set when Status == done
 	CreatedAt time.Time             `json:"created_at"`
 	UpdatedAt time.Time             `json:"updated_at"`
 }
@@ -83,6 +95,35 @@ func (s *Store) Update(runID string, mutate func(*Job)) {
 // SetStatus is a convenience for a status-only transition.
 func (s *Store) SetStatus(runID string, status Status) {
 	s.Update(runID, func(j *Job) { j.Status = status })
+}
+
+// SetRunSize records the requested run_size on a job.
+func (s *Store) SetRunSize(runID, runSize string) {
+	s.Update(runID, func(j *Job) { j.RunSize = runSize })
+}
+
+// SetProgress updates the coarse stage/done/total progress (and Status to the
+// matching stage if it names a known lifecycle state).
+func (s *Store) SetProgress(runID, stage string, done, total int) {
+	s.Update(runID, func(j *Job) {
+		j.Progress = Progress{Stage: stage, Done: done, Total: total}
+	})
+}
+
+// SetStage sets Status + the progress stage label together.
+func (s *Store) SetStage(runID string, status Status, done, total int) {
+	s.Update(runID, func(j *Job) {
+		j.Status = status
+		j.Progress = Progress{Stage: string(status), Done: done, Total: total}
+	})
+}
+
+// AppendPartial adds a finished case score and advances Progress.Done.
+func (s *Store) AppendPartial(runID string, cs protocol.CaseScore) {
+	s.Update(runID, func(j *Job) {
+		j.Partial = append(j.Partial, cs)
+		j.Progress.Done = len(j.Partial)
+	})
 }
 
 // Fail marks a job failed with the given error message.

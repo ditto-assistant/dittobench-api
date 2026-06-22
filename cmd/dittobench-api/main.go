@@ -12,13 +12,17 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
+	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/ditto-assistant/dittobench-api/internal/catalog"
 	"github.com/ditto-assistant/dittobench-api/internal/datagen"
+	"github.com/ditto-assistant/dittobench-api/internal/gen"
+	"github.com/ditto-assistant/dittobench-api/internal/llm"
 	"github.com/ditto-assistant/dittobench-api/internal/runner"
 	"github.com/ditto-assistant/dittobench-api/internal/sandbox"
 	"github.com/ditto-assistant/dittobench-api/internal/scorer"
@@ -40,6 +44,14 @@ type server struct {
 func main() {
 	port := flag.Int("port", 8000, "HTTP listen port (ditto-subnet API convention)")
 	flag.Parse()
+
+	// Cloud Run (and most PaaS) inject the listen port via $PORT; honor it over
+	// the flag default so the same binary runs locally and hosted.
+	if p := os.Getenv("PORT"); p != "" {
+		if v, err := strconv.Atoi(p); err == nil {
+			*port = v
+		}
+	}
 
 	s := &server{
 		store:   store.New(),
@@ -122,6 +134,32 @@ type submitRequest struct {
 	GitRef     string            `json:"git_ref,omitempty"`
 	Env        map[string]string `json:"env,omitempty"`
 	N          int               `json:"n"`
+	// RunSize selects the full SN118 pipeline (build → generate fresh anti-cheat
+	// dataset → seed haystack → run tool+memory cases → judge → score). One of
+	// "small" | "medium" | "full". When set, this path takes precedence.
+	RunSize string `json:"run_size,omitempty"`
+	// Seed pins the dataset seed (0 = fresh crypto-random per submission).
+	Seed int64 `json:"seed,omitempty"`
+	// OpenRouterKey is the miner's BYOK OpenRouter key, used for the generator
+	// (paraphrase) + judge (scoring). The hosted practice API requires it per
+	// request (it stores no keys); locally it falls back to the server env.
+	// May also be supplied via the Authorization: Bearer header.
+	OpenRouterKey string `json:"openrouter_key,omitempty"`
+}
+
+// resolveOpenRouterKey returns the OpenRouter key for a submission, preferring
+// (1) the request body, (2) an Authorization: Bearer header, (3) the server's
+// OPENROUTER_API_KEY env (local/internal fallback). The key is never logged.
+func resolveOpenRouterKey(r *http.Request, req submitRequest) string {
+	if k := strings.TrimSpace(req.OpenRouterKey); k != "" {
+		return k
+	}
+	if h := strings.TrimSpace(r.Header.Get("Authorization")); h != "" {
+		if rest, ok := strings.CutPrefix(h, "Bearer "); ok {
+			return strings.TrimSpace(rest)
+		}
+	}
+	return strings.TrimSpace(os.Getenv(llm.EnvAPIKey))
 }
 
 // submitResponse is returned by the direct (synchronous) path.
@@ -150,18 +188,25 @@ func (s *server) handleSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.HarnessURL == "" && req.GitURL == "" {
-		writeError(w, http.StatusBadRequest, "either harness_url (direct) or git_url (sandbox) is required")
+		writeError(w, http.StatusBadRequest, "either harness_url (direct) or git_url (sandbox/run_size) is required")
 		return
 	}
 	if req.HarnessURL != "" && req.GitURL != "" {
 		writeError(w, http.StatusBadRequest, "provide only one of harness_url or git_url")
 		return
 	}
+
+	// run_size selects the full SN118 pipeline (git + fresh anti-cheat dataset +
+	// memory seeding + LLM judge). Requires a git submission and an OpenRouter key.
+	if req.RunSize != "" {
+		s.submitRunSize(w, r, req)
+		return
+	}
+
 	n := req.N
 	if n <= 0 {
 		n = defaultN
 	}
-
 	if req.GitURL != "" {
 		s.submitSandbox(w, r, req, n)
 		return
@@ -263,6 +308,168 @@ func (s *server) runSandboxJob(ctx context.Context, runID string, req submitRequ
 		s.store.Fail(runID, "evaluation failed: "+err.Error())
 		return
 	}
+}
+
+// submitRunSize validates a run_size submission, requires an OpenRouter key,
+// and kicks off the full SN118 pipeline asynchronously (returns 202 + run_id).
+func (s *server) submitRunSize(w http.ResponseWriter, r *http.Request, req submitRequest) {
+	if req.GitURL == "" && req.HarnessURL == "" {
+		writeError(w, http.StatusBadRequest, "run_size requires git_url (build the crate in Docker) or harness_url (point at an already-running harness, for local dev)")
+		return
+	}
+	prof, ok := gen.ProfileFor(req.RunSize)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "run_size must be one of: small, medium, full")
+		return
+	}
+	// Sandbox is only needed when we build the crate ourselves. The local
+	// harness_url path runs the full generate→seed→run→score pipeline against an
+	// already-running harness, so it does not require Docker.
+	if req.GitURL != "" {
+		if s.sandbox == nil {
+			writeError(w, http.StatusNotImplemented, "git_url (Docker build) is not available on this server; submit a reachable harness_url instead")
+			return
+		}
+		if err := s.sandbox.Available(r.Context()); err != nil {
+			// The hosted practice API has no Docker daemon — the on-chain
+			// validator owns crate builds. Miners practice by exposing a
+			// reachable harness and submitting harness_url.
+			writeError(w, http.StatusServiceUnavailable, "git_url (Docker build) is unavailable here ("+err.Error()+"); submit a reachable harness_url to practice")
+			return
+		}
+	}
+	// An OpenRouter key is REQUIRED for run_size: the validator uses it for the
+	// generator (paraphrase) + judge, and (Docker path) forwards it to the
+	// crate's agent. BYOK — from the request body, Bearer header, or env.
+	apiKey := resolveOpenRouterKey(r, req)
+	if apiKey == "" {
+		writeError(w, http.StatusBadRequest, "an OpenRouter key is required for run_size submissions (send \"openrouter_key\" in the body or an Authorization: Bearer header)")
+		return
+	}
+	llmClient := llm.NewWithKey(apiKey)
+
+	seed := req.Seed
+	if seed == 0 {
+		seed = gen.FreshSeed()
+	}
+	runID := uuid.NewString()
+	s.store.Create(runID, "run_size", store.StatusQueued, seed, prof.Tools+prof.Mem)
+	s.store.SetRunSize(runID, req.RunSize)
+	log.Printf("run %s: run_size=%s seed=%d tools=%d mem=%d distractors=%d paraphrase=%.2f",
+		runID, req.RunSize, seed, prof.Tools, prof.Mem, prof.Distractors, prof.ParaphraseFrac)
+
+	go s.runSizeJob(context.Background(), runID, req, prof, seed, llmClient, apiKey)
+
+	writeJSON(w, http.StatusAccepted, acceptedResponse{
+		RunID:  runID,
+		Status: string(store.StatusQueued),
+		Poll:   "/v1/runs/" + runID,
+	})
+}
+
+// runSizeJob is the full SN118 pipeline: building → generating → seeding →
+// running (per-case judge, appending partials) → scoring → done.
+func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest, prof gen.Profile, seed int64, llmClient *llm.Client, apiKey string) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			s.store.Fail(runID, "internal panic during run_size job")
+			log.Printf("run_size job %s panicked: %v", runID, rec)
+		}
+	}()
+
+	total := prof.Tools + prof.Mem
+
+	// 1. building — build the crate in the Docker sandbox. Skipped on the local
+	//    harness_url path (the miner is already running their harness).
+	var image string
+	if req.GitURL != "" {
+		s.store.SetStage(runID, store.StatusBuilding, 0, total)
+		img, buildLog, err := s.sandbox.Build(ctx, sandbox.Source{GitURL: req.GitURL, GitRef: req.GitRef})
+		if err != nil {
+			s.store.Fail(runID, "build failed: "+err.Error())
+			log.Printf("run %s build failed: %v\n%s", runID, err, buildLog)
+			return
+		}
+		image = img
+	}
+
+	// 2. generating — fresh, anti-cheat dataset (tools + memory haystack).
+	s.store.SetStage(runID, store.StatusGenerating, 0, total)
+	rng := gen.NewRNG(seed)
+	genModel := llm.GeneratorModel()
+	toolCases := gen.GenerateTools(ctx, rng, prof.Tools, prof.ParaphraseFrac, llmClient, genModel)
+	seedReq, memCases, err := gen.GenerateMemory(ctx, rng, prof.Mem, prof.Distractors, prof.ParaphraseFrac, llmClient, genModel, gen.SeedDir(), gen.OraclePath())
+	if err != nil {
+		s.store.Fail(runID, "dataset generation failed: "+err.Error())
+		return
+	}
+	log.Printf("run %s generated: %d tool cases, %d memory cases, %d haystack pairs (%d subjects)",
+		runID, len(toolCases), len(memCases), len(seedReq.Pairs), len(seedReq.Subjects))
+
+	// 3. start the container, forwarding the OpenRouter key + provider config so
+	//    the crate's agent + embedder can run. On the local harness_url path we
+	//    skip the container and target the miner's already-running harness.
+	harnessURL := req.HarnessURL
+	if image != "" {
+		env := map[string]string{
+			"OPENROUTER_API_KEY":  apiKey,
+			"DITTOBENCH_PROVIDER": "openrouter",
+			"OLLAMA_BASE_URL":     "http://host.docker.internal:11434",
+		}
+		for k, v := range req.Env {
+			env[k] = v
+		}
+		handle, err := s.sandbox.Run(ctx, image, env)
+		if err != nil {
+			s.store.Fail(runID, "container start failed: "+err.Error())
+			return
+		}
+		defer s.sandbox.Stop(context.Background(), handle)
+		harnessURL = handle.BaseURL
+	}
+
+	if err := runner.WaitHealthy(ctx, harnessURL, sandboxHealthTimeout); err != nil {
+		s.store.Fail(runID, "harness never became healthy: "+err.Error())
+		return
+	}
+
+	// 4. seeding — push the fresh haystack to the crate's /seed.
+	s.store.SetStage(runID, store.StatusSeeding, 0, total)
+	if len(seedReq.Pairs) > 0 {
+		if _, err := runner.Seed(ctx, harnessURL, seedReq); err != nil {
+			s.store.Fail(runID, "seeding haystack failed: "+err.Error())
+			return
+		}
+	}
+
+	// 5. running — execute + score each case, appending partials for the UI.
+	s.store.SetStage(runID, store.StatusRunning, 0, total)
+	tools := catalog.Catalog()
+	scorerModel := llm.ScorerModel()
+	perCase := make([]protocol.CaseScore, 0, total)
+
+	for _, c := range toolCases {
+		resp, runErr := runner.RunCase(ctx, harnessURL, c.ID, c.Prompt, tools)
+		cs := scorer.ScoreToolCase(c, resp, runErr == nil)
+		quality := scorer.JudgeToolQuality(ctx, llmClient, scorerModel, c.Prompt, cs.Called, c.ExpectedBehavior, resp.FinalText)
+		cs = scorer.ComposeTool(cs, quality)
+		perCase = append(perCase, cs)
+		s.store.AppendPartial(runID, cs)
+	}
+
+	for _, mc := range memCases {
+		resp, _ := runner.RunCase(ctx, harnessURL, mc.ID, mc.Question, tools)
+		correct := scorer.JudgeMemory(ctx, llmClient, scorerModel, mc.Question, mc.ExpectedAnswer, resp.FinalText, mc.QuestionType)
+		cs := scorer.ScoreMemoryCase(mc, resp, correct)
+		perCase = append(perCase, cs)
+		s.store.AppendPartial(runID, cs)
+	}
+
+	// 6. scoring — aggregate + finish.
+	s.store.SetStage(runID, store.StatusScoring, len(perCase), total)
+	report := scorer.Aggregate(runID, perCase)
+	s.store.Finish(runID, report)
+	log.Printf("run %s done: composite=%.3f tool_mean=%.3f memory_mean=%.3f", runID, report.Composite, report.ToolMean, report.MemoryMean)
 }
 
 // evaluate generates the dataset, runs the harness over it, scores it, and

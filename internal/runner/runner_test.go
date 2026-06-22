@@ -84,3 +84,63 @@ func TestRunHarnessPerCaseFailureIsEmpty(t *testing.T) {
 		t.Fatalf("failed case should be present and empty, got ok=%v %+v", ok, got)
 	}
 }
+
+func TestSeed(t *testing.T) {
+	var got protocol.SeedRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/seed" || r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		json.NewDecoder(r.Body).Decode(&got)
+		json.NewEncoder(w).Encode(protocol.SeedResponse{
+			Pairs:    len(got.Pairs),
+			Subjects: len(got.Subjects),
+			Links:    len(got.Links),
+		})
+	}))
+	defer srv.Close()
+
+	req := protocol.SeedRequest{
+		UserID:   "miner",
+		Pairs:    []protocol.MemoryPair{{PairID: "p1", Prompt: "hi", Response: "yo"}},
+		Subjects: []protocol.Subject{{ID: "s1", SubjectText: "x"}},
+		Links:    []protocol.SubjectLink{{SubjectID: "s1", PairID: "p1"}},
+	}
+	resp, err := Seed(context.Background(), srv.URL, req)
+	if err != nil {
+		t.Fatalf("Seed error: %v", err)
+	}
+	if resp.Pairs != 1 || resp.Subjects != 1 || resp.Links != 1 {
+		t.Fatalf("unexpected seed response: %+v", resp)
+	}
+	if got.UserID != "miner" || len(got.Pairs) != 1 {
+		t.Fatalf("harness received wrong body: %+v", got)
+	}
+}
+
+func TestSeedError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	if _, err := Seed(context.Background(), srv.URL, protocol.SeedRequest{}); err == nil {
+		t.Fatal("expected error for 500 /seed")
+	}
+}
+
+func TestRunCase(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req protocol.RunRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		json.NewEncoder(w).Encode(protocol.RunResponse{FinalText: "answer:" + req.UserInput})
+	}))
+	defer srv.Close()
+	resp, err := RunCase(context.Background(), srv.URL, "m1", "what color?", nil)
+	if err != nil {
+		t.Fatalf("RunCase error: %v", err)
+	}
+	if resp.FinalText != "answer:what color?" {
+		t.Fatalf("unexpected: %q", resp.FinalText)
+	}
+}
