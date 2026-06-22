@@ -1,36 +1,46 @@
 package gen
 
 import (
+	"embed"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 )
 
-// Env var names + defaults for the LongMemEval seed assets.
+// Env var names for overriding the LongMemEval seed assets with on-disk copies.
+// When unset, the validator uses the embedded slim bundle (see seeddata/), so a
+// hosted deploy needs no external files — this is what makes the cloud practice
+// API self-contained.
 const (
 	EnvSeedDir = "DITTOBENCH_SEED_DIR"
 	EnvOracle  = "DITTOBENCH_ORACLE"
-
-	defaultSeedDir = "/Users/omarbarazanji/omar-workspace/ditto-backend-ops-log/longmemeval"
-	defaultOracle  = "/Users/omarbarazanji/omar-workspace/ditto-backend-ops-log/dittobench-testdata/longmemeval/longmemeval_oracle.json"
 )
 
-// SeedDir returns the seed-asset directory (env DITTOBENCH_SEED_DIR or default).
-func SeedDir() string {
-	if d := os.Getenv(EnvSeedDir); d != "" {
-		return d
-	}
-	return defaultSeedDir
-}
+// embeddedSeeds is the slim, text-only LongMemEval bundle (embeddings stripped):
+// conversation pairs, subjects, the subject↔pair graph, the manifest, and the
+// ~500-question oracle. ~18MB, baked into the binary so the service is portable.
+//
+//go:embed seeddata
+var embeddedSeeds embed.FS
 
-// OraclePath returns the oracle file path (env DITTOBENCH_ORACLE or default).
-func OraclePath() string {
-	if p := os.Getenv(EnvOracle); p != "" {
-		return p
-	}
-	return defaultOracle
-}
+const embeddedRoot = "seeddata"
+
+// SeedDir returns the on-disk seed-asset dir from env DITTOBENCH_SEED_DIR, or ""
+// to use the embedded bundle.
+func SeedDir() string { return os.Getenv(EnvSeedDir) }
+
+// OraclePath returns the on-disk oracle path from env DITTOBENCH_ORACLE, or ""
+// to use the embedded bundle.
+func OraclePath() string { return os.Getenv(EnvOracle) }
+
+// assetCache memoizes parsed seed bundles keyed by source so the ~18MB embedded
+// (or larger on-disk) corpus is parsed once, not per submission.
+var (
+	assetMu    sync.Mutex
+	assetCache = map[string]*seedAssets{}
+)
 
 // --- on-disk shapes (embeddings intentionally ignored) ---
 
@@ -81,34 +91,49 @@ type seedAssets struct {
 	oracleOrder  []string // stable order of oracle question_ids
 }
 
-// loadSeedAssets reads + parses the seed dir + oracle. Returns a clear error if
-// any file is missing (so generation errors instead of crashing).
+// loadSeedAssets reads + parses the seed corpus. When seedDir/oraclePath are
+// empty it reads the embedded bundle (the hosted default); when set it reads
+// the on-disk copies (local dev with the full assets). Results are cached per
+// source. Returns a clear error if an on-disk file is missing (so generation
+// errors instead of crashing).
 func loadSeedAssets(seedDir, oraclePath string) (*seedAssets, error) {
-	if fi, err := os.Stat(seedDir); err != nil || !fi.IsDir() {
-		return nil, fmt.Errorf("seed dir %q not found (set %s)", seedDir, EnvSeedDir)
+	cacheKey := seedDir + "|" + oraclePath
+	assetMu.Lock()
+	defer assetMu.Unlock()
+	if a, ok := assetCache[cacheKey]; ok {
+		return a, nil
 	}
-	if _, err := os.Stat(oraclePath); err != nil {
-		return nil, fmt.Errorf("oracle %q not found (set %s)", oraclePath, EnvOracle)
+
+	// On-disk overrides are validated up front for a clear error message.
+	if seedDir != "" {
+		if fi, err := os.Stat(seedDir); err != nil || !fi.IsDir() {
+			return nil, fmt.Errorf("seed dir %q not found (set %s)", seedDir, EnvSeedDir)
+		}
+	}
+	if oraclePath != "" {
+		if _, err := os.Stat(oraclePath); err != nil {
+			return nil, fmt.Errorf("oracle %q not found (set %s)", oraclePath, EnvOracle)
+		}
 	}
 
 	var pairs []seedPair
-	if err := readJSON(filepath.Join(seedDir, "seed_pairs.json"), &pairs); err != nil {
+	if err := readAsset(seedDir, "seed_pairs.json", &pairs); err != nil {
 		return nil, err
 	}
 	var subjects []seedSubject
-	if err := readJSON(filepath.Join(seedDir, "seed_subjects.json"), &subjects); err != nil {
+	if err := readAsset(seedDir, "seed_subjects.json", &subjects); err != nil {
 		return nil, err
 	}
 	var links []seedLink
-	if err := readJSON(filepath.Join(seedDir, "seed_subject_links.json"), &links); err != nil {
+	if err := readAsset(seedDir, "seed_subject_links.json", &links); err != nil {
 		return nil, err
 	}
 	var manifest seedManifest
-	if err := readJSON(filepath.Join(seedDir, "seed_manifest.json"), &manifest); err != nil {
+	if err := readAsset(seedDir, "seed_manifest.json", &manifest); err != nil {
 		return nil, err
 	}
 	var oracle []oracleQuestion
-	if err := readJSON(oraclePath, &oracle); err != nil {
+	if err := readOracle(oraclePath, &oracle); err != nil {
 		return nil, err
 	}
 
@@ -138,18 +163,47 @@ func loadSeedAssets(seedDir, oraclePath string) (*seedAssets, error) {
 		a.oracle[q.QuestionID] = q
 	}
 	if len(a.oracleOrder) == 0 {
-		return nil, fmt.Errorf("oracle %q has no questions", oraclePath)
+		return nil, fmt.Errorf("oracle has no questions")
 	}
+	assetCache[cacheKey] = a
 	return a, nil
 }
 
-func readJSON(path string, v any) error {
+// readAsset reads one seed-dir file from disk (seedDir set) or the embedded
+// bundle (seedDir empty) and unmarshals it.
+func readAsset(seedDir, name string, v any) error {
+	if seedDir != "" {
+		return readJSONFile(filepath.Join(seedDir, name), v)
+	}
+	return readJSONEmbedded(name, v)
+}
+
+// readOracle reads the oracle from disk (oraclePath set) or the embedded bundle.
+func readOracle(oraclePath string, v any) error {
+	if oraclePath != "" {
+		return readJSONFile(oraclePath, v)
+	}
+	return readJSONEmbedded("longmemeval_oracle.json", v)
+}
+
+func readJSONFile(path string, v any) error {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("read %s: %w", filepath.Base(path), err)
 	}
 	if err := json.Unmarshal(b, v); err != nil {
 		return fmt.Errorf("parse %s: %w", filepath.Base(path), err)
+	}
+	return nil
+}
+
+func readJSONEmbedded(name string, v any) error {
+	b, err := embeddedSeeds.ReadFile(embeddedRoot + "/" + name)
+	if err != nil {
+		return fmt.Errorf("read embedded %s: %w", name, err)
+	}
+	if err := json.Unmarshal(b, v); err != nil {
+		return fmt.Errorf("parse embedded %s: %w", name, err)
 	}
 	return nil
 }

@@ -2,7 +2,6 @@ package gen
 
 import (
 	"context"
-	"os"
 	"strings"
 	"testing"
 )
@@ -119,19 +118,12 @@ func TestSanitizeParaphrase(t *testing.T) {
 	}
 }
 
-// TestGenerateMemory exercises the real seed assets when present; otherwise it
-// asserts a CLEAR error (no crash) and skips the rest.
+// TestGenerateMemory exercises the embedded seed bundle (always present, so the
+// test is hermetic — no dependency on local on-disk assets).
 func TestGenerateMemory(t *testing.T) {
-	seedDir, oracle := SeedDir(), OraclePath()
-	if _, err := os.Stat(seedDir); err != nil {
-		t.Skipf("seed dir %q absent; skipping (env %s)", seedDir, EnvSeedDir)
-	}
-	if _, err := os.Stat(oracle); err != nil {
-		t.Skipf("oracle %q absent; skipping (env %s)", oracle, EnvOracle)
-	}
-
+	// Empty seedDir/oracle => embedded bundle.
 	r := NewRNG(12345)
-	seedReq, cases, err := GenerateMemory(context.Background(), r, 5, 20, 0, nil, "m", seedDir, oracle)
+	seedReq, cases, err := GenerateMemory(context.Background(), r, 5, 20, 0, nil, "m", "", "")
 	if err != nil {
 		t.Fatalf("GenerateMemory: %v", err)
 	}

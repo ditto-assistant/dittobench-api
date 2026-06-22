@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -43,6 +44,14 @@ type server struct {
 func main() {
 	port := flag.Int("port", 8000, "HTTP listen port (ditto-subnet API convention)")
 	flag.Parse()
+
+	// Cloud Run (and most PaaS) inject the listen port via $PORT; honor it over
+	// the flag default so the same binary runs locally and hosted.
+	if p := os.Getenv("PORT"); p != "" {
+		if v, err := strconv.Atoi(p); err == nil {
+			*port = v
+		}
+	}
 
 	s := &server{
 		store:   store.New(),
@@ -131,6 +140,26 @@ type submitRequest struct {
 	RunSize string `json:"run_size,omitempty"`
 	// Seed pins the dataset seed (0 = fresh crypto-random per submission).
 	Seed int64 `json:"seed,omitempty"`
+	// OpenRouterKey is the miner's BYOK OpenRouter key, used for the generator
+	// (paraphrase) + judge (scoring). The hosted practice API requires it per
+	// request (it stores no keys); locally it falls back to the server env.
+	// May also be supplied via the Authorization: Bearer header.
+	OpenRouterKey string `json:"openrouter_key,omitempty"`
+}
+
+// resolveOpenRouterKey returns the OpenRouter key for a submission, preferring
+// (1) the request body, (2) an Authorization: Bearer header, (3) the server's
+// OPENROUTER_API_KEY env (local/internal fallback). The key is never logged.
+func resolveOpenRouterKey(r *http.Request, req submitRequest) string {
+	if k := strings.TrimSpace(req.OpenRouterKey); k != "" {
+		return k
+	}
+	if h := strings.TrimSpace(r.Header.Get("Authorization")); h != "" {
+		if rest, ok := strings.CutPrefix(h, "Bearer "); ok {
+			return strings.TrimSpace(rest)
+		}
+	}
+	return strings.TrimSpace(os.Getenv(llm.EnvAPIKey))
 }
 
 // submitResponse is returned by the direct (synchronous) path.
@@ -298,21 +327,26 @@ func (s *server) submitRunSize(w http.ResponseWriter, r *http.Request, req submi
 	// already-running harness, so it does not require Docker.
 	if req.GitURL != "" {
 		if s.sandbox == nil {
-			writeError(w, http.StatusNotImplemented, "sandbox mode not enabled on this server")
+			writeError(w, http.StatusNotImplemented, "git_url (Docker build) is not available on this server; submit a reachable harness_url instead")
 			return
 		}
 		if err := s.sandbox.Available(r.Context()); err != nil {
-			writeError(w, http.StatusServiceUnavailable, "sandbox backend unavailable: "+err.Error())
+			// The hosted practice API has no Docker daemon — the on-chain
+			// validator owns crate builds. Miners practice by exposing a
+			// reachable harness and submitting harness_url.
+			writeError(w, http.StatusServiceUnavailable, "git_url (Docker build) is unavailable here ("+err.Error()+"); submit a reachable harness_url to practice")
 			return
 		}
 	}
 	// An OpenRouter key is REQUIRED for run_size: the validator uses it for the
-	// generator (paraphrase) + judge, and forwards it to the crate's agent.
-	llmClient, err := llm.New()
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+	// generator (paraphrase) + judge, and (Docker path) forwards it to the
+	// crate's agent. BYOK — from the request body, Bearer header, or env.
+	apiKey := resolveOpenRouterKey(r, req)
+	if apiKey == "" {
+		writeError(w, http.StatusBadRequest, "an OpenRouter key is required for run_size submissions (send \"openrouter_key\" in the body or an Authorization: Bearer header)")
 		return
 	}
+	llmClient := llm.NewWithKey(apiKey)
 
 	seed := req.Seed
 	if seed == 0 {
@@ -324,7 +358,7 @@ func (s *server) submitRunSize(w http.ResponseWriter, r *http.Request, req submi
 	log.Printf("run %s: run_size=%s seed=%d tools=%d mem=%d distractors=%d paraphrase=%.2f",
 		runID, req.RunSize, seed, prof.Tools, prof.Mem, prof.Distractors, prof.ParaphraseFrac)
 
-	go s.runSizeJob(context.Background(), runID, req, prof, seed, llmClient)
+	go s.runSizeJob(context.Background(), runID, req, prof, seed, llmClient, apiKey)
 
 	writeJSON(w, http.StatusAccepted, acceptedResponse{
 		RunID:  runID,
@@ -335,7 +369,7 @@ func (s *server) submitRunSize(w http.ResponseWriter, r *http.Request, req submi
 
 // runSizeJob is the full SN118 pipeline: building → generating → seeding →
 // running (per-case judge, appending partials) → scoring → done.
-func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest, prof gen.Profile, seed int64, llmClient *llm.Client) {
+func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest, prof gen.Profile, seed int64, llmClient *llm.Client, apiKey string) {
 	defer func() {
 		if rec := recover(); rec != nil {
 			s.store.Fail(runID, "internal panic during run_size job")
@@ -378,7 +412,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	harnessURL := req.HarnessURL
 	if image != "" {
 		env := map[string]string{
-			"OPENROUTER_API_KEY":  os.Getenv(llm.EnvAPIKey),
+			"OPENROUTER_API_KEY":  apiKey,
 			"DITTOBENCH_PROVIDER": "openrouter",
 			"OLLAMA_BASE_URL":     "http://host.docker.internal:11434",
 		}
