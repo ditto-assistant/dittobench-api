@@ -155,9 +155,15 @@ func (s *server) handleDataset(w http.ResponseWriter, r *http.Request) {
 // env is forwarded to the sandbox container (e.g. OPENROUTER_API_KEY and any
 // model override the miner's harness reads). It is ignored in direct mode.
 type submitRequest struct {
-	HarnessURL string            `json:"harness_url,omitempty"`
-	GitURL     string            `json:"git_url,omitempty"`
-	GitRef     string            `json:"git_ref,omitempty"`
+	HarnessURL string `json:"harness_url,omitempty"`
+	GitURL     string `json:"git_url,omitempty"`
+	GitRef     string `json:"git_ref,omitempty"`
+	// TarballURL is a presigned https URL of a gzipped tar of the harness. The
+	// SN118 platform stores miner uploads as tarballs, so the validator hands us
+	// the platform's short-lived download URL instead of a git repo. Mutually
+	// exclusive with harness_url / git_url; built in the Docker sandbox like
+	// git_url. (mode B — platform-tarball ingest.)
+	TarballURL string            `json:"tarball_url,omitempty"`
 	Env        map[string]string `json:"env,omitempty"`
 	N          int               `json:"n"`
 	// RunSize selects the full SN118 pipeline (build → generate fresh anti-cheat
@@ -186,6 +192,17 @@ func resolveOpenRouterKey(r *http.Request, req submitRequest) string {
 		}
 	}
 	return strings.TrimSpace(os.Getenv(llm.EnvAPIKey))
+}
+
+// sourceFromReq builds the sandbox Source for a build submission. git_url and
+// tarball_url are mutually exclusive (enforced in handleSubmit); GitRef applies
+// only to the git path.
+func sourceFromReq(req submitRequest) sandbox.Source {
+	return sandbox.Source{
+		GitURL:     req.GitURL,
+		GitRef:     req.GitRef,
+		TarballURL: req.TarballURL,
+	}
 }
 
 // submitResponse is returned by the direct (synchronous) path.
@@ -220,26 +237,41 @@ func (s *server) handleSubmit(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid or oversized JSON body")
 		return
 	}
-	if req.HarnessURL == "" && req.GitURL == "" {
-		writeError(w, http.StatusBadRequest, "either harness_url (direct) or git_url (sandbox/run_size) is required")
+	// Exactly one submission source: a running harness (direct), a git repo, or
+	// a presigned platform tarball (mode B). git_url + tarball_url both build in
+	// the Docker sandbox.
+	sources := 0
+	for _, set := range []bool{req.HarnessURL != "", req.GitURL != "", req.TarballURL != ""} {
+		if set {
+			sources++
+		}
+	}
+	if sources == 0 {
+		writeError(w, http.StatusBadRequest, "one of harness_url (direct), git_url, or tarball_url (sandbox/run_size) is required")
 		return
 	}
-	if req.HarnessURL != "" && req.GitURL != "" {
-		writeError(w, http.StatusBadRequest, "provide only one of harness_url or git_url")
+	if sources > 1 {
+		writeError(w, http.StatusBadRequest, "provide only one of harness_url, git_url, or tarball_url")
 		return
 	}
 
-	// SSRF guard: a caller-supplied harness_url must be a public http(s) endpoint
-	// (relaxed for local dev / sandbox via DITTOBENCH_ALLOW_PRIVATE_HARNESS).
+	// SSRF guard: a caller-supplied harness_url / tarball_url must be a public
+	// http(s) endpoint (relaxed for local dev via DITTOBENCH_ALLOW_PRIVATE_HARNESS).
 	if req.HarnessURL != "" {
 		if err := netguard.ValidateURL(req.HarnessURL, s.allowPrivate); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 	}
+	if req.TarballURL != "" {
+		if err := netguard.ValidateURL(req.TarballURL, s.allowPrivate); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
 
-	// run_size selects the full SN118 pipeline (git + fresh anti-cheat dataset +
-	// memory seeding + LLM judge). Requires a git submission and an OpenRouter key.
+	// run_size selects the full SN118 pipeline (build + fresh anti-cheat dataset +
+	// memory seeding + LLM judge). Requires a buildable/runnable source + key.
 	if req.RunSize != "" {
 		s.submitRunSize(w, r, req)
 		return
@@ -249,7 +281,7 @@ func (s *server) handleSubmit(w http.ResponseWriter, r *http.Request) {
 	if n <= 0 {
 		n = defaultN
 	}
-	if req.GitURL != "" {
+	if req.GitURL != "" || req.TarballURL != "" {
 		s.submitSandbox(w, r, req, n)
 		return
 	}
@@ -326,7 +358,7 @@ func (s *server) runSandboxJob(ctx context.Context, runID string, req submitRequ
 	}()
 
 	s.store.SetStatus(runID, store.StatusBuilding)
-	image, buildLog, err := s.sandbox.Build(ctx, sandbox.Source{GitURL: req.GitURL, GitRef: req.GitRef})
+	image, buildLog, err := s.sandbox.Build(ctx, sourceFromReq(req))
 	if err != nil {
 		s.store.Fail(runID, "build failed: "+err.Error())
 		log.Printf("sandbox job %s build failed: %v\n%s", runID, err, buildLog)
@@ -355,8 +387,8 @@ func (s *server) runSandboxJob(ctx context.Context, runID string, req submitRequ
 // submitRunSize validates a run_size submission, requires an OpenRouter key,
 // and kicks off the full SN118 pipeline asynchronously (returns 202 + run_id).
 func (s *server) submitRunSize(w http.ResponseWriter, r *http.Request, req submitRequest) {
-	if req.GitURL == "" && req.HarnessURL == "" {
-		writeError(w, http.StatusBadRequest, "run_size requires git_url (build the crate in Docker) or harness_url (point at an already-running harness, for local dev)")
+	if req.GitURL == "" && req.HarnessURL == "" && req.TarballURL == "" {
+		writeError(w, http.StatusBadRequest, "run_size requires git_url / tarball_url (build in Docker) or harness_url (point at an already-running harness, for local dev)")
 		return
 	}
 	prof, ok := gen.ProfileFor(req.RunSize)
@@ -367,7 +399,7 @@ func (s *server) submitRunSize(w http.ResponseWriter, r *http.Request, req submi
 	// Sandbox is only needed when we build the crate ourselves. The local
 	// harness_url path runs the full generate→seed→run→score pipeline against an
 	// already-running harness, so it does not require Docker.
-	if req.GitURL != "" {
+	if req.GitURL != "" || req.TarballURL != "" {
 		if s.sandbox == nil {
 			writeError(w, http.StatusNotImplemented, "git_url (Docker build) is not available on this server; submit a reachable harness_url instead")
 			return
@@ -433,9 +465,9 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	// 1. building — build the crate in the Docker sandbox. Skipped on the local
 	//    harness_url path (the miner is already running their harness).
 	var image string
-	if req.GitURL != "" {
+	if req.GitURL != "" || req.TarballURL != "" {
 		s.store.SetStage(runID, store.StatusBuilding, 0, total)
-		img, buildLog, err := s.sandbox.Build(ctx, sandbox.Source{GitURL: req.GitURL, GitRef: req.GitRef})
+		img, buildLog, err := s.sandbox.Build(ctx, sourceFromReq(req))
 		if err != nil {
 			s.store.Fail(runID, "build failed: "+err.Error())
 			log.Printf("run %s build failed: %v\n%s", runID, err, buildLog)
