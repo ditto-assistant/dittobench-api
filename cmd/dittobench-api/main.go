@@ -208,8 +208,10 @@ type acceptedResponse struct {
 }
 
 func (s *server) handleSubmit(w http.ResponseWriter, r *http.Request) {
-	// Abuse guard: per-IP rate limit on the expensive submit endpoint.
-	if !s.limiter.Allow(clientIP(r)) {
+	// Abuse guard: per-IP rate limit on the expensive submit endpoint. Skipped
+	// in local/dev mode (DITTOBENCH_ALLOW_PRIVATE_HARNESS), where a calibration
+	// loop legitimately submits in bulk from a single IP.
+	if !s.allowPrivate && !s.limiter.Allow(clientIP(r)) {
 		writeError(w, http.StatusTooManyRequests, "rate limit exceeded; slow down and retry shortly")
 		return
 	}
