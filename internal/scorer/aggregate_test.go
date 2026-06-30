@@ -69,6 +69,30 @@ func TestAggregate(t *testing.T) {
 	}
 }
 
+func TestAggregateCompositeWeighting(t *testing.T) {
+	// tool_mean=1.0, memory_mean=0.0 → 0.6*1.0 + 0.4*0.0 = 0.6 (NOT the old
+	// equal-per-case 0.5), pinning the canonical 0.6/0.4 weighting.
+	r := Aggregate("run", []protocol.CaseScore{
+		{CaseID: "t1", Category: "web_search", Kind: protocol.KindTool, Score: 1.0},
+		{CaseID: "m1", Category: "multi-session", Kind: protocol.KindMemory, Score: 0.0},
+	})
+	if r.ToolMean != 1.0 || r.MemoryMean != 0.0 {
+		t.Fatalf("means: tool=%v mem=%v", r.ToolMean, r.MemoryMean)
+	}
+	if r.Composite != 0.6 {
+		t.Fatalf("composite expected 0.6 (0.6*1 + 0.4*0), got %v", r.Composite)
+	}
+}
+
+func TestAggregateMemoryOnly(t *testing.T) {
+	r := Aggregate("run", []protocol.CaseScore{
+		{Kind: protocol.KindMemory, Score: 1.0, Category: "x"},
+	})
+	if r.ToolMean != 0 || r.MemoryMean != 1.0 || r.Composite != 1.0 {
+		t.Fatalf("memory-only: tool=%v mem=%v comp=%v", r.ToolMean, r.MemoryMean, r.Composite)
+	}
+}
+
 func TestAggregateToolOnly(t *testing.T) {
 	r := Aggregate("run", []protocol.CaseScore{
 		{Kind: protocol.KindTool, Score: 1.0, Category: "x"},

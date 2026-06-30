@@ -86,6 +86,7 @@ func ScoreMemoryCase(mc protocol.MemoryCase, resp protocol.RunResponse, correct 
 		Correct:   correct,
 		LatencyMs: resp.LatencyMs,
 		Called:    calledNames(resp.ToolCalls),
+		Expected:  []string{}, // non-nil so the JSON is [] not null (memory has no expected tools)
 	}
 	if mc.QuestionType == "" {
 		cs.Category = "memory"
@@ -93,9 +94,9 @@ func ScoreMemoryCase(mc protocol.MemoryCase, resp protocol.RunResponse, correct 
 	return cs
 }
 
-// Aggregate folds per-case scores into a ScoreReport. The composite weights tool
-// and memory means by their case counts (the published DittoBench composite is
-// the mean over all cases); per-category breakdown and median latency included.
+// Aggregate folds per-case scores into a ScoreReport. The composite is the
+// canonical 0.6*tool_mean + 0.4*memory_mean (see below); per-category breakdown
+// and median latency included.
 func Aggregate(runID string, perCase []protocol.CaseScore) protocol.ScoreReport {
 	var toolSum, toolN, memSum, memN float64
 	latencies := make([]int64, 0, len(perCase))
@@ -128,9 +129,17 @@ func Aggregate(runID string, perCase []protocol.CaseScore) protocol.ScoreReport 
 	if memN > 0 {
 		memMean = memSum / memN
 	}
+	// Canonical DittoBench composite (matches the platform's recorded formula):
+	// 0.6*tool_mean + 0.4*memory_mean when both kinds are present; falls back to
+	// the single present mean for tool-only or memory-only runs.
 	composite := 0.0
-	if n := toolN + memN; n > 0 {
-		composite = (toolSum + memSum) / n
+	switch {
+	case toolN > 0 && memN > 0:
+		composite = 0.6*toolMean + 0.4*memMean
+	case toolN > 0:
+		composite = toolMean
+	case memN > 0:
+		composite = memMean
 	}
 
 	perCat := make([]protocol.CategoryStat, 0, len(catOrder))
