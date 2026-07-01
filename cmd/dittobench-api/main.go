@@ -163,9 +163,13 @@ type submitRequest struct {
 	// the platform's short-lived download URL instead of a git repo. Mutually
 	// exclusive with harness_url / git_url; built in the Docker sandbox like
 	// git_url. (mode B — platform-tarball ingest.)
-	TarballURL string            `json:"tarball_url,omitempty"`
-	Env        map[string]string `json:"env,omitempty"`
-	N          int               `json:"n"`
+	TarballURL string `json:"tarball_url,omitempty"`
+	// TarballSHA256 optionally pins the tarball's SHA-256 (hex). When present the
+	// sandbox re-verifies the fetched bytes — the platform already checks it at
+	// upload, so this is defense in depth against a swapped/corrupted blob.
+	TarballSHA256 string            `json:"tarball_sha256,omitempty"`
+	Env           map[string]string `json:"env,omitempty"`
+	N             int               `json:"n"`
 	// RunSize selects the full SN118 pipeline (build → generate fresh anti-cheat
 	// dataset → seed haystack → run tool+memory cases → judge → score). One of
 	// "small" | "medium" | "full". When set, this path takes precedence.
@@ -199,9 +203,10 @@ func resolveOpenRouterKey(r *http.Request, req submitRequest) string {
 // only to the git path.
 func sourceFromReq(req submitRequest) sandbox.Source {
 	return sandbox.Source{
-		GitURL:     req.GitURL,
-		GitRef:     req.GitRef,
-		TarballURL: req.TarballURL,
+		GitURL:        req.GitURL,
+		GitRef:        req.GitRef,
+		TarballURL:    req.TarballURL,
+		TarballSHA256: req.TarballSHA256,
 	}
 }
 

@@ -22,20 +22,11 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"strings"
 	"time"
-
-	"github.com/ditto-assistant/dittobench-api/internal/netguard"
 )
-
-// maxTarballBytes caps a downloaded submission tarball. Matches the platform's
-// upload cap (2 MiB) with headroom; defends against a hostile presigned URL
-// streaming an unbounded body into the build host.
-const maxTarballBytes = 8 << 20 // 8 MiB
 
 // Sandbox builds a submission into a runnable image and runs it as an
 // addressable harness serving the /run + /health contract.
@@ -59,7 +50,11 @@ type Sandbox interface {
 type Source struct {
 	GitURL     string // e.g. https://github.com/<miner>/<harness>
 	GitRef     string // branch, tag, or commit (default: default branch)
-	TarballURL string // presigned https URL of a gzipped tar whose root is the build context
+	TarballURL string // presigned https URL of a gzipped tar of the harness
+	// TarballSHA256, when non-empty, is verified (hex) against the fetched bytes.
+	// The platform already checks it at upload; re-verifying makes the sandbox
+	// self-defending against a corrupted or swapped blob behind the URL.
+	TarballSHA256 string
 }
 
 // Handle references a running harness container.
@@ -143,10 +138,15 @@ func (d *LocalDocker) Build(ctx context.Context, src Source) (string, string, er
 	}
 	defer os.RemoveAll(workdir)
 
+	// The docker build context: the git-clone root, or — for a tarball — the
+	// extraction root or the lone top-level directory that holds the Dockerfile.
+	contextDir := workdir
 	if src.TarballURL != "" {
-		if err := d.fetchTarball(ctx, src.TarballURL, workdir); err != nil {
+		cdir, err := d.fetchTarball(ctx, src, workdir)
+		if err != nil {
 			return "", "", err
 		}
+		contextDir = cdir
 	} else {
 		cloneURL, err := d.authedCloneURL(src.GitURL)
 		if err != nil {
@@ -169,7 +169,7 @@ func (d *LocalDocker) Build(ctx context.Context, src Source) (string, string, er
 	if d.GitHubTokenFile != "" {
 		args = append(args, "--secret", "id=gh_token,src="+d.GitHubTokenFile)
 	}
-	args = append(args, workdir)
+	args = append(args, contextDir)
 
 	cmd := exec.CommandContext(ctx, "docker", args...)
 	cmd.Env = append(os.Environ(), "DOCKER_BUILDKIT=1")
@@ -180,48 +180,6 @@ func (d *LocalDocker) Build(ctx context.Context, src Source) (string, string, er
 		return "", tail(buf.String(), 4000), fmt.Errorf("docker build failed: %w", err)
 	}
 	return image, tail(buf.String(), 2000), nil
-}
-
-// fetchTarball downloads a presigned gzipped-tar submission and extracts it
-// into workdir so the Dockerfile at the tarball root becomes the build context
-// (same shape `git clone` produces). The URL is fetched through the
-// SSRF-guarded client — re-checked at dial against DNS rebinding — and was
-// already validated at the /v1/submit boundary. The body is size-capped.
-//
-// ASSUMPTION (confirm with the platform upload contract): the tarball root
-// holds the Dockerfile, so no --strip-components is applied. If the platform
-// packs under a top-level dir, add `--strip-components=1` here.
-func (d *LocalDocker) fetchTarball(ctx context.Context, tarballURL, workdir string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, tarballURL, nil)
-	if err != nil {
-		return fmt.Errorf("tarball request: %w", err)
-	}
-	resp, err := netguard.Client(d.AllowPrivate).Do(req)
-	if err != nil {
-		return fmt.Errorf("tarball fetch: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("tarball fetch: unexpected status %d", resp.StatusCode)
-	}
-
-	tmp, err := os.CreateTemp("", "dittobench-tar-*.tgz")
-	if err != nil {
-		return fmt.Errorf("tarball tempfile: %w", err)
-	}
-	defer os.Remove(tmp.Name())
-	if _, err := io.Copy(tmp, io.LimitReader(resp.Body, maxTarballBytes)); err != nil {
-		tmp.Close()
-		return fmt.Errorf("tarball write: %w", err)
-	}
-	tmp.Close()
-
-	// Extract with the system tar, consistent with the docker/git CLI approach.
-	out, err := exec.CommandContext(ctx, "tar", "-xzf", tmp.Name(), "-C", workdir).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("tar extract failed: %s: %w", strings.TrimSpace(string(out)), err)
-	}
-	return nil
 }
 
 // authedCloneURL injects the gh token into an https github URL so private
@@ -330,8 +288,19 @@ func safeTag(src Source) string {
 		base = base[i+1:]
 	}
 	base = strings.TrimSuffix(base, ".git")
-	if src.GitRef != "" {
+	base = strings.TrimSuffix(base, ".tar.gz")
+	base = strings.TrimSuffix(base, ".tgz")
+	switch {
+	case src.GitRef != "":
 		base += "-" + src.GitRef
+	case src.TarballSHA256 != "":
+		// Pin the tag to the content hash so re-runs of the same blob reuse the
+		// build cache and distinct blobs never collide on a tag.
+		if len(src.TarballSHA256) >= 12 {
+			base += "-" + src.TarballSHA256[:12]
+		} else {
+			base += "-" + src.TarballSHA256
+		}
 	}
 	var b strings.Builder
 	for _, r := range strings.ToLower(base) {
