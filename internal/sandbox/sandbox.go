@@ -43,10 +43,18 @@ type Sandbox interface {
 	Stop(ctx context.Context, h *Handle)
 }
 
-// Source identifies a submission to build.
+// Source identifies a submission to build. Exactly one of GitURL or TarballURL
+// is set: GitURL clones a repo; TarballURL fetches a presigned gzipped-tar of
+// the harness (the SN118 platform stores miner uploads as tarballs, so the
+// validator hands us the platform's short-lived download URL).
 type Source struct {
-	GitURL string // e.g. https://github.com/<miner>/<harness>
-	GitRef string // branch, tag, or commit (default: default branch)
+	GitURL     string // e.g. https://github.com/<miner>/<harness>
+	GitRef     string // branch, tag, or commit (default: default branch)
+	TarballURL string // presigned https URL of a gzipped tar of the harness
+	// TarballSHA256, when non-empty, is verified (hex) against the fetched bytes.
+	// The platform already checks it at upload; re-verifying makes the sandbox
+	// self-defending against a corrupted or swapped blob behind the URL.
+	TarballSHA256 string
 }
 
 // Handle references a running harness container.
@@ -71,6 +79,9 @@ type LocalDocker struct {
 	// over HTTPS. No-op once that repo is public. Defaults from the
 	// GITHUB_TOKEN_FILE env var.
 	GitHubTokenFile string
+	// AllowPrivate relaxes the SSRF guard on TarballURL fetches (local dev only,
+	// e.g. a minio/localhost presigned URL). Mirrors the submit-handler flag.
+	AllowPrivate bool
 }
 
 // NewLocalDocker returns a LocalDocker with sensible defaults.
@@ -81,6 +92,17 @@ func NewLocalDocker() *LocalDocker {
 		CPULimit:        "2",
 		BuildTimeout:    25 * time.Minute,
 		GitHubTokenFile: os.Getenv("GITHUB_TOKEN_FILE"),
+		AllowPrivate:    envBool("DITTOBENCH_ALLOW_PRIVATE_HARNESS"),
+	}
+}
+
+// envBool reports whether an env var is set to a truthy value.
+func envBool(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -102,31 +124,43 @@ func (d *LocalDocker) Available(ctx context.Context) error {
 // gh_token BuildKit secret then lets the in-image cargo build fetch the private
 // ditto-harness crate over HTTPS.
 func (d *LocalDocker) Build(ctx context.Context, src Source) (string, string, error) {
-	if src.GitURL == "" {
-		return "", "", fmt.Errorf("sandbox: git_url is required")
+	if src.GitURL == "" && src.TarballURL == "" {
+		return "", "", fmt.Errorf("sandbox: one of git_url or tarball_url is required")
 	}
 	ctx, cancel := context.WithTimeout(ctx, d.BuildTimeout)
 	defer cancel()
 
-	// 1. Clone the submission into a throwaway working tree.
+	// 1. Materialize the submission into a throwaway working tree, either by
+	//    cloning a git repo or by extracting a presigned tarball.
 	workdir, err := os.MkdirTemp("", "dittobench-sub-")
 	if err != nil {
 		return "", "", fmt.Errorf("mktemp: %w", err)
 	}
 	defer os.RemoveAll(workdir)
 
-	cloneURL, err := d.authedCloneURL(src.GitURL)
-	if err != nil {
-		return "", "", err
-	}
-	cloneArgs := []string{"clone", "--depth", "1"}
-	if src.GitRef != "" {
-		cloneArgs = append(cloneArgs, "--branch", src.GitRef)
-	}
-	cloneArgs = append(cloneArgs, cloneURL, workdir)
-	if out, err := exec.CommandContext(ctx, "git", cloneArgs...).CombinedOutput(); err != nil {
-		// Redact a token that may appear in the URL within git's error output.
-		return "", "", fmt.Errorf("git clone failed: %s: %w", redact(strings.TrimSpace(string(out))), err)
+	// The docker build context: the git-clone root, or — for a tarball — the
+	// extraction root or the lone top-level directory that holds the Dockerfile.
+	contextDir := workdir
+	if src.TarballURL != "" {
+		cdir, err := d.fetchTarball(ctx, src, workdir)
+		if err != nil {
+			return "", "", err
+		}
+		contextDir = cdir
+	} else {
+		cloneURL, err := d.authedCloneURL(src.GitURL)
+		if err != nil {
+			return "", "", err
+		}
+		cloneArgs := []string{"clone", "--depth", "1"}
+		if src.GitRef != "" {
+			cloneArgs = append(cloneArgs, "--branch", src.GitRef)
+		}
+		cloneArgs = append(cloneArgs, cloneURL, workdir)
+		if out, err := exec.CommandContext(ctx, "git", cloneArgs...).CombinedOutput(); err != nil {
+			// Redact a token that may appear in the URL within git's error output.
+			return "", "", fmt.Errorf("git clone failed: %s: %w", redact(strings.TrimSpace(string(out))), err)
+		}
 	}
 
 	// 2. Build the local context.
@@ -135,7 +169,7 @@ func (d *LocalDocker) Build(ctx context.Context, src Source) (string, string, er
 	if d.GitHubTokenFile != "" {
 		args = append(args, "--secret", "id=gh_token,src="+d.GitHubTokenFile)
 	}
-	args = append(args, workdir)
+	args = append(args, contextDir)
 
 	cmd := exec.CommandContext(ctx, "docker", args...)
 	cmd.Env = append(os.Environ(), "DOCKER_BUILDKIT=1")
@@ -243,12 +277,30 @@ func (d *LocalDocker) Stop(ctx context.Context, h *Handle) {
 // safeTag derives a docker-safe tag from the source ref.
 func safeTag(src Source) string {
 	base := src.GitURL
+	if base == "" {
+		// Tarball submissions: tag off the URL path (minus query/signature).
+		base = src.TarballURL
+		if i := strings.IndexByte(base, '?'); i >= 0 {
+			base = base[:i]
+		}
+	}
 	if i := strings.LastIndex(base, "/"); i >= 0 {
 		base = base[i+1:]
 	}
 	base = strings.TrimSuffix(base, ".git")
-	if src.GitRef != "" {
+	base = strings.TrimSuffix(base, ".tar.gz")
+	base = strings.TrimSuffix(base, ".tgz")
+	switch {
+	case src.GitRef != "":
 		base += "-" + src.GitRef
+	case src.TarballSHA256 != "":
+		// Pin the tag to the content hash so re-runs of the same blob reuse the
+		// build cache and distinct blobs never collide on a tag.
+		if len(src.TarballSHA256) >= 12 {
+			base += "-" + src.TarballSHA256[:12]
+		} else {
+			base += "-" + src.TarballSHA256
+		}
 	}
 	var b strings.Builder
 	for _, r := range strings.ToLower(base) {
