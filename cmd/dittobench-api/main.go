@@ -266,8 +266,9 @@ func (s *server) submitDirect(w http.ResponseWriter, r *http.Request, req submit
 		return
 	}
 
-	// 2. Fresh random dataset — rotating seed prevents overfitting.
-	seed := freshSeed()
+	// 2. Fresh random dataset — rotating seed prevents overfitting (honor a
+	//    pinned "seed" for reproducibility).
+	seed := pinnedOrFreshSeed(req.Seed)
 	runID := uuid.NewString()
 	s.store.Create(runID, "direct", store.StatusRunning, seed, n)
 
@@ -301,7 +302,7 @@ func (s *server) submitSandbox(w http.ResponseWriter, r *http.Request, req submi
 		return
 	}
 
-	seed := freshSeed()
+	seed := pinnedOrFreshSeed(req.Seed)
 	runID := uuid.NewString()
 	s.store.Create(runID, "sandbox", store.StatusQueued, seed, n)
 
@@ -398,10 +399,7 @@ func (s *server) submitRunSize(w http.ResponseWriter, r *http.Request, req submi
 		return
 	}
 
-	seed := req.Seed
-	if seed == 0 {
-		seed = gen.FreshSeed()
-	}
+	seed := pinnedOrFreshSeed(req.Seed)
 	runID := uuid.NewString()
 	s.store.Create(runID, "run_size", store.StatusQueued, seed, prof.Tools+prof.Mem)
 	s.store.SetRunSize(runID, req.RunSize)
@@ -568,6 +566,17 @@ func parseIntDefault(s string, def int) int {
 // wall-clock and a random component so concurrent requests don't collide.
 func freshSeed() int64 {
 	return time.Now().UnixNano() ^ int64(rand.Uint64())
+}
+
+// pinnedOrFreshSeed returns the request's pinned seed when non-zero (so a run is
+// reproducible via {"seed":N}), else a fresh non-negative crypto-random seed.
+// Shared by the direct, sandbox, and run_size submit paths so seed semantics are
+// identical across them.
+func pinnedOrFreshSeed(pinned int64) int64 {
+	if pinned != 0 {
+		return pinned
+	}
+	return gen.FreshSeed()
 }
 
 // envBool reports whether an env var is set to a truthy value.
