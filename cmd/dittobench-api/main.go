@@ -519,6 +519,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	// 6. scoring — aggregate + finish.
 	s.store.SetStage(runID, store.StatusScoring, len(perCase), total)
 	report := scorer.Aggregate(runID, perCase)
+	report.Seed = seed
 	s.store.Finish(runID, report)
 	log.Printf("run %s done: composite=%.3f tool_mean=%.3f memory_mean=%.3f", runID, report.Composite, report.ToolMean, report.MemoryMean)
 }
@@ -536,6 +537,7 @@ func (s *server) evaluate(ctx context.Context, runID, harnessURL string, seed in
 
 	s.store.SetStatus(runID, store.StatusScoring)
 	report := scorer.Score(runID, ds.ToolCases, resps)
+	report.Seed = seed
 	s.store.Finish(runID, report)
 	return report, nil
 }
