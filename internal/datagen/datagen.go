@@ -243,6 +243,33 @@ func Generate(seed int64, n int) protocol.Dataset {
 	}
 }
 
+// stratifiedCategoryOrder returns n category indices with a FIXED per-category
+// quota (each category appears floor(n/C) or ceil(n/C) times), then shuffles the
+// order with the seeded RNG. Fixing the category MIX per run — rather than
+// drawing each case's category uniformly at random — removes the multinomial
+// category-draw variance that dominated dataset-to-dataset difficulty (the
+// per-run score stddev scaled as sqrt(p(1-p)/n)). Every dataset now exercises
+// the same balance of easy categories and routing traps, so a miner can't get a
+// lucky-easy or unlucky-hard draw. Choosing n as a multiple of the category count
+// gives a perfectly balanced set; otherwise the first n%C categories get one
+// extra (deterministic, so it adds no between-run variance).
+func stratifiedCategoryOrder(r *rand.Rand, n int) []int {
+	nc := len(categories)
+	order := make([]int, 0, n)
+	base, rem := n/nc, n%nc
+	for ci := 0; ci < nc; ci++ {
+		count := base
+		if ci < rem {
+			count++
+		}
+		for k := 0; k < count; k++ {
+			order = append(order, ci)
+		}
+	}
+	r.Shuffle(len(order), func(i, j int) { order[i], order[j] = order[j], order[i] })
+	return order
+}
+
 // GenerateCases emits n raw tool cases from an existing RNG. Exported so the
 // anti-cheat generator (internal/gen) can reuse the same templated ground-truth
 // and then LLM-paraphrase the prompts. seed is only used for stable case IDs.
@@ -250,9 +277,10 @@ func GenerateCases(r *rand.Rand, seed int64, n int) []protocol.ToolCase {
 	if n < 1 {
 		n = 1
 	}
+	order := stratifiedCategoryOrder(r, n)
 	cases := make([]protocol.ToolCase, 0, n)
 	for i := 0; i < n; i++ {
-		cat := categories[r.Intn(len(categories))]
+		cat := categories[order[i]]
 		tmpl := cat.templates[r.Intn(len(cat.templates))]
 		filler := fillerFor(r, cat.name)
 		prompt := tmpl

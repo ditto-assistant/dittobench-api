@@ -80,3 +80,28 @@ func TestCoversCategories(t *testing.T) {
 		t.Fatalf("expected variety of categories, only saw %d: %v", len(seen), seen)
 	}
 }
+
+// TestStratifiedBalance pins the stratification invariant: with a fixed mix, the
+// per-category counts of any dataset differ by at most one (floor/ceil of n/C),
+// regardless of seed. This is what removes the multinomial category-draw variance.
+func TestStratifiedBalance(t *testing.T) {
+	for _, seed := range []int64{1, 2, 999, 123456} {
+		ds := Generate(seed, 56) // 56 = 4*14 → perfectly balanced
+		counts := map[string]int{}
+		for _, c := range ds.ToolCases {
+			counts[c.Category]++
+		}
+		lo, hi := 1<<30, 0
+		for _, n := range counts {
+			if n < lo {
+				lo = n
+			}
+			if n > hi {
+				hi = n
+			}
+		}
+		if hi-lo > 1 {
+			t.Fatalf("seed %d: category counts unbalanced (min=%d max=%d): %v", seed, lo, hi, counts)
+		}
+	}
+}
