@@ -232,6 +232,57 @@ func TestFetchTarball_HTTPError(t *testing.T) {
 	}
 }
 
+// TestDrainCounted is the CPU/decompression-DoS guard in isolation: the body of
+// a skipped (non-regular) or directory entry must be charged against the
+// remaining extraction budget so a large-bodied non-regular entry can't force
+// gzip to inflate arbitrary bytes the per-file guard never sees. (tar.Writer
+// refuses to attach a body to a symlink header, so the branch is exercised
+// directly rather than through a fixture.)
+func TestDrainCounted(t *testing.T) {
+	// Body within budget: fully drained, counted, no error.
+	n, err := drainCounted(bytes.NewReader(bytes.Repeat([]byte("A"), 400)), 512)
+	if err != nil || n != 400 {
+		t.Fatalf("within budget: n=%d err=%v, want n=400 err=nil", n, err)
+	}
+	// Body over the remaining budget: rejected (would push past the cap).
+	if _, err := drainCounted(bytes.NewReader(bytes.Repeat([]byte("A"), 4096)), 512); err == nil {
+		t.Fatal("expected an over-budget skipped-entry body to be rejected")
+	}
+	// A negative remaining budget (already at the cap) rejects any non-empty body.
+	if _, err := drainCounted(bytes.NewReader([]byte("x")), -1); err == nil {
+		t.Fatal("expected a body to be rejected when the budget is already spent")
+	}
+}
+
+// TestExtractTarGz_CtxCanceled: a cancelled context stops extraction promptly
+// instead of grinding through inflation.
+func TestExtractTarGz_CtxCanceled(t *testing.T) {
+	data := makeTarGz(t, []tentry{{name: "Dockerfile", body: "FROM scratch\n"}})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := extractTarGz(ctx, bytes.NewReader(data), t.TempDir()); err == nil {
+		t.Fatal("expected extraction to honor a cancelled context")
+	}
+}
+
+// TestRedactURL: the presigned signature query is stripped, so a leaked
+// transport error can't carry the credential.
+func TestRedactURL(t *testing.T) {
+	url := "https://bucket.s3.amazonaws.com/agent.tar.gz?X-Amz-Signature=deadbeefSECRET"
+	msg := `tarball fetch: Get "` + url + `": dial tcp: timeout`
+	got := redactURL(msg, url)
+	if strings.Contains(got, "SECRET") || strings.Contains(got, "X-Amz-Signature") {
+		t.Fatalf("signature leaked after redaction: %q", got)
+	}
+	if !strings.Contains(got, "agent.tar.gz") {
+		t.Fatalf("redaction dropped the non-secret path: %q", got)
+	}
+	// A URL with no query is returned unchanged.
+	if s := redactURL("no query here", "https://host/x.tar.gz"); s != "no query here" {
+		t.Fatalf("unexpected mutation: %q", s)
+	}
+}
+
 func TestSafeJoin(t *testing.T) {
 	root := "/tmp/root"
 	ok := []string{"Dockerfile", "src/main.rs", "./a/b", "a/../b"}
