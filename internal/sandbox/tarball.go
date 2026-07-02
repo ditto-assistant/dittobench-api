@@ -54,11 +54,15 @@ var (
 func (d *LocalDocker) fetchTarball(ctx context.Context, src Source, workdir string) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, src.TarballURL, nil)
 	if err != nil {
-		return "", fmt.Errorf("tarball request: %w", err)
+		return "", fmt.Errorf("tarball request: %s", redactURL(err.Error(), src.TarballURL))
 	}
 	resp, err := netguard.Client(d.AllowPrivate).Do(req)
 	if err != nil {
-		return "", fmt.Errorf("tarball fetch: %w", err)
+		// net/http embeds the full request URL — including the presigned
+		// signature query — in transport errors (*url.Error). Redact it before it
+		// reaches the pollable job status or the logs. Return a plain string
+		// (not %w) so the wrapped *url.Error can't re-expose the URL downstream.
+		return "", fmt.Errorf("tarball fetch: %s", redactURL(err.Error(), src.TarballURL))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -71,7 +75,7 @@ func (d *LocalDocker) fetchTarball(ctx context.Context, src Source, workdir stri
 	hasher := sha256.New()
 	tee := io.TeeReader(limited, hasher)
 
-	if err := extractTarGz(tee, workdir); err != nil {
+	if err := extractTarGz(ctx, tee, workdir); err != nil {
 		if limited.N <= 0 {
 			return "", fmt.Errorf("tarball exceeds %d bytes", maxTarballBytes)
 		}
@@ -95,8 +99,9 @@ func (d *LocalDocker) fetchTarball(ctx context.Context, src Source, workdir stri
 }
 
 // extractTarGz streams a gzipped tar from r into dst, enforcing the size, count,
-// and path-safety limits described in the file header.
-func extractTarGz(r io.Reader, dst string) error {
+// and path-safety limits described in the file header. It honors ctx so a
+// cancelled/timed-out build stops inflating between entries.
+func extractTarGz(ctx context.Context, r io.Reader, dst string) error {
 	gz, err := gzip.NewReader(r)
 	if err != nil {
 		return fmt.Errorf("gzip: %w", err)
@@ -107,6 +112,9 @@ func extractTarGz(r io.Reader, dst string) error {
 	var total int64
 	var files int
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
 			break
@@ -123,10 +131,6 @@ func extractTarGz(r io.Reader, dst string) error {
 			return err
 		}
 		switch hdr.Typeflag {
-		case tar.TypeDir:
-			if err := os.MkdirAll(target, 0o755); err != nil {
-				return fmt.Errorf("mkdir %s: %w", hdr.Name, err)
-			}
 		case tar.TypeReg:
 			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 				return fmt.Errorf("mkdir parent of %s: %w", hdr.Name, err)
@@ -140,13 +144,53 @@ func extractTarGz(r io.Reader, dst string) error {
 			if err != nil {
 				return err
 			}
+		case tar.TypeDir:
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				return fmt.Errorf("mkdir %s: %w", hdr.Name, err)
+			}
+			// Dirs normally carry no body; charge + drain any the tar attached so
+			// it can't inflate gzip past the cap uncounted (see drainCounted).
+			n, err := drainCounted(tr, maxExtractedBytes-total)
+			total += n
+			if err != nil {
+				return err
+			}
 		default:
 			// Skip symlinks, hardlinks, fifos, devices, char/block specials — none
 			// belong in a build context and a symlink escape is a host-write vector.
-			continue
+			// We still charge + drain their body against the extraction budget:
+			// otherwise a large-bodied non-regular entry lets a hostile tar force
+			// gzip to inflate arbitrary bytes the per-file guard never sees (a CPU /
+			// decompression DoS), because tar.Reader inflates a skipped body anyway.
+			n, err := drainCounted(tr, maxExtractedBytes-total)
+			total += n
+			if err != nil {
+				return err
+			}
 		}
 	}
 	return nil
+}
+
+// drainCounted discards a tar entry body we are not writing (a directory or a
+// skipped non-regular entry), returning the bytes drained. Exceeding budget —
+// the uncompressed bytes still remaining before maxExtractedBytes — means the
+// cumulative output would pass the cap, so it errors. This bounds total gzip
+// inflation across ALL entry types, not just the regular files writeRegular
+// guards.
+func drainCounted(r io.Reader, budget int64) (int64, error) {
+	if budget < 0 {
+		budget = 0
+	}
+	// budget+1 so a body exactly at the remaining budget still fits; > trips.
+	n, err := io.Copy(io.Discard, io.LimitReader(r, budget+1))
+	if err != nil {
+		return n, fmt.Errorf("tar: %w", err)
+	}
+	if n > budget {
+		return n, fmt.Errorf("extracted size exceeds %d bytes", maxExtractedBytes)
+	}
+	return n, nil
 }
 
 // safeJoin resolves name under root, rejecting absolute paths and any "../"
@@ -225,4 +269,18 @@ func buildContextDir(root string) (string, error) {
 func isFile(p string) bool {
 	info, err := os.Stat(p)
 	return err == nil && info.Mode().IsRegular()
+}
+
+// redactURL strips the query string from every occurrence of rawURL in s. The
+// tarball URL is a short-lived S3/GCS presigned link whose signing credential
+// rides the query (?X-Goog-Signature=… / ?X-Amz-Signature=…). net/http embeds
+// the full URL in transport errors, so without this the credential would leak
+// into the pollable job status and the logs — the git path already redacts its
+// token via redact(); this is the tarball-path equivalent. We know the exact
+// URL, so the strip is deterministic (no fragile URL-pattern scanning).
+func redactURL(s, rawURL string) string {
+	if i := strings.IndexByte(rawURL, '?'); i >= 0 {
+		return strings.ReplaceAll(s, rawURL, rawURL[:i]+"?<redacted>")
+	}
+	return s
 }

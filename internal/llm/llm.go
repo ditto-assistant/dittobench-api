@@ -18,7 +18,9 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -30,12 +32,31 @@ const (
 	defaultScorerModel    = "google/gemini-3.1-flash-lite"
 
 	endpoint = "https://openrouter.ai/api/v1/chat/completions"
+
+	// defaultMaxTokens caps the completion length of every call. Judges emit a
+	// short verdict and paraphrases a sentence or two, so this is generous
+	// headroom — its job is to stop a model being coerced into an unbounded /
+	// looping completion, the per-call half of the cost cap. Override with
+	// LLM_MAX_TOKENS.
+	defaultMaxTokens = 8192
+	// defaultRunTokenBudget caps total tokens (prompt+completion) a single client
+	// — i.e. one run_size job, which gets a fresh client — may spend. A full
+	// profile is on the order of ~10^5–10^6 tokens; this leaves headroom while
+	// stopping a pathological loop from burning unbounded spend. 0 = unlimited.
+	// Override with LLM_RUN_TOKEN_BUDGET.
+	defaultRunTokenBudget int64 = 8_000_000
 )
 
 // Client is a thin OpenRouter chat client. Safe for concurrent use.
 type Client struct {
-	apiKey string
-	http   *http.Client
+	apiKey    string
+	http      *http.Client
+	maxTokens int
+	// budget is the per-client (== per-run) total-token ceiling; 0 disables it.
+	// spent accumulates usage.total_tokens across calls and is checked before
+	// each request so a run fails cleanly instead of burning unbounded spend.
+	budget int64
+	spent  atomic.Int64
 }
 
 // New returns a Client reading OPENROUTER_API_KEY from the environment. It
@@ -49,12 +70,32 @@ func New() (*Client, error) {
 }
 
 // NewWithKey returns a Client with an explicit key (used in tests / when the key
-// is sourced elsewhere).
+// is sourced elsewhere). The per-call and per-run cost caps are read from the
+// environment (LLM_MAX_TOKENS / LLM_RUN_TOKEN_BUDGET) with safe defaults.
 func NewWithKey(key string) *Client {
 	return &Client{
-		apiKey: key,
-		http:   &http.Client{Timeout: 90 * time.Second},
+		apiKey:    key,
+		http:      &http.Client{Timeout: 90 * time.Second},
+		maxTokens: envInt("LLM_MAX_TOKENS", defaultMaxTokens),
+		budget:    int64(envInt("LLM_RUN_TOKEN_BUDGET", int(defaultRunTokenBudget))),
 	}
+}
+
+// Spent reports the total tokens this client has consumed so far (for logging).
+func (c *Client) Spent() int64 { return c.spent.Load() }
+
+// envInt reads a non-negative int env var, falling back to def when unset or
+// unparsable. A parsed 0 is honored (disables the cap).
+func envInt(name string, def int) int {
+	v := strings.TrimSpace(os.Getenv(name))
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return def
+	}
+	return n
 }
 
 // GeneratorModel returns the generator model id (env GENERATOR_MODEL or default).
@@ -82,6 +123,7 @@ type chatRequest struct {
 	Model       string        `json:"model"`
 	Messages    []chatMessage `json:"messages"`
 	Temperature float64       `json:"temperature"`
+	MaxTokens   int           `json:"max_tokens,omitempty"`
 }
 
 type chatResponse struct {
@@ -90,6 +132,9 @@ type chatResponse struct {
 			Content string `json:"content"`
 		} `json:"message"`
 	} `json:"choices"`
+	Usage *struct {
+		TotalTokens int64 `json:"total_tokens"`
+	} `json:"usage,omitempty"`
 	Error *struct {
 		Message string `json:"message"`
 	} `json:"error,omitempty"`
@@ -101,13 +146,21 @@ func (c *Client) Complete(ctx context.Context, model, system, user string) (stri
 	if c == nil {
 		return "", fmt.Errorf("llm: nil client")
 	}
+	// Per-run cost cap: refuse to start another call once this client (one
+	// run_size job) has spent its token budget, so a looping/hostile harness
+	// fails the run instead of burning unbounded OpenRouter spend.
+	if c.budget > 0 {
+		if spent := c.spent.Load(); spent >= c.budget {
+			return "", fmt.Errorf("llm: run token budget exhausted (%d/%d tokens); aborting", spent, c.budget)
+		}
+	}
 	msgs := make([]chatMessage, 0, 2)
 	if strings.TrimSpace(system) != "" {
 		msgs = append(msgs, chatMessage{Role: "system", Content: system})
 	}
 	msgs = append(msgs, chatMessage{Role: "user", Content: user})
 
-	body, err := json.Marshal(chatRequest{Model: model, Messages: msgs, Temperature: 0})
+	body, err := json.Marshal(chatRequest{Model: model, Messages: msgs, Temperature: 0, MaxTokens: c.maxTokens})
 	if err != nil {
 		return "", fmt.Errorf("llm: marshal request: %w", err)
 	}
@@ -139,6 +192,9 @@ func (c *Client) Complete(ctx context.Context, model, system, user string) (stri
 	var out chatResponse
 	if err := json.Unmarshal(raw, &out); err != nil {
 		return "", fmt.Errorf("llm: decode response: %w", err)
+	}
+	if out.Usage != nil {
+		c.spent.Add(out.Usage.TotalTokens)
 	}
 	if out.Error != nil {
 		return "", fmt.Errorf("llm: api error: %s", out.Error.Message)
