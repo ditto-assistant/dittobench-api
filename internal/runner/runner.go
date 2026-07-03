@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/ditto-assistant/dittobench-api/internal/netguard"
@@ -24,7 +25,23 @@ const perCaseTimeout = 60 * time.Second
 const healthTimeout = 10 * time.Second
 
 // seedTimeout bounds the /seed call (embedding a haystack can take a while).
-const seedTimeout = 5 * time.Minute
+// A CPU-only validator embedding a full "small" haystack — hundreds of long
+// documents through a local embeddings server (e.g. Ollama) — can legitimately
+// take several minutes, so the default is overridable via DITTOBENCH_SEED_TIMEOUT
+// (a Go duration string such as "20m"). Values <= 0 or unparseable fall back to
+// the default.
+var seedTimeout = envDuration("DITTOBENCH_SEED_TIMEOUT", 5*time.Minute)
+
+// envDuration reads a Go duration from key, returning def when unset, empty,
+// unparseable, or non-positive.
+func envDuration(key string, def time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return def
+}
 
 // client is used for all outbound harness calls. It defaults to a guarded client
 // (no private targets); Configure swaps it for local/sandbox use.
