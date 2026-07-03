@@ -225,6 +225,11 @@ func (d *LocalDocker) Run(ctx context.Context, image string, env map[string]stri
 		"--memory", d.MemoryLimit,
 		"--cpus", d.CPULimit,
 		"--security-opt", "no-new-privileges",
+		// Let the harness reach host services (e.g. the Ollama embeddings server)
+		// at the documented host.docker.internal name. On Linux Docker this needs
+		// an explicit host-gateway mapping — unlike Docker Desktop, which injects
+		// it automatically — so the miner's OLLAMA_BASE_URL default resolves.
+		"--add-host", "host.docker.internal:host-gateway",
 		"--publish", "127.0.0.1:0:" + d.HarnessPort, // random host port, loopback only
 	}
 	for k, v := range env {
