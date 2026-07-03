@@ -504,6 +504,14 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 			"DITTOBENCH_PROVIDER": "openrouter",
 			"OLLAMA_BASE_URL":     "http://host.docker.internal:11434",
 		}
+		// Operator escape-hatch: when DITTOBENCH_HARNESS_MODEL is set on the
+		// server, force the harness's chat model. Off by default so a miner's own
+		// model choice is respected; set it only when the validator's OpenRouter
+		// key can't reach the harness's default provider (e.g. this key returns
+		// 404 "no endpoints found" for anthropic/* — see openai/gpt-4o-mini).
+		if m := strings.TrimSpace(os.Getenv("DITTOBENCH_HARNESS_MODEL")); m != "" {
+			env["DITTOBENCH_MODEL"] = m
+		}
 		for k, v := range req.Env {
 			env[k] = v
 		}
