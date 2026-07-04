@@ -499,11 +499,25 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	//    skip the container and target the miner's already-running harness.
 	harnessURL := req.HarnessURL
 	if image != "" {
+		harnessProvider := firstNonEmptyEnv("DITTOBENCH_HARNESS_PROVIDER", "DITTOBENCH_PROVIDER")
+		if harnessProvider == "" {
+			harnessProvider = "openrouter"
+		}
 		env := map[string]string{
 			"OPENROUTER_API_KEY":  apiKey,
-			"DITTOBENCH_PROVIDER": "openrouter",
+			"DITTOBENCH_PROVIDER": harnessProvider,
 			"OLLAMA_BASE_URL":     "http://host.docker.internal:11434",
 		}
+		copyEnv(env,
+			"CHUTES_API_KEY",
+			"DITTOBENCH_EMBEDDER",
+			"DITTOBENCH_MAX_TOKENS",
+			"DITTOBENCH_MAX_TURNS",
+			"DITTOBENCH_MODEL_RETRIES",
+			"DITTOBENCH_TEMPERATURE",
+			"OPENAI_BASE_URL",
+			"CHUTES_BASE_URL",
+		)
 		// Operator escape-hatch: when DITTOBENCH_HARNESS_MODEL is set on the
 		// server, force the harness's chat model. Off by default so a miner's own
 		// model choice is respected; set it only when the validator's OpenRouter
@@ -633,6 +647,23 @@ func envBool(name string) bool {
 		return true
 	}
 	return false
+}
+
+func firstNonEmptyEnv(names ...string) string {
+	for _, name := range names {
+		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func copyEnv(dst map[string]string, names ...string) {
+	for _, name := range names {
+		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+			dst[name] = value
+		}
+	}
 }
 
 // clientIP returns the caller's IP for rate-limiting, honoring the first hop of

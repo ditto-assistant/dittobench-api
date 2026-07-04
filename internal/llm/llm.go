@@ -27,11 +27,14 @@ import (
 const (
 	// EnvAPIKey is the env var holding the OpenRouter API key.
 	EnvAPIKey = "OPENROUTER_API_KEY"
+	// EnvBaseURL optionally points the OpenAI-compatible chat client at another
+	// provider, for example Chutes at https://llm.chutes.ai/v1.
+	EnvBaseURL = "LLM_BASE_URL"
 
 	defaultGeneratorModel = "qwen/qwen3-32b"
 	defaultScorerModel    = "google/gemini-3.1-flash-lite"
 
-	endpoint = "https://openrouter.ai/api/v1/chat/completions"
+	defaultEndpoint = "https://openrouter.ai/api/v1/chat/completions"
 
 	// defaultMaxTokens caps the completion length of every call. Judges emit a
 	// short verdict and paraphrases a sentence or two, so this is generous
@@ -114,6 +117,18 @@ func ScorerModel() string {
 	return defaultScorerModel
 }
 
+func endpointURL() string {
+	base := strings.TrimSpace(os.Getenv(EnvBaseURL))
+	if base == "" {
+		return defaultEndpoint
+	}
+	base = strings.TrimRight(base, "/")
+	if strings.HasSuffix(base, "/chat/completions") {
+		return base
+	}
+	return base + "/chat/completions"
+}
+
 type chatMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
@@ -124,6 +139,7 @@ type chatRequest struct {
 	Messages    []chatMessage `json:"messages"`
 	Temperature float64       `json:"temperature"`
 	MaxTokens   int           `json:"max_tokens,omitempty"`
+	Stream      bool          `json:"stream"`
 }
 
 type chatResponse struct {
@@ -160,12 +176,12 @@ func (c *Client) Complete(ctx context.Context, model, system, user string) (stri
 	}
 	msgs = append(msgs, chatMessage{Role: "user", Content: user})
 
-	body, err := json.Marshal(chatRequest{Model: model, Messages: msgs, Temperature: 0, MaxTokens: c.maxTokens})
+	body, err := json.Marshal(chatRequest{Model: model, Messages: msgs, Temperature: 0, MaxTokens: c.maxTokens, Stream: false})
 	if err != nil {
 		return "", fmt.Errorf("llm: marshal request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL(), bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("llm: build request: %w", err)
 	}
