@@ -311,7 +311,10 @@ func (s *server) submitDirect(w http.ResponseWriter, r *http.Request, req submit
 	runID := uuid.NewString()
 	s.store.Create(runID, "direct", store.StatusRunning, seed, n)
 
-	report, err := s.evaluate(ctx, runID, req.HarnessURL, seed, n)
+	// Direct harness_url path: no crate is built here, so there is no source tree
+	// to fingerprint (nil ⇒ the platform gate falls back to its lexical + size
+	// signals).
+	report, err := s.evaluate(ctx, runID, req.HarnessURL, seed, n, nil)
 	if err != nil {
 		s.store.Fail(runID, err.Error())
 		writeError(w, http.StatusBadGateway, "harness run failed: "+err.Error())
@@ -366,7 +369,7 @@ func (s *server) runSandboxJob(ctx context.Context, runID string, req submitRequ
 	}()
 
 	s.store.SetStatus(runID, store.StatusBuilding)
-	image, buildLog, err := s.sandbox.Build(ctx, sourceFromReq(req))
+	image, buildLog, fingerprint, err := s.sandbox.Build(ctx, sourceFromReq(req))
 	if err != nil {
 		s.store.Fail(runID, "build failed: "+err.Error())
 		log.Printf("sandbox job %s build failed: %v\n%s", runID, err, buildLog)
@@ -386,7 +389,7 @@ func (s *server) runSandboxJob(ctx context.Context, runID string, req submitRequ
 	}
 
 	s.store.SetStatus(runID, store.StatusRunning)
-	if _, err := s.evaluate(ctx, runID, handle.BaseURL, seed, n); err != nil {
+	if _, err := s.evaluate(ctx, runID, handle.BaseURL, seed, n, fingerprint); err != nil {
 		s.store.Fail(runID, "evaluation failed: "+err.Error())
 		return
 	}
@@ -470,15 +473,17 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	// 1. building — build the crate in the Docker sandbox. Skipped on the local
 	//    harness_url path (the miner is already running their harness).
 	var image string
+	var structuralFP *protocol.CodeFingerprint
 	if req.GitURL != "" || req.TarballURL != "" {
 		s.store.SetStage(runID, store.StatusBuilding, 0, total)
-		img, buildLog, err := s.sandbox.Build(ctx, sourceFromReq(req))
+		img, buildLog, fp, err := s.sandbox.Build(ctx, sourceFromReq(req))
 		if err != nil {
 			s.store.Fail(runID, "build failed: "+err.Error())
 			log.Printf("run %s build failed: %v\n%s", runID, err, buildLog)
 			return
 		}
 		image = img
+		structuralFP = fp
 	}
 
 	// 2. generating — fresh, anti-cheat dataset (tools + memory haystack).
@@ -565,13 +570,16 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	s.store.SetStage(runID, store.StatusScoring, len(perCase), total)
 	report := scorer.Aggregate(runID, perCase)
 	report.Seed = seed
+	report.StructuralFingerprint = structuralFP
 	s.store.Finish(runID, report)
 	log.Printf("run %s done: composite=%.3f tool_mean=%.3f memory_mean=%.3f", runID, report.Composite, report.ToolMean, report.MemoryMean)
 }
 
 // evaluate generates the dataset, runs the harness over it, scores it, and
-// stores the finished report. Shared by both submit modes.
-func (s *server) evaluate(ctx context.Context, runID, harnessURL string, seed int64, n int) (protocol.ScoreReport, error) {
+// stores the finished report. Shared by both submit modes. “fingerprint“ is the
+// crate's structural sketch (nil on the local harness_url path); it is attached to
+// the report as advisory anti-copy metadata and never affects the score.
+func (s *server) evaluate(ctx context.Context, runID, harnessURL string, seed int64, n int, fingerprint *protocol.CodeFingerprint) (protocol.ScoreReport, error) {
 	ds := datagen.Generate(seed, n)
 	tools := catalog.Catalog()
 
@@ -583,6 +591,7 @@ func (s *server) evaluate(ctx context.Context, runID, harnessURL string, seed in
 	s.store.SetStatus(runID, store.StatusScoring)
 	report := scorer.Score(runID, ds.ToolCases, resps)
 	report.Seed = seed
+	report.StructuralFingerprint = fingerprint
 	s.store.Finish(runID, report)
 	return report, nil
 }

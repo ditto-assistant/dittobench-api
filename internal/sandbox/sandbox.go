@@ -26,6 +26,9 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/ditto-assistant/dittobench-api/internal/astfp"
+	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
 )
 
 // Sandbox builds a submission into a runnable image and runs it as an
@@ -35,7 +38,7 @@ type Sandbox interface {
 	Available(ctx context.Context) error
 	// Build clones src (a git URL at ref) and builds it into an image,
 	// returning the image reference and the tail of the build log.
-	Build(ctx context.Context, src Source) (image string, buildLog string, err error)
+	Build(ctx context.Context, src Source) (image string, buildLog string, fingerprint *protocol.CodeFingerprint, err error)
 	// Run starts image as a detached container exposing the harness port and
 	// returns a handle. Caller must Stop the handle.
 	Run(ctx context.Context, image string, env map[string]string) (*Handle, error)
@@ -123,9 +126,9 @@ func (d *LocalDocker) Available(ctx context.Context) error {
 // build-context fetch is unauthenticated and 404s on private repos. A mounted
 // gh_token BuildKit secret then lets the in-image cargo build fetch the private
 // ditto-harness crate over HTTPS.
-func (d *LocalDocker) Build(ctx context.Context, src Source) (string, string, error) {
+func (d *LocalDocker) Build(ctx context.Context, src Source) (string, string, *protocol.CodeFingerprint, error) {
 	if src.GitURL == "" && src.TarballURL == "" {
-		return "", "", fmt.Errorf("sandbox: one of git_url or tarball_url is required")
+		return "", "", nil, fmt.Errorf("sandbox: one of git_url or tarball_url is required")
 	}
 	ctx, cancel := context.WithTimeout(ctx, d.BuildTimeout)
 	defer cancel()
@@ -134,7 +137,7 @@ func (d *LocalDocker) Build(ctx context.Context, src Source) (string, string, er
 	//    cloning a git repo or by extracting a presigned tarball.
 	workdir, err := os.MkdirTemp("", "dittobench-sub-")
 	if err != nil {
-		return "", "", fmt.Errorf("mktemp: %w", err)
+		return "", "", nil, fmt.Errorf("mktemp: %w", err)
 	}
 	defer os.RemoveAll(workdir)
 
@@ -144,13 +147,13 @@ func (d *LocalDocker) Build(ctx context.Context, src Source) (string, string, er
 	if src.TarballURL != "" {
 		cdir, err := d.fetchTarball(ctx, src, workdir)
 		if err != nil {
-			return "", "", err
+			return "", "", nil, err
 		}
 		contextDir = cdir
 	} else {
 		cloneURL, err := d.authedCloneURL(src.GitURL)
 		if err != nil {
-			return "", "", err
+			return "", "", nil, err
 		}
 		cloneArgs := []string{"clone", "--depth", "1"}
 		if src.GitRef != "" {
@@ -159,9 +162,16 @@ func (d *LocalDocker) Build(ctx context.Context, src Source) (string, string, er
 		cloneArgs = append(cloneArgs, cloneURL, workdir)
 		if out, err := exec.CommandContext(ctx, "git", cloneArgs...).CombinedOutput(); err != nil {
 			// Redact a token that may appear in the URL within git's error output.
-			return "", "", fmt.Errorf("git clone failed: %s: %w", redact(strings.TrimSpace(string(out))), err)
+			return "", "", nil, fmt.Errorf("git clone failed: %s: %w", redact(strings.TrimSpace(string(out))), err)
 		}
 	}
+
+	// 1b. Structural fingerprint of the materialized crate, for the platform's
+	//     anti-copy gate. Computed here (the only place the tree is unpacked and a
+	//     Rust parser is available) while contextDir still exists — the deferred
+	//     RemoveAll wipes it on return. Best-effort: nil on any problem, never
+	//     failing the build over a moderation signal.
+	fingerprint := astfp.FromDir(ctx, contextDir)
 
 	// 2. Build the local context.
 	image := "dittobench-sub:" + safeTag(src)
@@ -177,9 +187,9 @@ func (d *LocalDocker) Build(ctx context.Context, src Source) (string, string, er
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
 	if err := cmd.Run(); err != nil {
-		return "", tail(buf.String(), 4000), fmt.Errorf("docker build failed: %w", err)
+		return "", tail(buf.String(), 4000), nil, fmt.Errorf("docker build failed: %w", err)
 	}
-	return image, tail(buf.String(), 2000), nil
+	return image, tail(buf.String(), 2000), fingerprint, nil
 }
 
 // authedCloneURL injects the gh token into an https github URL so private

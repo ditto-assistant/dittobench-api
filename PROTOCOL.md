@@ -101,7 +101,15 @@ After running every case, the validator produces a `ScoreReport`.
   "tool_mean": 0.93,
   "median_ms": 42,
   "n": 30,
-  "per_case": [ /* CaseScore */ ]
+  "per_case": [ /* CaseScore */ ],
+  // Advisory anti-copy metadata (omitted on the local harness_url path). An
+  // AST-level shingle MinHash sketch of the built crate — the *shape* of the
+  // parse tree, never identifier/literal text, so it survives renaming +
+  // reformatting. The validator forwards it, UNSIGNED, to the platform's
+  // anti-copy gate; it never affects the score. Byte-compatible with the
+  // platform's own fingerprint sketch (v: format version, k: bottom-k budget,
+  // card: true shingle count, m: sorted bottom-k shingle hashes).
+  "structural_fingerprint": { "v": 1, "k": 256, "card": 812, "m": ["0f1a…", "…"] }
 }
 ```
 
