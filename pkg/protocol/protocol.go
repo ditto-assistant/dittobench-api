@@ -149,6 +149,19 @@ type CategoryStat struct {
 	Mean     float64 `json:"mean"`
 }
 
+// CodeFingerprint is a bottom-k MinHash (KMV) sketch of a submission's source,
+// consumed by the platform's anti-copy moderation gate. It is advisory metadata,
+// never part of the scored result: V is the sketch-format version, K the bottom-k
+// budget, Card the true shingle-set cardinality, and M the sorted bottom-K shingle
+// hashes. The shape is byte-compatible with the platform's own fingerprint sketch
+// so the two compare with one code path (Jaccard / containment over M).
+type CodeFingerprint struct {
+	V    int      `json:"v"`
+	K    int      `json:"k"`
+	Card int      `json:"card"`
+	M    []string `json:"m"`
+}
+
 // ScoreReport is the full result of scoring a run.
 type ScoreReport struct {
 	RunID       string         `json:"run_id"`
@@ -161,4 +174,8 @@ type ScoreReport struct {
 	N           int            `json:"n"`
 	PerCase     []CaseScore    `json:"per_case"`
 	PerCategory []CategoryStat `json:"per_category,omitempty"`
+	// StructuralFingerprint is an AST-level shingle sketch of the built crate
+	// (nil when unavailable), forwarded to the platform's anti-copy gate as
+	// advisory (unsigned) moderation metadata. It never affects the score.
+	StructuralFingerprint *CodeFingerprint `json:"structural_fingerprint,omitempty"`
 }
