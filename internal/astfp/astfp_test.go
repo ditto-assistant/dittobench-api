@@ -4,6 +4,8 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
@@ -167,6 +169,58 @@ fn main() {
 	if j := jaccard(a, b); j > 0.5 {
 		t.Fatalf("distinct crates should be low, jaccard=%v", j)
 	}
+}
+
+func TestFromDir_DeepNestingDoesNotCrash(t *testing.T) {
+	// Regression: a millions-deep nested expression used to be walked recursively
+	// and blew the goroutine stack — a `fatal error: stack overflow` that recover
+	// cannot catch, killing the whole scorer process. The walk is now iterative and
+	// bounded by maxNodesPerFile, so this must return (nil or a sketch) rather than
+	// crash the test binary. The file stays just under maxFileBytes so readCapped
+	// accepts it; its depth is well past the old recursive crash threshold.
+	const depth = 3_000_000 // ~6 MB of parens, < 8 MiB cap, > recursion crash point
+	var b strings.Builder
+	b.Grow(2*depth + 32)
+	b.WriteString("fn f() -> i64 {\n")
+	b.WriteString(strings.Repeat("(", depth))
+	b.WriteString("0")
+	b.WriteString(strings.Repeat(")", depth))
+	b.WriteString("\n}\n")
+	dir := writeCrate(t, map[string]string{"src/deep.rs": b.String()})
+	// The assertion is simply that this returns; a crash aborts the test binary.
+	_ = FromDir(context.Background(), dir)
+}
+
+func TestFromDir_CancelledCtxReturnsNil(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already cancelled before the walk starts
+	dir := writeCrate(t, map[string]string{"src/lib.rs": origCrate})
+	if fp := FromDir(ctx, dir); fp != nil {
+		t.Fatalf("cancelled ctx should yield nil, got %+v", fp)
+	}
+}
+
+func TestFromDir_ConcurrentRaceFree(t *testing.T) {
+	// FromDir is documented as pure + deterministic; run it concurrently on the same
+	// crate so `go test -race` exercises the shared-nothing claim (each call builds
+	// its own parser + maps). Every result must equal the single-threaded sketch.
+	ctx := context.Background()
+	dir := writeCrate(t, map[string]string{"src/lib.rs": origCrate})
+	want := FromDir(ctx, dir)
+	if want == nil {
+		t.Fatal("expected a fingerprint")
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if got := FromDir(ctx, dir); jaccard(want, got) != 1.0 {
+				t.Errorf("concurrent result diverged: %v", jaccard(want, got))
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 func TestFromDir_NoRustReturnsNil(t *testing.T) {

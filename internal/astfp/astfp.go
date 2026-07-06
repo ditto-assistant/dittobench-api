@@ -30,6 +30,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -63,6 +64,13 @@ const (
 	maxFiles     = 5000
 	maxFileBytes = 8 * 1024 * 1024
 	maxShingles  = 500_000
+	// Per-file cap on named AST nodes walked. Bounds CPU + memory on a pathological
+	// tree (e.g. a millions-deep nested expression) and, with the iterative walk,
+	// prevents the walk from becoming a runaway. Well above any real source file
+	// (which is KBs); a file that exceeds it is skipped (fail-open).
+	maxNodesPerFile = 2_000_000
+	// How often the walk checks ctx for cancellation (the build timeout).
+	ctxCheckEvery = 8192
 )
 
 // FromDir walks the extracted crate at dir and returns its structural
@@ -111,63 +119,92 @@ func FromDir(ctx context.Context, dir string) *protocol.CodeFingerprint {
 	return sketch(shingles)
 }
 
-// readCapped reads at most max bytes of a file; a file larger than the cap is
+// readCapped reads the whole file up to max bytes; a file larger than the cap is
 // skipped entirely (returns an error) so a truncated read can't produce a hash a
-// smaller honest file could collide with.
+// smaller honest file could collide with. It reads via io.ReadAll over a capped
+// LimitReader (+1 byte to detect the over-cap case) rather than a single Read,
+// because os.File.Read may return a short read on a large file — which would
+// silently truncate the content and make the fingerprint non-deterministic.
 func readCapped(path string, max int) ([]byte, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	buf := make([]byte, max+1)
-	n, _ := f.Read(buf)
-	if n > max {
+	raw, err := io.ReadAll(io.LimitReader(f, int64(max)+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) > max {
 		return nil, fs.ErrInvalid
 	}
-	return buf[:n], nil
+	return raw, nil
 }
 
 // fileShingles parses one file and returns the hashed k-node shingles of its
-// named-node-type stream. Fewer than shingleNodes named nodes yields one shingle
-// of the whole stream (nil for an empty/ unparseable file).
+// named-node-type stream — the pre-order sequence of named node *types* (never
+// the source text, so identifier/literal renaming is invisible; anonymous
+// punctuation/keyword nodes are skipped). Fewer than shingleNodes named nodes
+// yields one shingle of the whole stream (nil for an empty/unparseable file).
+//
+// The walk is ITERATIVE, not recursive: a deeply-nested expression would blow the
+// goroutine stack under recursion, and a stack overflow is an unrecoverable Go
+// `fatal error` (recover cannot catch it) that would crash the whole scorer. It
+// also honors ctx (the build timeout) and bails past maxNodesPerFile so a
+// pathological tree cannot burn unbounded CPU/memory. Sliding a k-wide window over
+// the type stream yields the same shingles as hashing every k-node run, in O(k).
 func fileShingles(ctx context.Context, parser *sitter.Parser, src []byte) []string {
 	tree, err := parser.ParseCtx(ctx, nil, src)
 	if err != nil || tree == nil {
 		return nil
 	}
 	defer tree.Close()
-	stream := namedTypeStream(tree.RootNode())
-	if len(stream) == 0 {
+	root := tree.RootNode()
+	if root == nil {
 		return nil
 	}
-	if len(stream) <= shingleNodes {
-		return []string{hashShingle(strings.Join(stream, " "))}
-	}
-	out := make([]string, 0, len(stream)-shingleNodes+1)
-	for i := 0; i+shingleNodes <= len(stream); i++ {
-		out = append(out, hashShingle(strings.Join(stream[i:i+shingleNodes], " ")))
-	}
-	return out
-}
 
-// namedTypeStream is the pre-order sequence of named node *types* under n.
-// Only the type is taken, never the source text, so identifier/literal renaming
-// is invisible; anonymous nodes (punctuation, keywords) are skipped so trivial
-// token spelling does not enter the fingerprint.
-func namedTypeStream(n *sitter.Node) []string {
 	var out []string
-	var walk func(*sitter.Node)
-	walk = func(node *sitter.Node) {
-		if node.IsNamed() {
-			out = append(out, node.Type())
+	window := make([]string, 0, shingleNodes)
+	stack := []*sitter.Node{root}
+	nodes := 0
+	for len(stack) > 0 {
+		n := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if n.IsNamed() {
+			nodes++
+			if nodes > maxNodesPerFile {
+				return nil // pathological tree — skip this file (fail-open)
+			}
+			if nodes%ctxCheckEvery == 0 && ctx.Err() != nil {
+				return nil
+			}
+			t := n.Type()
+			if len(window) < shingleNodes {
+				window = append(window, t)
+				if len(window) == shingleNodes {
+					out = append(out, hashShingle(strings.Join(window, " ")))
+				}
+			} else {
+				copy(window, window[1:]) // slide left in place (no realloc)
+				window[shingleNodes-1] = t
+				out = append(out, hashShingle(strings.Join(window, " ")))
+			}
 		}
-		for i := 0; i < int(node.NamedChildCount()); i++ {
-			walk(node.NamedChild(i))
+		// Push named children in reverse so they pop in forward (pre-order) order.
+		for i := int(n.NamedChildCount()) - 1; i >= 0; i-- {
+			stack = append(stack, n.NamedChild(i))
 		}
 	}
-	walk(n)
-	return out
+	if len(out) > 0 {
+		return out
+	}
+	if len(window) == 0 {
+		return nil // no named nodes at all
+	}
+	// Fewer than shingleNodes named nodes: one whole-file shingle (matches the
+	// sliding-window result when the stream length == k).
+	return []string{hashShingle(strings.Join(window, " "))}
 }
 
 func hashShingle(s string) string {
