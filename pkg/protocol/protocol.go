@@ -183,21 +183,21 @@ const (
 // For a memory case: Score is 1.0 or 0.0 from the LongMemEval yes/no judge, and
 // ToolAccuracy/Quality are unused.
 type CaseScore struct {
-	CaseID    string   `json:"case_id"`
-	Category  string   `json:"category"`
-	Kind      string   `json:"kind"`              // "tool" | "memory"
-	Score     float64  `json:"score"`             // 0..1 composite for this case
-	ToolScore float64  `json:"tool_score"`        // 0..1 deterministic tool accuracy (tool cases)
-	Quality   float64  `json:"quality,omitempty"` // 0..1 LLM response-quality judge (tool cases)
+	CaseID    string  `json:"case_id"`
+	Category  string  `json:"category"`
+	Kind      string  `json:"kind"`              // "tool" | "memory"
+	Score     float64 `json:"score"`             // 0..1 composite for this case
+	ToolScore float64 `json:"tool_score"`        // 0..1 deterministic tool accuracy (tool cases)
+	Quality   float64 `json:"quality,omitempty"` // 0..1 LLM response-quality judge (tool cases)
 	// ResultUsage is 0..1 for a result-usage tool case (§7 Phase C / C2): whether
 	// the final answer incorporated the distinctive value the executed tool
 	// returned. It replaces the LLM quality judge for those cases (deterministic).
-	ResultUsage float64 `json:"result_usage,omitempty"`
-	Correct   bool     `json:"correct,omitempty"` // memory judge verdict (memory cases)
-	LatencyMs int64    `json:"latency_ms"`
-	Called    []string `json:"called"`
-	Expected  []string `json:"expected"`
-	Notes     []string `json:"notes,omitempty"`
+	ResultUsage float64  `json:"result_usage,omitempty"`
+	Correct     bool     `json:"correct,omitempty"` // memory judge verdict (memory cases)
+	LatencyMs   int64    `json:"latency_ms"`
+	Called      []string `json:"called"`
+	Expected    []string `json:"expected"`
+	Notes       []string `json:"notes,omitempty"`
 	// Injection is true when a judge flagged the harness output as an attempt to
 	// manipulate the judge (prompt injection). Such a case is scored 0 and the
 	// run is flagged for moderation review (A8, §6.1).

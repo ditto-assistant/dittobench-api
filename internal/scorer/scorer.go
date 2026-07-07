@@ -174,16 +174,16 @@ func CapUnobserved(cs protocol.CaseScore) protocol.CaseScore {
 // partial competence, W8).
 const (
 	memCorrectnessWeight = 0.7
-	memGroundingWeight    = 0.3
+	memGroundingWeight   = 0.3
 )
 
 // memoryCaseScore assembles a graded memory CaseScore from its correctness and
 // grounding components (each in [0,1]).
 func memoryCaseScore(mc protocol.MemoryCase, resp protocol.RunResponse, correctness, grounding float64) protocol.CaseScore {
 	cs := protocol.CaseScore{
-		CaseID:    mc.ID,
-		Category:  mc.QuestionType,
-		Kind:      protocol.KindMemory,
+		CaseID:   mc.ID,
+		Category: mc.QuestionType,
+		Kind:     protocol.KindMemory,
 		// Round to 6 dp so the exact endpoints are clean (0.7+0.3 is not exactly
 		// 1.0 in float64) without affecting scoring resolution.
 		Score:     clamp01(round6(memCorrectnessWeight*correctness + memGroundingWeight*grounding)),

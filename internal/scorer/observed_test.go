@@ -42,7 +42,7 @@ func TestScoreToolCaseObserved_AuthoritativeOverSelfReport(t *testing.T) {
 func TestScoreToolCaseObserved_WrongObservedBeatsRightSelfReport(t *testing.T) {
 	c := webToolCase()
 	resp := protocol.RunResponse{ToolCalls: []protocol.ObservedToolCall{{Name: "search_web"}}} // claims right
-	observed := []protocol.ObservedToolCall{{Name: "search_memories"}}                          // actually wrong
+	observed := []protocol.ObservedToolCall{{Name: "search_memories"}}                         // actually wrong
 
 	cs := ScoreToolCaseObserved(c, resp, true, observed)
 	if cs.ToolScore != 0 {
