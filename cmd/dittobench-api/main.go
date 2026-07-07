@@ -772,6 +772,14 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	if injections > 0 {
 		log.Printf("run %s: %d judge-injection attempt(s) flagged", runID, injections)
 	}
+	// Self-preference guard: an LLM judge tends to over-score responses from its own
+	// model family. We can only observe the harness model when the operator forces
+	// it (DITTOBENCH_HARNESS_MODEL); when we can, warn if it matches the judge so the
+	// operator picks a distinct judge. (Programmatic scoring — tool trajectory,
+	// needle, isolation, injection — is unaffected; only the LLM-judged half is.)
+	if hm := strings.TrimSpace(os.Getenv("DITTOBENCH_HARNESS_MODEL")); hm != "" && sameModelFamily(hm, judgeCfg.Model) {
+		log.Printf("run %s: WARNING self-preference risk — judge model %q matches the harness model %q; use a distinct judge model (SCORER_MODEL) to avoid single-model-judge bias", runID, judgeCfg.Model, hm)
+	}
 	s.store.Finish(runID, report)
 	log.Printf("run %s done: bench_version=%d composite=%.3f tool_mean=%.3f memory_mean=%.3f observed=%d capped=%d tokens=%d",
 		runID, protocol.BenchVersion, report.Composite, report.ToolMean, report.MemoryMean, observedTool, cappedTool, llmClient.Spent())
@@ -874,6 +882,27 @@ func pinnedOrFreshSeed(pinned int64) int64 {
 		return pinned
 	}
 	return gen.FreshSeed()
+}
+
+// sameModelFamily reports whether two model ids name the same underlying model,
+// tolerant of provider prefixes and version suffixes: "openai/gpt-4o" and
+// "gpt-4o-2024-11" both reduce to "gpt-4o". Used only for the self-preference
+// warning, so a conservative prefix match on the normalized base is enough.
+func sameModelFamily(a, b string) bool {
+	na, nb := modelBase(a), modelBase(b)
+	if na == "" || nb == "" {
+		return false
+	}
+	return na == nb || strings.HasPrefix(na, nb) || strings.HasPrefix(nb, na)
+}
+
+// modelBase strips a provider prefix ("vendor/model" → "model") and lowercases.
+func modelBase(m string) string {
+	m = strings.ToLower(strings.TrimSpace(m))
+	if i := strings.LastIndex(m, "/"); i >= 0 {
+		m = m[i+1:]
+	}
+	return m
 }
 
 // envBool reports whether an env var is set to a truthy value.

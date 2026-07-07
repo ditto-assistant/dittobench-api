@@ -202,8 +202,17 @@ curl -X POST https://dittobench-api-22790208601.us-central1.run.app/v1/submit \
 | `openrouter_key` (req)| _(required, BYOK)_              | generator + judge (per request; never stored) |
 | `GENERATOR_MODEL` env | `qwen/qwen3-32b`                | paraphrases tool prompts + memory pairs       |
 | `SCORER_MODEL` env    | `google/gemini-3.1-flash-lite`  | LLM judge (tool quality + memory yes/no)      |
+| `SCORER_MODEL_B` env  | _(unset)_                       | optional second judge; audit-slice cross-check |
 | `DITTOBENCH_SEED_DIR` env | _(embedded bundle)_         | override LongMemEval seeds with on-disk copies |
 | `DITTOBENCH_ORACLE` env   | _(embedded bundle)_         | override the oracle with an on-disk copy       |
+
+Keep `SCORER_MODEL` distinct from the miner's harness model: an LLM judge tends
+to over-score responses from its own model family. Most of the score is
+programmatic (tool trajectory/args, result-usage needle, isolation leak,
+injection payload) and so is unaffected; only the LLM-judged half is exposed to
+this bias. When the harness model is known (operator sets `DITTOBENCH_HARNESS_MODEL`),
+the run warns if it matches the judge. `SCORER_MODEL_B` adds a de-correlated
+second judge on an audit slice.
 
 The LongMemEval corpus ships **embedded** in the binary (a slim, text-only
 bundle under `internal/gen/seeddata/`, ~18 MB, embeddings stripped) so the
