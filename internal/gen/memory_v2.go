@@ -348,11 +348,11 @@ func sessionBucket(session, nSessions, nWaves int) int {
 func personaOptsFor(n int) persona.Opts {
 	switch {
 	case n <= 8:
-		return persona.Opts{Sessions: 5, Projects: 4, Trips: 3, Pets: 2, UpdateChains: 2, Reversals: 1, DecoyPeople: 4, DomainItems: 3}
+		return persona.Opts{Sessions: 5, Projects: 4, Trips: 3, Pets: 2, UpdateChains: 2, Reversals: 1, DecoyPeople: 4, DomainItems: 3, LongChain: 3}
 	case n <= 25:
 		return persona.DefaultOpts()
 	default:
-		return persona.Opts{Sessions: 9, Projects: 10, Trips: 8, Pets: 5, UpdateChains: 4, Reversals: 3, DecoyPeople: 10, DomainItems: 4}
+		return persona.Opts{Sessions: 9, Projects: 10, Trips: 8, Pets: 5, UpdateChains: 4, Reversals: 3, DecoyPeople: 10, DomainItems: 4, LongChain: 4}
 	}
 }
 

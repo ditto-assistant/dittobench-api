@@ -65,6 +65,20 @@ func fill(template, value string) string {
 	return fmt.Sprintf(template, value)
 }
 
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 // capitalize upper-cases the first rune of s.
 func capitalize(s string) string {
 	if s == "" {

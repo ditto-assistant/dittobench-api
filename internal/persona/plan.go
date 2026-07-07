@@ -123,6 +123,10 @@ type Opts struct {
 	Reversals    int // opinion facts that get reversed (contradiction material)
 	DecoyPeople  int // near-miss distractor entities
 	DomainItems  int // items drawn for each professional-domain list family
+	// LongChain is the length of ONE extended update trajectory (≥3 → an N-state
+	// chain for state-tracking questions; <3 → all chains stay 2-state). The long
+	// chain is drawn from the same attributes eligible for an update.
+	LongChain int
 }
 
 // DefaultOpts is a medium-sized, well-populated universe: enough facts for the
@@ -137,6 +141,7 @@ func DefaultOpts() Opts {
 		Reversals:    2,
 		DecoyPeople:  6,
 		DomainItems:  3,
+		LongChain:    3,
 	}
 }
 
@@ -164,6 +169,9 @@ func (o Opts) normalized() Opts {
 	}
 	if o.DomainItems < 0 {
 		o.DomainItems = 0
+	}
+	if o.LongChain < 0 {
+		o.LongChain = 0
 	}
 	return o
 }
@@ -458,12 +466,58 @@ func BuildPlan(seed int64, opts Opts) *Plan {
 	for i := 0; i < opts.UpdateChains && i < len(updatableIdx); i++ {
 		updates[updatableIdx[i]] = true
 	}
+	// One updated attribute becomes an N-state trajectory (opts.LongChain states)
+	// for state-tracking / trajectory questions; the rest stay 2-state.
+	longChainIdx := -1
+	if opts.LongChain >= 3 && opts.UpdateChains >= 1 && len(updatableIdx) > 0 {
+		longChainIdx = updatableIdx[0]
+	}
 
 	half := opts.Sessions / 2
 	if half < 1 {
 		half = 1
 	}
 	for i, s := range scalars {
+		// N-state trajectory: opts.LongChain distinct values over increasing
+		// sessions, each superseding the previous, only the last current. The
+		// material for previous-value / ordered-history / state-at-event questions.
+		if i == longChainIdx {
+			k := opts.LongChain
+			vals := pickN(r, s.pool, k)
+			if len(vals) < 3 { // pool too small for a real trajectory → fall through
+				longChainIdx = -1
+			} else {
+				k = len(vals)
+				base := spread(0, maxInt(1, opts.Sessions-k+1))
+				var prevID string
+				for j, v := range vals {
+					id := "f-" + s.attr
+					if j > 0 {
+						id = fmt.Sprintf("f-%s-%d", s.attr, j+1)
+					}
+					f := Fact{
+						ID:         id,
+						Kind:       KindScalar,
+						Entity:     "self",
+						Attribute:  s.attr,
+						Value:      v,
+						Display:    v,
+						Session:    minInt(base+j, opts.Sessions-1),
+						Seq:        nextSeq(),
+						Supersedes: prevID,
+						Current:    j == len(vals)-1,
+					}
+					if j == 0 {
+						f.UserText, f.AsstText = fill(pickStr(r, s.stmt), v), fill(pickStr(r, s.ack), v)
+					} else {
+						f.UserText, f.AsstText = fill(pickStr(r, s.updateStmt), v), fill(pickStr(r, s.updateAck), v)
+					}
+					p.Facts = append(p.Facts, f)
+					prevID = id
+				}
+				continue
+			}
+		}
 		v1 := pick(r, s.pool)
 		stmt := pickStr(r, s.stmt)
 		ack := pickStr(r, s.ack)

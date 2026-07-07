@@ -86,10 +86,16 @@ func TestPlanStructure(t *testing.T) {
 	}
 
 	// Every superseded fact must reference a real predecessor of the same
-	// attribute, and the successor must be the current one.
+	// attribute. In an N-state chain an intermediate fact both supersedes its
+	// predecessor AND is itself superseded, so the invariant is: a fact that has
+	// been superseded is never current (the current one is the non-superseded tail).
 	byID := map[string]Fact{}
+	superseded := map[string]bool{}
 	for _, f := range p.Facts {
 		byID[f.ID] = f
+		if f.Supersedes != "" {
+			superseded[f.Supersedes] = true
+		}
 	}
 	for _, f := range p.Facts {
 		if f.Supersedes == "" {
@@ -102,11 +108,10 @@ func TestPlanStructure(t *testing.T) {
 		if prev.Attribute != f.Attribute {
 			t.Fatalf("fact %s supersedes a different attribute (%s vs %s)", f.ID, prev.Attribute, f.Attribute)
 		}
-		if prev.Current {
-			t.Fatalf("superseded fact %s still marked current", prev.ID)
-		}
-		if !f.Current {
-			t.Fatalf("superseding fact %s not marked current", f.ID)
+	}
+	for _, f := range p.Facts {
+		if superseded[f.ID] && f.Current {
+			t.Fatalf("superseded fact %s still marked current", f.ID)
 		}
 	}
 }

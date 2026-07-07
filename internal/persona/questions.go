@@ -257,6 +257,10 @@ func DeriveQuestions(p *Plan) []Question {
 	// --- temporal ordering (which came first) ---
 	qs = append(qs, temporalQuestions(p)...)
 
+	// --- N-state trajectory + multi-hop state-at-event (sequences) ---
+	qs = append(qs, trajectoryQuestions(p)...)
+	qs = append(qs, multiHopQuestions(p)...)
+
 	// --- abstention (needle-absent) ---
 	for i, q := range absentAttributes {
 		qs = append(qs, Question{
@@ -314,6 +318,143 @@ func temporalQuestions(p *Plan) []Question {
 				earlier.label, later.label),
 			Evidence: []string{earlier.f.ID, later.f.ID},
 		})
+	}
+	return qs
+}
+
+// attrNoun is the human noun for a scalar attribute, used to phrase trajectory
+// and state-at-event questions ("what was my <noun> just before ..."). Only
+// updatable scalars can form a chain, but all are listed for safety.
+var attrNoun = map[string]string{
+	"city": "city", "occupation": "job", "employer": "employer", "car": "car",
+	"hometown": "hometown", "partner": "partner", "instrument": "instrument",
+	"alma_mater": "university",
+	// software / medical / legal / finance
+	"primary_language": "primary programming language", "code_editor": "code editor",
+	"diagnosis": "medical diagnosis", "medication": "medication",
+	"practice_area": "area of law", "bar_admission": "state bar",
+	"risk_tolerance": "risk tolerance", "brokerage": "brokerage",
+}
+
+// scalarChain returns the ordered (by Seq) scalar self-facts for attr — an update
+// trajectory. Length 1 = never updated; 2 = one update; ≥3 = an N-state trajectory.
+func scalarChain(p *Plan, attr string) []Fact {
+	var out []Fact
+	for _, f := range p.Facts {
+		if f.Kind == KindScalar && f.Entity == "self" && f.Attribute == attr {
+			out = append(out, f)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Seq < out[j].Seq })
+	return out
+}
+
+// scalarChains returns the scalar trajectories of length ≥ minLen, in timeline order.
+func scalarChains(p *Plan, minLen int) [][]Fact {
+	var attrs []string
+	seen := map[string]bool{}
+	for _, f := range p.Facts {
+		if f.Kind == KindScalar && f.Entity == "self" && !seen[f.Attribute] {
+			seen[f.Attribute] = true
+			attrs = append(attrs, f.Attribute)
+		}
+	}
+	var out [][]Fact
+	for _, a := range attrs {
+		if ch := scalarChain(p, a); len(ch) >= minLen {
+			out = append(out, ch)
+		}
+	}
+	return out
+}
+
+// trajectoryQuestions derives state-tracking questions from an N-state chain
+// (RULER variable-tracking / LME-V2 dynamic-state): the value JUST BEFORE the
+// current one (a genuinely superseded answer), and the full ordered history.
+func trajectoryQuestions(p *Plan) []Question {
+	var qs []Question
+	for _, ch := range scalarChains(p, 3) {
+		attr := ch[0].Attribute
+		label := attrNoun[attr]
+		if label == "" {
+			continue
+		}
+		cur, prev := ch[len(ch)-1], ch[len(ch)-2]
+		qs = append(qs, Question{
+			ID:       "q-prev-" + attr,
+			Type:     QTTemporal,
+			Tier:     TierHard,
+			Text:     fmt.Sprintf("What was my %s just before my current one?", label),
+			Answer:   prev.Value,
+			Evidence: []string{cur.ID, prev.ID},
+		})
+		vals := make([]string, 0, len(ch))
+		ev := make([]string, 0, len(ch))
+		for _, f := range ch {
+			vals = append(vals, f.Value)
+			ev = append(ev, f.ID)
+		}
+		qs = append(qs, Question{
+			ID:       "q-hist-" + attr,
+			Type:     QTTemporal,
+			Tier:     TierHard,
+			Text:     fmt.Sprintf("List every %s I've had, from the first to my most recent.", label),
+			Answer:   joinComma(vals),
+			Evidence: ev,
+		})
+	}
+	return qs
+}
+
+// multiHopQuestions derives a state-at-event JOIN: which value a scalar chain
+// held at the time of a list event ("At the time of your trip to Osaka, what was
+// my city?"). The answer is a PAST (superseded) chain value, so it cannot be
+// answered by current-state recall — it requires locating the event in time and
+// resolving the chain state then (a two-fact join). Only emitted when the event
+// falls unambiguously strictly between two chain changes.
+func multiHopQuestions(p *Plan) []Question {
+	var qs []Question
+	for _, ch := range scalarChains(p, 2) {
+		attr := ch[0].Attribute
+		label := attrNoun[attr]
+		if label == "" {
+			continue
+		}
+		for _, lf := range p.Facts {
+			if lf.Kind != KindList {
+				continue
+			}
+			var state *Fact
+			nextSession := -1
+			for idx := range ch {
+				f := ch[idx]
+				if f.Session <= lf.Session && (state == nil || f.Session > state.Session) {
+					sf := f
+					state = &sf
+				}
+				if f.Session > lf.Session && (nextSession == -1 || f.Session < nextSession) {
+					nextSession = f.Session
+				}
+			}
+			// Unambiguous, and a genuinely PAST value: event strictly after the
+			// state change and strictly before the next change (so a later change exists).
+			if state == nil || lf.Session <= state.Session || nextSession == -1 || lf.Session >= nextSession {
+				continue
+			}
+			event := factLabel(lf)
+			if event == "" {
+				continue
+			}
+			qs = append(qs, Question{
+				ID:       "q-mh-" + attr + "-" + lf.ID,
+				Type:     QTMultiSession,
+				Tier:     TierHard,
+				Text:     fmt.Sprintf("At the time of %s, what was my %s?", event, label),
+				Answer:   state.Value,
+				Evidence: []string{lf.ID, state.ID},
+			})
+			break // one multi-hop per chain keeps the pool balanced
+		}
 	}
 	return qs
 }

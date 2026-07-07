@@ -148,6 +148,76 @@ func TestDomainCoverage(t *testing.T) {
 	}
 }
 
+// TestTrajectoryAndMultiHop verifies the N-state sequence questions against the
+// plan's ground truth: the ordered-history answer is the chain values in order,
+// the previous-value answer is the second-to-last, and a multi-hop state-at-event
+// answer is the chain value that held at the event's session — a genuinely PAST
+// (superseded) value, not the current one.
+func TestTrajectoryAndMultiHop(t *testing.T) {
+	sawTraj, sawMH := false, false
+	for seed := int64(0); seed < 40; seed++ {
+		p := BuildPlan(seed, DefaultOpts())
+		qs := DeriveQuestions(p)
+		for _, q := range qs {
+			switch {
+			case len(q.ID) >= 6 && q.ID[:6] == "q-hist":
+				sawTraj = true
+				ch := scalarChain(p, chainAttrOf(p, q.Evidence))
+				want := make([]string, 0, len(ch))
+				for _, f := range ch {
+					want = append(want, f.Value)
+				}
+				if q.Answer != joinComma(want) {
+					t.Fatalf("seed %d %s: history %q != chain %v", seed, q.ID, q.Answer, want)
+				}
+			case len(q.ID) >= 6 && q.ID[:6] == "q-prev":
+				ch := scalarChain(p, chainAttrOf(p, q.Evidence))
+				if len(ch) < 2 || q.Answer != ch[len(ch)-2].Value {
+					t.Fatalf("seed %d %s: previous %q != chain[-2]", seed, q.ID, q.Answer)
+				}
+			case len(q.ID) >= 4 && q.ID[:4] == "q-mh":
+				sawMH = true
+				// Evidence = [listFact, stateFact]; stateFact must be non-current.
+				sf, ok := p.FactByID(q.Evidence[1])
+				if !ok || sf.Current {
+					t.Fatalf("seed %d %s: multi-hop answer is not a past value", seed, q.ID)
+				}
+				if q.Answer != sf.Value {
+					t.Fatalf("seed %d %s: answer %q != state value %q", seed, q.ID, q.Answer, sf.Value)
+				}
+				// Recompute the state at the event session independently.
+				lf, _ := p.FactByID(q.Evidence[0])
+				ch := scalarChain(p, sf.Attribute)
+				var recomputed string
+				best := -1
+				for _, f := range ch {
+					if f.Session <= lf.Session && f.Session > best {
+						best, recomputed = f.Session, f.Value
+					}
+				}
+				if recomputed != q.Answer {
+					t.Fatalf("seed %d %s: recomputed state %q != answer %q", seed, q.ID, recomputed, q.Answer)
+				}
+			}
+		}
+	}
+	if !sawTraj {
+		t.Error("no trajectory (N-state) questions derived across 40 seeds")
+	}
+	if !sawMH {
+		t.Error("no multi-hop questions derived across 40 seeds")
+	}
+}
+
+// chainAttrOf returns the attribute of the first evidence fact (a chain member).
+func chainAttrOf(p *Plan, evidence []string) string {
+	if len(evidence) == 0 {
+		return ""
+	}
+	f, _ := p.FactByID(evidence[0])
+	return f.Attribute
+}
+
 // TestKnowledgeUpdateAnswerIsLatest guards the latest-value-wins semantics: the
 // update answer must be the current value and must differ from the superseded one.
 func TestKnowledgeUpdateAnswerIsLatest(t *testing.T) {
