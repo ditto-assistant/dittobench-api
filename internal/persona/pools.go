@@ -166,12 +166,31 @@ var hobbies = []string{
 }
 
 // noiseTopics are chit-chat beats (no fact) sprinkled into sessions so recall
-// is not trivially "every turn is a fact". They carry no ground truth.
+// is not trivially "every turn is a fact". They carry no ground truth. They are
+// first-person noun phrases so they slot cleanly into the noiseTemplates below
+// and read as coherent, topic-continuous filler — not the semantically-disjoint
+// padding that inflates lexical-retrieval scores (a well-attested memory-
+// benchmark validity critique; BENCHMARK-V2 §4.1).
 var noiseTopics = []string{
-	"the weather this week", "a movie they watched", "weekend plans",
-	"a book recommendation", "traffic on the commute", "a new coffee place",
-	"a podcast episode", "the football scores", "a house plant that is wilting",
-	"a recipe that went wrong",
+	"the weather this week", "a film I watched last night", "my weekend plans",
+	"a book I've been reading", "the traffic on my commute", "a new coffee place downtown",
+	"a podcast episode I liked", "the local football scores", "a houseplant that keeps wilting",
+	"a recipe that didn't turn out", "the price of groceries lately", "a documentary about the ocean",
+	"the neighbours' noisy renovation", "a crossword I got stuck on", "the queue at the post office",
+	"a jigsaw puzzle I started",
+}
+
+// noiseTemplates are the user/assistant phrasings for a noise beat. A random
+// pair is chosen per beat so filler is varied rather than one canned line; the
+// assistant turn stays on-topic (coherent filler) but carries no ground truth.
+// Assistant templates without a "%s" ignore the topic (fill passes them through).
+var noiseTemplates = []struct{ user, asst string }{
+	{"Anyway, %s has been on my mind lately.", "Happy to chat about %s whenever you like."},
+	{"On a lighter note, I keep meaning to mention %s.", "Sounds good — nice to hear about the everyday stuff too."},
+	{"Random aside: %s came up today.", "Thanks for sharing that."},
+	{"Off-topic, but %s has kept me busy this week.", "No worries — good to hear how things are going."},
+	{"Before I forget, %s is worth a mention.", "Noted — nothing that needs any action on my end."},
+	{"Small thing, but %s has been a bit of a saga.", "Ha — %s does sound like a saga."},
 }
 
 // --- Professional-domain pools (BENCHMARK-V2 §4.1, domain register) ---

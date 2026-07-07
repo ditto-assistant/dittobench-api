@@ -640,10 +640,11 @@ func buildSessions(r *rand.Rand, facts []Fact, nSessions int) []Session {
 
 func noiseBeat(r *rand.Rand) Beat {
 	t := pick(r, noiseTopics)
+	tmpl := noiseTemplates[r.Intn(len(noiseTemplates))]
 	return Beat{
 		Kind:     BeatNoise,
 		Topic:    t,
-		UserText: capitalize("anyway, " + t + " has been on my mind."),
-		AsstText: "Thanks for sharing — happy to chat about " + t + ".",
+		UserText: capitalize(fill(tmpl.user, t)),
+		AsstText: fill(tmpl.asst, t),
 	}
 }
