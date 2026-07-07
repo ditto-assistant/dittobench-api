@@ -495,17 +495,20 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	// v2 memory engine (bench_version 3): a fresh procedural persona universe
 	// per seed replaces the static LongMemEval fixture (BENCHMARK-V2 §4–5). The
 	// plan is a pure function of the master `seed`; realization + selection share
-	// the run rng.
-	seedReq, memCases, memPara, err := gen.GenerateMemoryV2(ctx, rng, seed, prof.Mem, prof.ParaphraseFrac, llmClient, genModel)
-	if err != nil {
-		s.store.Fail(runID, "dataset generation failed: "+err.Error())
-		return
-	}
+	// the run rng. The suite lays cases out across seeding tiers (A prepared, B
+	// raw-pairs) and staged Tier-C waves.
+	memSuite := gen.GenerateMemorySuite(ctx, rng, seed, prof.Mem, prof.ParaphraseFrac, prof.Waves, prof.RawPairsFrac, llmClient, genModel)
 	para := toolPara
-	para.Add(memPara)
-	log.Printf("run %s generated: %d tool cases, %d memory cases, %d haystack pairs (%d subjects); paraphrase attempted=%d applied=%d retried=%d fallback=%d",
-		runID, len(toolCases), len(memCases), len(seedReq.Pairs), len(seedReq.Subjects),
+	para.Add(memSuite.Stats)
+	totalPairs, totalSubjects := 0, 0
+	for _, w := range memSuite.Waves {
+		totalPairs += len(w.Pairs)
+		totalSubjects += len(w.Subjects)
+	}
+	log.Printf("run %s generated: %d tool cases, %d memory cases, %d haystack pairs (%d subjects) across %d wave(s), %d Tier-B cases; paraphrase attempted=%d applied=%d retried=%d fallback=%d",
+		runID, len(toolCases), len(memSuite.Cases), totalPairs, totalSubjects, memSuite.SeedingWaves, memSuite.TierBCases,
 		para.Attempted, para.Applied, para.Retried, para.Fallback)
+	total = prof.Tools + len(memSuite.Cases) // actual case count for progress
 
 	// 3. start the container, forwarding the OpenRouter key + provider config so
 	//    the crate's agent + embedder can run. On the local harness_url path we
@@ -542,17 +545,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		return
 	}
 
-	// 4. seeding — push the fresh haystack to the crate's /seed.
-	s.store.SetStage(runID, store.StatusSeeding, 0, total)
-	if len(seedReq.Pairs) > 0 {
-		if _, err := runner.Seed(ctx, harnessURL, seedReq); err != nil {
-			s.store.Fail(runID, "seeding haystack failed: "+err.Error())
-			return
-		}
-	}
-
-	// 5. running — execute + score each case, appending partials for the UI.
-	s.store.SetStage(runID, store.StatusRunning, 0, total)
+	// Tools + judge setup.
 	tools := catalog.Catalog()
 	judgeCfg := scorer.JudgeConfig{Model: llm.ScorerModel(), ModelB: llm.ScorerModelB()}
 	perCase := make([]protocol.CaseScore, 0, total)
@@ -566,6 +559,8 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		}
 	}
 
+	// 4. tool cases — independent of the memory haystack, so run before seeding.
+	s.store.SetStage(runID, store.StatusRunning, 0, total)
 	for _, c := range toolCases {
 		resp, runErr := runner.RunCase(ctx, harnessURL, c.ID, c.Prompt, tools)
 		cs := scorer.ScoreToolCase(c, resp, runErr == nil)
@@ -580,12 +575,37 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		s.store.AppendPartial(runID, cs)
 	}
 
-	for _, mc := range memCases {
-		resp, _ := runner.RunCase(ctx, harnessURL, mc.ID, mc.Question, tools)
-		cs, jo := scorer.GradeMemory(ctx, llmClient, judgeCfg, mc, resp)
-		countJudge(jo)
-		perCase = append(perCase, cs)
-		s.store.AppendPartial(runID, cs)
+	// 5. memory cases — staged Tier-C ingestion (BENCHMARK-V2 §5.1): seed a wave,
+	//    then run the cases it unlocks (all their evidence is now seeded), then
+	//    the next wave. A single-wave run degrades to seed-then-run-all.
+	casesByWave := make([][]gen.StagedCase, memSuite.SeedingWaves)
+	for _, sc := range memSuite.Cases {
+		w := sc.RunAfterWave
+		if w < 0 {
+			w = 0
+		}
+		if w >= memSuite.SeedingWaves {
+			w = memSuite.SeedingWaves - 1
+		}
+		casesByWave[w] = append(casesByWave[w], sc)
+	}
+	for w, wave := range memSuite.Waves {
+		if len(wave.Pairs) > 0 {
+			s.store.SetStage(runID, store.StatusSeeding, len(perCase), total)
+			if _, err := runner.Seed(ctx, harnessURL, wave); err != nil {
+				s.store.Fail(runID, fmt.Sprintf("seeding haystack wave %d failed: %s", w, err.Error()))
+				return
+			}
+		}
+		s.store.SetStage(runID, store.StatusRunning, len(perCase), total)
+		for _, sc := range casesByWave[w] {
+			mc := sc.Case
+			resp, _ := runner.RunCase(ctx, harnessURL, mc.ID, mc.Question, tools)
+			cs, jo := scorer.GradeMemory(ctx, llmClient, judgeCfg, mc, resp)
+			countJudge(jo)
+			perCase = append(perCase, cs)
+			s.store.AppendPartial(runID, cs)
+		}
 	}
 
 	// Run-level LLM-availability gate (§11.3): a persistent judge outage would
@@ -617,6 +637,8 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		Tokens:            llmClient.Spent(),
 		ToolMean:          report.ToolMean,
 		MemoryMean:        report.MemoryMean,
+		SeedingWaves:      memSuite.SeedingWaves,
+		RawPairsCases:     memSuite.TierBCases,
 	}
 	if injections > 0 {
 		log.Printf("run %s: %d judge-injection attempt(s) flagged", runID, injections)

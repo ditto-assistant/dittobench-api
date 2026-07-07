@@ -52,17 +52,22 @@ type LLM interface {
 // Profile is the size knobs for a run_size.
 type Profile struct {
 	Tools          int     // number of tool cases
-	Mem            int     // number of memory (LongMemEval) cases
-	Distractors    int     // distractor pairs injected into the haystack
+	Mem            int     // number of memory cases
+	Distractors    int     // (legacy LongMemEval knob; unused by the v2 persona engine)
 	ParaphraseFrac float64 // fraction of prompts/pairs to LLM-paraphrase [0,1]
+	// Waves is the number of staged Tier-C seeding waves (1 = single seed).
+	// RawPairsFrac is the fraction of memory questions seeded pairs-only (Tier B,
+	// §5.1). small stays a single Tier-A wave so the smoke path is cheap + simple.
+	Waves        int
+	RawPairsFrac float64
 }
 
 // Profiles maps run_size → counts. small is kept CHEAP (few LLM calls) so local
 // testing is fast.
 var Profiles = map[string]Profile{
-	"small":  {Tools: 6, Mem: 6, Distractors: 20, ParaphraseFrac: 0.3},
-	"medium": {Tools: 20, Mem: 20, Distractors: 100, ParaphraseFrac: 0.5},
-	"full":   {Tools: 60, Mem: 50, Distractors: 300, ParaphraseFrac: 0.7},
+	"small":  {Tools: 6, Mem: 6, Distractors: 20, ParaphraseFrac: 0.3, Waves: 1, RawPairsFrac: 0},
+	"medium": {Tools: 20, Mem: 20, Distractors: 100, ParaphraseFrac: 0.5, Waves: 2, RawPairsFrac: 0.3},
+	"full":   {Tools: 60, Mem: 50, Distractors: 300, ParaphraseFrac: 0.7, Waves: 2, RawPairsFrac: 0.35},
 }
 
 // ProfileFor returns the Profile for a run_size, defaulting to small.

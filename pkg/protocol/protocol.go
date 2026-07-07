@@ -72,8 +72,17 @@ type SubjectLink struct {
 
 // SeedRequest is the fresh haystack the validator POSTs to <harness>/seed before
 // running memory cases. UserID defaults to "miner" if empty.
+//
+// Wave (BENCHMARK-V2 §5.1 Tier C) is the 0-based index of a STAGED seeding wave:
+// the validator may call /seed repeatedly, each call carrying the next chunk of
+// the haystack with an incremented Wave, and interleave /run questions between
+// waves so memory is built incrementally "as you converse". Repeated /seed is an
+// idempotent upsert (the reference harness's contract); a single-wave run leaves
+// Wave=0. The field is ADDITIVE-OPTIONAL — a harness that ignores it and simply
+// upserts each call still scores correctly.
 type SeedRequest struct {
 	UserID   string        `json:"user_id,omitempty"`
+	Wave     int           `json:"wave,omitempty"`
 	Pairs    []MemoryPair  `json:"pairs"`
 	Subjects []Subject     `json:"subjects"`
 	Links    []SubjectLink `json:"links"`
@@ -203,6 +212,13 @@ type RunDetails struct {
 	// Tokens is the total OpenRouter tokens (generator + judge) the run spent —
 	// budget telemetry (kept out of the composite; §5.3).
 	Tokens int64 `json:"tokens,omitempty"`
+	// SeedingWaves is how many staged /seed waves the memory haystack was split
+	// into (Tier C; 1 = single seed). RawPairsCases is how many memory cases were
+	// Tier B (raw-pairs seeding: their evidence was seeded WITHOUT prepared
+	// subjects, so the harness had to build its own subject index — §5.1). Both
+	// are advisory calibration telemetry (BENCHMARK-V2 §7 additive details).
+	SeedingWaves  int `json:"seeding_waves,omitempty"`
+	RawPairsCases int `json:"raw_pairs_cases,omitempty"`
 	// ToolMean / MemoryMean echo the per-suite means for convenience alongside the
 	// per-category breakdown in ScoreReport.per_category.
 	ToolMean   float64 `json:"tool_mean"`
