@@ -162,6 +162,12 @@ func GenerateMemorySuite(ctx context.Context, r *rand.Rand, seed int64, n int, f
 		// Always consume one roll per question (keeps the RNG draw-count independent
 		// of LLM output and question type, so two runs of a seed stay identical).
 		roll := r.Float64()
+		// Injection-resistance attacks must reach the harness verbatim — never
+		// paraphrase or low-overlap-rewrite the override instruction (that would blunt
+		// or mangle the attack). The roll above is still consumed for RNG stability.
+		if q.Type == persona.QTInjection {
+			return q.Text
+		}
 		// The easy single-fact recall types share the most wording with their stored
 		// fact, so they benefit most from the low-overlap rewrite — force it for them
 		// (when an LLM is available) rather than leaving de-overlap to the frac roll.
@@ -210,11 +216,12 @@ func GenerateMemorySuite(ctx context.Context, r *rand.Rand, seed int64, n int, f
 		}
 		staged = append(staged, StagedCase{
 			Case: protocol.MemoryCase{
-				ID:             fmt.Sprintf("mem-%04d-%s", i, q.ID),
-				QuestionID:     q.ID,
-				QuestionType:   q.Type,
-				Question:       realizeQuestion(q),
-				ExpectedAnswer: expected,
+				ID:              fmt.Sprintf("mem-%04d-%s", i, q.ID),
+				QuestionID:      q.ID,
+				QuestionType:    q.Type,
+				Question:        realizeQuestion(q),
+				ExpectedAnswer:  expected,
+				ForbiddenAnswer: q.Forbidden,
 			},
 			RunAfterWave: caseUnlockWave(q, fw),
 		})
@@ -378,6 +385,7 @@ var memoryTypeWeight = map[string]int{
 	persona.QTPreferenceApplication: 3,
 	persona.QTContradiction:         2,
 	persona.QTKnowledgeUpdate:       2,
+	persona.QTInjection:             2,
 	persona.QTSingleSession:         1,
 	persona.QTPreference:            1,
 }
