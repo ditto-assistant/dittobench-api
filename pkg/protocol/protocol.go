@@ -103,11 +103,56 @@ type ToolDefinition struct {
 }
 
 // RunRequest is what the validator POSTs to the harness /run endpoint per case.
+//
+// ToolEndpoint (BENCHMARK-V2 §7 Phase C) is an OPTIONAL validator-served mock
+// tool-execution URL. When present, a harness that supports observed execution
+// should EXECUTE its non-memory catalog tool calls by POSTing a ToolExecRequest
+// to this URL (instead of stubbing them locally) and use the returned
+// ToolExecResponse.Result. Doing so lets the validator (a) OBSERVE the real tool
+// trajectory rather than trusting the harness's self-reported tool_calls (kills
+// W3), and (b) score whether the answer incorporates the returned content
+// (result-usage). The field is ADDITIVE-OPTIONAL: a harness that ignores it and
+// stubs tools locally still scores, but selection-only and at a capped ceiling on
+// the categories the endpoint would have served (their self-reported calls are
+// untrusted). Memory tools are NOT served here — the harness answers those from
+// its own seeded memory.
+//
+// UserID (BENCHMARK-V2 §7 Phase C, multi-graph isolation) scopes the case to one
+// seeded memory graph; it mirrors the user_id the haystack was seeded under. A
+// harness must answer only from that user's memory and never leak another user's
+// facts. Empty means the default single-user graph ("miner").
 type RunRequest struct {
 	CaseID       string           `json:"case_id"`
 	SystemPrompt string           `json:"system_prompt"`
 	UserInput    string           `json:"user_input"`
 	Tools        []ToolDefinition `json:"tools"`
+	ToolEndpoint string           `json:"tool_endpoint,omitempty"`
+	UserID       string           `json:"user_id,omitempty"`
+}
+
+// ToolExecRequest is what a harness POSTs to the validator-served tool_endpoint
+// (RunRequest.ToolEndpoint) to actually EXECUTE one non-memory catalog tool
+// during a case. The validator returns a deterministic, seed-derived mock result
+// (ToolExecResponse) and records the call as the authoritative observed
+// trajectory for that case (BENCHMARK-V2 §7 Phase C). CaseID ties the call to the
+// running case; UserID echoes RunRequest.UserID; Hop is the 0-based position in
+// the harness's tool sequence (for order scoring).
+type ToolExecRequest struct {
+	CaseID string          `json:"case_id"`
+	UserID string          `json:"user_id,omitempty"`
+	Name   string          `json:"name"`
+	Args   json.RawMessage `json:"args,omitempty"`
+	Hop    int             `json:"hop,omitempty"`
+}
+
+// ToolExecResponse is the mock result the validator returns for a ToolExecRequest.
+// Result is the tool's output the harness should reason over (a web snippet, a
+// page's text, a job status, …), seeded deterministically per case. Error is set
+// (with Result empty) when the call is malformed or names a tool the mock server
+// does not serve; a harness should treat it like a real tool error.
+type ToolExecResponse struct {
+	Result string `json:"result"`
+	Error  string `json:"error,omitempty"`
 }
 
 // ObservedToolCall is a tool call the harness made.

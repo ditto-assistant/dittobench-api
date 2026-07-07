@@ -1,0 +1,395 @@
+// Package toolexec implements the validator-served MOCK tool-execution endpoint
+// for Phase C observed execution (BENCHMARK-V2 §7). A harness that supports
+// observed execution POSTs each of its non-memory catalog tool calls to this
+// endpoint (RunRequest.ToolEndpoint) instead of stubbing them locally; the server
+//
+//  1. returns a deterministic, seed-derived MOCK result for the tool (so the
+//     harness has real content to reason over — a web snippet, a page's text, a
+//     job status), and
+//  2. RECORDS the call as the authoritative observed tool trajectory for that
+//     case — the validator no longer has to trust the harness's self-reported
+//     tool_calls (kills W3).
+//
+// Memory tools (search_memories, search_subjects, fetch_memories,
+// search_memories_in_subjects) are deliberately NOT served: the harness answers
+// those from its own seeded memory, and serving them would leak the answer. A
+// call to a non-served tool is recorded (it IS part of the trajectory) but
+// answered with an error, exactly as a real unavailable tool would be.
+//
+// Determinism: every result is a pure function of (masterSeed, caseID, toolName,
+// args). No wall clock, no crypto-rand, no map-iteration order — so the served
+// content is reproducible from the run seed and can be folded into the dataset
+// hash (the reproducibility contract, §4.2).
+package toolexec
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"math/rand"
+	"net/http"
+	"sort"
+	"strings"
+	"sync"
+
+	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
+)
+
+// memoryTools are the catalog tools the mock endpoint does NOT execute: the
+// harness answers memory questions from its own seeded store, so serving them
+// would hand over the answer. Kept as a set for O(1) Serves() checks.
+var memoryTools = map[string]bool{
+	"search_memories":             true,
+	"search_subjects":             true,
+	"fetch_memories":              true,
+	"search_memories_in_subjects": true,
+}
+
+// Serves reports whether the mock endpoint executes the named catalog tool (i.e.
+// it is an external-world tool, not a memory tool). A case whose every expected
+// tool Serves() is "observable": its trajectory can be scored from the
+// validator's own observations rather than the harness's self-report.
+func Serves(name string) bool { return name != "" && !memoryTools[name] }
+
+// Observable reports whether a tool case's expected trajectory is entirely made
+// of served (non-memory) tools, so the validator expects to observe every call
+// via the endpoint. No-expected-tool cases (chit-chat, abstention) are not
+// observable — there is nothing to observe.
+func Observable(c protocol.ToolCase) bool {
+	if len(c.ExpectedTools) == 0 {
+		return false
+	}
+	for _, t := range c.ExpectedTools {
+		if !Serves(t.Name) {
+			return false
+		}
+	}
+	return true
+}
+
+// Fixture is the per-case mock tool environment. It is a pure function of the
+// master seed and the case, so the same run seed always serves the same content.
+// Needle is the coined fact the content tools embed in their result; a correct
+// result-usage answer must incorporate it (scored in C2). Empty for cases whose
+// served tools carry no answer-bearing content (settings, feedback, image).
+type Fixture struct {
+	seed   int64  // per-case seed derived from (masterSeed, caseID)
+	Needle string `json:"needle,omitempty"`
+}
+
+// BuildFixture derives the deterministic mock environment for one tool case.
+func BuildFixture(masterSeed int64, c protocol.ToolCase) Fixture {
+	seed := caseSeed(masterSeed, c.ID)
+	f := Fixture{seed: seed}
+	if caseCarriesNeedle(c) {
+		f.Needle = synthNeedle(rand.New(rand.NewSource(seed)))
+	}
+	return f
+}
+
+// caseCarriesNeedle reports whether any of a case's expected tools returns
+// answer-bearing content (a web result, a page, a job status/result) — the tools
+// whose output a correct answer is expected to USE.
+func caseCarriesNeedle(c protocol.ToolCase) bool {
+	for _, t := range c.ExpectedTools {
+		if contentTools[t.Name] {
+			return true
+		}
+	}
+	return false
+}
+
+// contentTools are the served tools whose result carries a fact the user's
+// answer should incorporate (result-usage). Other served tools (settings,
+// feedback, image/artifact creation) return only a confirmation.
+var contentTools = map[string]bool{
+	"search_web":             true,
+	"read_links":             true,
+	"get_agent_job_status":   true,
+	"execute_agent_workflow": true,
+	"list_agent_jobs":        true,
+}
+
+// Result returns the mock output for a tool call against this fixture. It is
+// deterministic in (fixture seed, name, args). A non-served tool yields ("",
+// false) so the caller returns an error to the harness.
+func (f Fixture) Result(name string, args json.RawMessage) (string, bool) {
+	if !Serves(name) {
+		return "", false
+	}
+	// A per-call RNG folds the tool name + args in so distinct calls in a
+	// trajectory (e.g. two read_links on different URLs) get distinct-but-stable
+	// text, without any shared mutable state.
+	r := rand.New(rand.NewSource(f.seed ^ int64(fnv1a(name+"|"+argsKey(args)))))
+	switch name {
+	case "search_web":
+		src := webSources[r.Intn(len(webSources))]
+		return fmt.Sprintf("Top result from %s: %s More at %s.", src, f.needleSentence(), coinedURL(r)), true
+	case "read_links":
+		return fmt.Sprintf("%s\n\n%s", coinedTitle(r), f.needleSentence()), true
+	case "execute_agent_job":
+		return fmt.Sprintf("Dispatched background job %s.", jobID(r)), true
+	case "get_agent_job_status":
+		return fmt.Sprintf("Job %s: completed. Result: %s", jobID(r), f.needleSentence()), true
+	case "list_agent_jobs":
+		return fmt.Sprintf("Recent jobs: %s (completed), %s (running).", jobID(r), jobID(r)), true
+	case "execute_agent_workflow":
+		return fmt.Sprintf("Workflow run %s finished. %s", jobID(r), f.needleSentence()), true
+	case "create_image", "edit_image":
+		return fmt.Sprintf("Image generated: %s", coinedURL(r)), true
+	case "artifacts":
+		return fmt.Sprintf("Artifact created: %s", coinedURL(r)), true
+	case "file_feedback_for_team":
+		return fmt.Sprintf("Thanks — your feedback was filed (ticket %s).", jobID(r)), true
+	case "set_theme", "set_main_model", "set_reasoning_effort", "set_chat_tool_preferences":
+		return "Setting updated.", true
+	default:
+		return "Done.", true
+	}
+}
+
+// needleSentence renders the fixture's coined fact as a sentence, or a neutral
+// filler when the fixture carries no needle (a served tool called on a case that
+// did not expect a content tool).
+func (f Fixture) needleSentence() string {
+	if f.Needle == "" {
+		return "No notable details were found."
+	}
+	return f.Needle + "."
+}
+
+// --- content pools (fabricated so results can't be answered from base-model
+// knowledge — an anti-memorization property, like the persona pools) ---
+
+var (
+	coinedNames = []string{
+		"Veltrix", "Kelvane", "Osric", "Marndor", "Quenby", "Zephyra",
+		"Orlin", "Thal", "Brayen", "Cindral", "Duvos", "Ferrow",
+	}
+	coinedNouns = []string{
+		"index", "reservoir", "initiative", "alloy", "protocol", "corridor",
+		"ledger", "array", "expedition", "foundry", "syndicate", "lattice",
+	}
+	coinedUnits = []string{
+		"points", "acre-feet", "units", "basis points", "kilotonnes",
+		"megawatts", "parsecs", "hectares",
+	}
+	webSources = []string{
+		"the Ansible Gazette", "Torva Daily", "the Merridian Review",
+		"Halcyon Times", "the Verge of Nowhere", "Solaris Wire",
+	}
+)
+
+// synthNeedle coins a fabricated fact of the form "the <Name> <noun> reached
+// <number> <unit>" — a distinctive value a correct result-usage answer must echo.
+func synthNeedle(r *rand.Rand) string {
+	name := coinedNames[r.Intn(len(coinedNames))]
+	noun := coinedNouns[r.Intn(len(coinedNouns))]
+	num := 100 + r.Intn(99900) // 100..99999, thousands-formatted below
+	unit := coinedUnits[r.Intn(len(coinedUnits))]
+	return fmt.Sprintf("the %s %s reached %s %s", name, noun, commaNumber(num), unit)
+}
+
+// NeedleValue extracts the distinctive value token a result-usage answer must
+// carry from a needle — the comma-formatted number (e.g. "3,418"). Empty when the
+// fixture has no needle. Used by the scorer (C2) to check answer incorporation.
+func (f Fixture) NeedleValue() string {
+	if f.Needle == "" {
+		return ""
+	}
+	fields := strings.Fields(f.Needle)
+	for _, tok := range fields {
+		if isCommaNumber(tok) {
+			return tok
+		}
+	}
+	return ""
+}
+
+func coinedURL(r *rand.Rand) string {
+	host := strings.ToLower(coinedNames[r.Intn(len(coinedNames))])
+	slug := strings.ToLower(coinedNouns[r.Intn(len(coinedNouns))])
+	return fmt.Sprintf("https://%s.example/%s-%d", host, slug, 1000+r.Intn(9000))
+}
+
+func coinedTitle(r *rand.Rand) string {
+	return fmt.Sprintf("The %s %s: an overview", coinedNames[r.Intn(len(coinedNames))], coinedNouns[r.Intn(len(coinedNouns))])
+}
+
+func jobID(r *rand.Rand) string { return fmt.Sprintf("job-%05d", r.Intn(100000)) }
+
+// commaNumber renders n with thousands separators (deterministic, no locale).
+func commaNumber(n int) string {
+	s := fmt.Sprintf("%d", n)
+	if len(s) <= 3 {
+		return s
+	}
+	var b strings.Builder
+	pre := len(s) % 3
+	if pre > 0 {
+		b.WriteString(s[:pre])
+		if len(s) > pre {
+			b.WriteByte(',')
+		}
+	}
+	for i := pre; i < len(s); i += 3 {
+		b.WriteString(s[i : i+3])
+		if i+3 < len(s) {
+			b.WriteByte(',')
+		}
+	}
+	return b.String()
+}
+
+func isCommaNumber(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= '0' && c <= '9') || c == ',' {
+			continue
+		}
+		return false
+	}
+	return strings.ContainsAny(s, "0123456789")
+}
+
+// caseSeed derives a per-case seed from the master seed and case id — pure and
+// order-independent, so every case's mock environment is fixed by the run seed.
+func caseSeed(master int64, caseID string) int64 {
+	return master ^ int64(fnv1a(caseID))
+}
+
+// argsKey normalizes tool-call args to a stable string so identical args produce
+// identical mock output regardless of key order in the JSON.
+func argsKey(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return string(raw) // opaque but stable
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, k := range keys {
+		fmt.Fprintf(&b, "%s=%v;", k, m[k])
+	}
+	return b.String()
+}
+
+// fnv1a is a small deterministic string hash (FNV-1a) for stable seed mixing.
+func fnv1a(s string) uint32 {
+	var h uint32 = 2166136261
+	for i := 0; i < len(s); i++ {
+		h ^= uint32(s[i])
+		h *= 16777619
+	}
+	return h
+}
+
+// --- HTTP server: serves results and records observed calls ---
+
+// caseState holds one case's fixture and the trajectory the harness executed
+// against it. Guarded by mu because a harness may issue tool calls concurrently.
+type caseState struct {
+	mu       sync.Mutex
+	fixture  Fixture
+	observed []protocol.ObservedToolCall
+}
+
+// Server is the validator-served mock tool endpoint for one run. Register every
+// tool case's fixture, mount it at a host-reachable URL, hand that URL to the
+// harness via RunRequest.ToolEndpoint, then read back Observed(caseID) after the
+// case to score the authoritative trajectory.
+type Server struct {
+	mu    sync.RWMutex
+	cases map[string]*caseState
+}
+
+// NewServer returns an empty server (register cases before serving).
+func NewServer() *Server { return &Server{cases: map[string]*caseState{}} }
+
+// Register installs a case's fixture. Safe to call before serving.
+func (s *Server) Register(caseID string, f Fixture) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cases[caseID] = &caseState{fixture: f}
+}
+
+// Observed returns the tool calls the harness executed for a case, in the order
+// received (nil if none / unknown case). The returned slice is a copy.
+func (s *Server) Observed(caseID string) []protocol.ObservedToolCall {
+	s.mu.RLock()
+	cs := s.cases[caseID]
+	s.mu.RUnlock()
+	if cs == nil {
+		return nil
+	}
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	if len(cs.observed) == 0 {
+		return nil
+	}
+	out := make([]protocol.ObservedToolCall, len(cs.observed))
+	copy(out, cs.observed)
+	return out
+}
+
+// maxToolBody caps a tool-exec request body (args are tiny).
+const maxToolBody = 64 << 10
+
+// ServeHTTP implements the tool endpoint: POST <base>/tool with a
+// ToolExecRequest, returns a ToolExecResponse. Records the call (any tool) and
+// returns a mock result (served tools) or an error (memory / unknown tools).
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, protocol.ToolExecResponse{Error: "POST required"})
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxToolBody))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, protocol.ToolExecResponse{Error: "unreadable body"})
+		return
+	}
+	var req protocol.ToolExecRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, protocol.ToolExecResponse{Error: "invalid JSON"})
+		return
+	}
+
+	s.mu.RLock()
+	cs := s.cases[req.CaseID]
+	s.mu.RUnlock()
+	if cs == nil {
+		// Unknown case: still answer (so the harness isn't wedged) but there is
+		// nothing to record. This should not happen for a registered run.
+		writeJSON(w, http.StatusNotFound, protocol.ToolExecResponse{Error: "unknown case_id"})
+		return
+	}
+
+	cs.mu.Lock()
+	cs.observed = append(cs.observed, protocol.ObservedToolCall{Name: req.Name, Args: req.Args, Hop: req.Hop})
+	fixture := cs.fixture
+	cs.mu.Unlock()
+
+	result, ok := fixture.Result(req.Name, req.Args)
+	if !ok {
+		// A memory or unknown tool: the harness should not route it here. Record it
+		// (done above — it is part of the observed trajectory) but return an error.
+		writeJSON(w, http.StatusOK, protocol.ToolExecResponse{Error: "tool not available via this endpoint: " + req.Name})
+		return
+	}
+	writeJSON(w, http.StatusOK, protocol.ToolExecResponse{Result: result})
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
