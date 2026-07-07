@@ -1,4 +1,4 @@
-package main
+package refharness
 
 import (
 	"testing"
@@ -16,8 +16,8 @@ func tools() []protocol.ToolDefinition {
 
 func TestRouteDeterministic(t *testing.T) {
 	p := "search the web for the latest quantum computing news"
-	a := route(p, tools())
-	b := route(p, tools())
+	a := Route(p, tools())
+	b := Route(p, tools())
 	if len(a) != len(b) {
 		t.Fatalf("non-deterministic length: %d vs %d", len(a), len(b))
 	}
@@ -36,7 +36,7 @@ func TestRouteKeywordMatch(t *testing.T) {
 		{"hiya, just saying hello", ""}, // no tool keyword → call nothing
 	}
 	for _, c := range cases {
-		got := route(c.prompt, tools())
+		got := Route(c.prompt, tools())
 		if c.want == "" {
 			if len(got) != 0 {
 				t.Fatalf("%q: expected no call, got %v", c.prompt, got)
@@ -50,7 +50,7 @@ func TestRouteKeywordMatch(t *testing.T) {
 }
 
 func TestRouteEmitsObjectArgs(t *testing.T) {
-	got := route("search the public web", tools())
+	got := Route("search the public web", tools())
 	if len(got) != 1 {
 		t.Fatalf("expected one call, got %d", len(got))
 	}
