@@ -230,9 +230,9 @@ func clamp01(x float64) float64 {
 
 func round6(x float64) float64 { return math.Round(x*1e6) / 1e6 }
 
-// Aggregate folds per-case scores into a ScoreReport. The composite is the
-// canonical 0.6*tool_mean + 0.4*memory_mean (see below); per-category breakdown
-// and median latency included.
+// Aggregate folds per-case scores into a ScoreReport. The composite is the v2
+// 0.5*tool_mean + 0.5*memory_mean (see below); per-category breakdown and
+// median latency included.
 func Aggregate(runID string, perCase []protocol.CaseScore) protocol.ScoreReport {
 	var toolSum, toolN, memSum, memN float64
 	latencies := make([]int64, 0, len(perCase))
@@ -265,13 +265,16 @@ func Aggregate(runID string, perCase []protocol.CaseScore) protocol.ScoreReport 
 	if memN > 0 {
 		memMean = memSum / memN
 	}
-	// Canonical DittoBench composite (matches the platform's recorded formula):
-	// 0.6*tool_mean + 0.4*memory_mean when both kinds are present; falls back to
-	// the single present mean for tool-only or memory-only runs.
+	// DittoBench v2 composite (bench_version 3): 0.5*tool_mean + 0.5*memory_mean
+	// when both kinds are present; falls back to the single present mean for
+	// tool-only or memory-only runs. Rebalanced from v1's 0.6/0.4 (§5.3, §10.1):
+	// memory is the core product value, memory-coupled tool cases already push
+	// memory competence into tool_mean, and the raw-pairs tier (Tier B) makes
+	// memory_mean the harder axis. Latency/cost stay OUT of the composite.
 	composite := 0.0
 	switch {
 	case toolN > 0 && memN > 0:
-		composite = 0.6*toolMean + 0.4*memMean
+		composite = 0.5*toolMean + 0.5*memMean
 	case toolN > 0:
 		composite = toolMean
 	case memN > 0:

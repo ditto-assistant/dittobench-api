@@ -236,7 +236,7 @@ type ScoreReport struct {
 	RunID       string         `json:"run_id"`
 	Seed        int64          `json:"seed"` // dataset seed (anti-overfit reproducibility)
 	GeneratedAt string         `json:"generated_at"`
-	Composite   float64        `json:"composite"`   // 0..1 weighted composite: 0.6*tool_mean + 0.4*memory_mean
+	Composite   float64        `json:"composite"`   // 0..1 weighted composite: 0.5*tool_mean + 0.5*memory_mean (v2)
 	ToolMean    float64        `json:"tool_mean"`   // 0..1 mean tool-case composite
 	MemoryMean  float64        `json:"memory_mean"` // 0..1 fraction of memory cases correct
 	MedianMs    int64          `json:"median_ms"`
