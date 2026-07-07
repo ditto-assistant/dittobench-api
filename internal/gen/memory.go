@@ -163,7 +163,10 @@ func GenerateMemory(ctx context.Context, r *rand.Rand, n, distractors int, frac 
 		// which would make the plan layer non-reproducible from the seed.
 		for _, sessIdx := range slices.Sorted(maps.Keys(mc.SessionToPairs)) {
 			for _, pid := range mc.SessionToPairs[sessIdx] {
-				if _, ok := assets.pairsByID[pid]; !ok || usedPairs[pid] {
+				// Never seed a pair that is evidence for an abstention question,
+				// even when a recall question also references it — otherwise the
+				// needle is present and the abstention case is no longer answer-absent.
+				if _, ok := assets.pairsByID[pid]; !ok || usedPairs[pid] || absPairs[pid] {
 					continue
 				}
 				usedPairs[pid] = true

@@ -75,6 +75,16 @@ func TestAuditSliceOnlyWhenModelBSet(t *testing.T) {
 	}
 }
 
+func TestInjectionFlagNumericJSON(t *testing.T) {
+	// Some models emit injection_attempt as a number (1) rather than a bool.
+	f := &fakeLLM{reply: `{"correct":"yes","grounded":"yes","injection_attempt":1}`}
+	mc := protocol.MemoryCase{ID: "m1", QuestionType: "multi-session", ExpectedAnswer: "blue", Question: "q"}
+	cs := GradeMemory(context.Background(), f, JudgeConfig{Model: "a"}, mc, protocol.RunResponse{FinalText: "sneaky"})
+	if cs.Score != 0 || !cs.Injection {
+		t.Fatalf("numeric injection_attempt=1 must be honored: %+v", cs)
+	}
+}
+
 func TestJudgePromptsFenceUntrustedOutput(t *testing.T) {
 	f := &fakeLLM{reply: `{"correct":"yes","grounded":"yes"}`}
 	JudgeMemoryGraded(context.Background(), f, "m", "q", "ans", "the model's answer", "multi-session")

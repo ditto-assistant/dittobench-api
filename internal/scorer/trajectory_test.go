@@ -49,6 +49,22 @@ func TestArgScoringExactValue(t *testing.T) {
 	}
 }
 
+func TestArgValueBoundaryNotSubstring(t *testing.T) {
+	c := protocol.ToolCase{
+		ID: "c", MaxToolCalls: 1,
+		ExpectedTools: []protocol.ToolSpec{{Name: "set_reasoning_effort", RequiredArgs: map[string]string{"effort": "low"}}},
+	}
+	good := detScore(c, call("set_reasoning_effort", `{"effort":"low"}`))
+	// "yellow" contains "low" as a substring but is not the enum value.
+	bad := detScore(c, call("set_reasoning_effort", `{"effort":"yellow"}`))
+	if !near(good, 1.0) {
+		t.Fatalf("exact enum should be 1.0, got %v", good)
+	}
+	if bad >= good {
+		t.Fatalf("'yellow' must not satisfy required 'low': good=%v bad=%v", good, bad)
+	}
+}
+
 func TestForbiddenArgPenalized(t *testing.T) {
 	c := protocol.ToolCase{
 		ID: "c", MaxToolCalls: 1,

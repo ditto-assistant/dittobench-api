@@ -183,6 +183,9 @@ func parseArgs(raw json.RawMessage) map[string]any {
 // that embeds the required entity ("news about Tokyo" ⊇ "Tokyo") still credits.
 func argValueEqual(got any, want string) bool {
 	want = strings.ToLower(strings.TrimSpace(want))
+	if want == "" {
+		return false // an empty required value is undefined; never auto-credit
+	}
 	var gotStr string
 	switch v := got.(type) {
 	case string:
@@ -195,7 +198,9 @@ func argValueEqual(got any, want string) bool {
 		gotStr = string(b)
 	}
 	gotStr = strings.ToLower(strings.TrimSpace(gotStr))
-	return gotStr == want || strings.Contains(gotStr, want)
+	// Whole-token/phrase containment (not raw substring) so a short enum value
+	// like "low" is not satisfied by "yellow"/"below".
+	return gotStr == want || containsBoundedPhrase(gotStr, want)
 }
 
 func sortedArgKeys(m map[string]string) []string {

@@ -351,6 +351,13 @@ func deterministicMemoryHit(expected, response string) bool {
 	if isPureNumber(e) {
 		return containsNumberToken(r, e)
 	}
+	// A single-word answer that is a common English function/modal word (e.g.
+	// "no", "may", "will") occurs incidentally in unrelated or declining
+	// responses, so don't short-circuit on it — defer to the judge. Distinctive
+	// answers ("blue", "tokyo", multi-word phrases) are trusted.
+	if !strings.Contains(e, " ") && commonAnswerWords[e] {
+		return false
+	}
 	// Whole-word/phrase match (bounded by non-alphanumerics) so a short answer
 	// like "no" does not spuriously match inside "know", nor "Ann" inside
 	// "annoyingly" — a raw substring check would credit a wrong answer.
@@ -378,6 +385,17 @@ func containsBoundedPhrase(text, phrase string) bool {
 
 func isAlnum(b byte) bool {
 	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
+}
+
+// commonAnswerWords are single words too generic to trust as a deterministic
+// answer match — a containing response is likely incidental (esp. a decline like
+// "you may not have that"), so these defer to the LLM judge.
+var commonAnswerWords = map[string]bool{
+	"no": true, "yes": true, "may": true, "can": true, "will": true,
+	"is": true, "are": true, "was": true, "were": true, "be": true,
+	"do": true, "did": true, "has": true, "had": true, "not": true,
+	"the": true, "and": true, "or": true, "one": true, "two": true,
+	"it": true, "to": true, "of": true, "in": true, "on": true, "at": true,
 }
 
 // normalizeAnswer lowercases, trims surrounding punctuation/quotes, and collapses
@@ -409,8 +427,9 @@ func isPureNumber(s string) bool {
 	return true
 }
 
-// containsNumberToken reports whether num appears in text bounded by non-digits
-// (so "5" matches "have 5 cats" but not "500").
+// containsNumberToken reports whether num appears in text bounded by non-numeric
+// characters — a digit OR a decimal/thousands separator counts as "attached", so
+// "5" matches "have 5 cats" but neither "500" nor "3.5".
 func containsNumberToken(text, num string) bool {
 	for i := 0; ; {
 		j := strings.Index(text[i:], num)
@@ -418,8 +437,8 @@ func containsNumberToken(text, num string) bool {
 			return false
 		}
 		j += i
-		before := j == 0 || !isDigit(text[j-1])
-		after := j+len(num) >= len(text) || !isDigit(text[j+len(num)])
+		before := j == 0 || !numAttached(text[j-1])
+		after := j+len(num) >= len(text) || !numAttached(text[j+len(num)])
 		if before && after {
 			return true
 		}
@@ -428,6 +447,10 @@ func containsNumberToken(text, num string) bool {
 }
 
 func isDigit(b byte) bool { return b >= '0' && b <= '9' }
+
+// numAttached reports whether b would make an adjacent digit run part of a larger
+// number (another digit, or a decimal/thousands separator).
+func numAttached(b byte) bool { return isDigit(b) || b == '.' || b == ',' }
 
 // median returns the median of latency values (0 for empty input).
 func median(vals []int64) int64 {

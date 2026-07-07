@@ -121,9 +121,11 @@ func boolish(x any) bool {
 	switch v := x.(type) {
 	case bool:
 		return v
+	case float64: // JSON numbers decode as float64; treat any non-zero as true
+		return v != 0
 	case string:
 		s := strings.ToLower(strings.TrimSpace(v))
-		return s == "true" || s == "yes"
+		return s == "true" || s == "yes" || s == "1"
 	default:
 		return false
 	}

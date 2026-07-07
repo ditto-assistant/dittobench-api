@@ -23,10 +23,13 @@ func TestDeterministicMemoryHit(t *testing.T) {
 		{"5", "you have 500 dollars", false}, // number-token boundary
 		{"3.5", "about 3.5 miles", true},
 		{"", "anything at all", false},
-		{"no", "I know nothing about your plans", false}, // must not match inside "know"
+		{"no", "I know nothing about your plans", false},    // common word → defer to judge
+		{"may", "you may not have that information", false},  // common modal → defer
 		{"Ann", "your planner is annoyingly complex", false}, // not inside "annoyingly"
-		{"blue", "it was blue, actually", true},             // trailing punctuation is a boundary
+		{"blue", "it was blue, actually", true},             // distinctive; trailing punct is a boundary
 		{"James Webb", "the james webb telescope", true},    // multi-word phrase
+		{"5", "about 3.5 miles", false},                     // decimal boundary: 5 != 3.5
+		{"5", "you have 5 cats", true},
 	}
 	for _, c := range cases {
 		if got := deterministicMemoryHit(c.exp, c.resp); got != c.want {
