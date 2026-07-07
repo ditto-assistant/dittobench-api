@@ -20,26 +20,34 @@ single-source — do not quote figures without confirming.
 The v2 engine is **structurally strong and research-aligned** on the axes that
 sank v1: it is contamination-resistant by construction (seeded procedural
 generation, per-submission crypto-random seed), it covers the full canonical
-memory-ability taxonomy, it now spans **professional registers** (software /
-medical / legal) rather than only casual/personal life, and its filler is
-coherent rather than disjoint padding. Difficulty is controlled by explicit,
-mostly-orthogonal dials.
+memory-ability taxonomy, it now spans **four professional registers** (software /
+medical / legal / finance) rather than only casual/personal life, tests **N-state
+trajectories and cross-fact multi-hop** (not just latest-value-wins), and its
+filler is coherent rather than disjoint padding. Difficulty is controlled by
+explicit, mostly-orthogonal dials.
 
-Three **honest gaps** remain, all documented in §8 with the research that names
-them:
+**Post-review robustness pass (implemented, §8).** Three of the review's original
+gaps are now closed and validated:
 
-1. **The literal-match trap (highest priority).** Some recall questions still
-   lexically overlap the stored fact ("What is my favorite color?" ↔ "My
-   favorite color is teal"). NoLiMa shows this can overstate memory ability by
-   30-point margins. We mitigate on the *needle* side (LLM paraphrase moves the
-   stored wording) but not yet on the *query* side.
-2. **No human-in-the-loop answer-key audit.** Our answer key is
-   machine-derived-and-guaranteed (the canonical value is verbatim-preserved), so
-   it avoids LoCoMo's 6.4% hallucinated-key problem *by construction* — but the
-   judge's acceptance behavior on wrong-but-adjacent answers is not yet audited.
-3. **Contradiction is a defined, not inherited, category.** No incumbent
-   benchmark gives it to us; our reversal mechanic is reasonable but unvalidated
-   against an external standard.
+1. **The literal-match trap (NoLiMa) — CLOSED.** Recall questions are now reworded
+   to share fewer content words with their stored fact (query-side gap), with
+   `lexical_gap` telemetry proving the residual. Live: mean overlap dropped
+   0.45→0.30, and in the real-recall E2E the two reworded questions were *exactly*
+   the two the harness failed to recall — the shortcut, removed. (§8.1)
+2. **Judge-adjacency — AUDITED & PASSING.** A `benchcal --judge-audit` harness
+   grades correct / near-miss / off-topic answers with the real judge: **accept
+   1.000, adjacent-reject 0.975, off-topic-reject 1.000** — versus LoCoMo's judge,
+   which accepted 62.81% of the near-misses ours rejects. (§8.2)
+3. **N-state sequences — ADDED.** One update chain per run is now a 3–4 state
+   trajectory with previous-value, ordered-history, and state-at-event multi-hop
+   questions. (§8.5)
+
+Remaining, lower-priority gaps: validate the contradiction mechanic against an
+external standard (§8.3), make distractor-count/evidence-position independent
+dials (§8.4), and multi-modal (non-chat) memory sources (§8.6). No human
+adversarial answer-key pass — mitigated because the key is machine-*guaranteed*
+(verbatim-preserved), avoiding LoCoMo's 6.4% hallucinated-key problem by
+construction.
 
 Everything below expands these with sources and concrete examples.
 
@@ -89,10 +97,11 @@ companies(32) × carModels(28) × cities-hometown(40) × firstNames-partner(48) 
 universities(28)  ≈  3.0 × 10¹⁵  distinct skeletons.
 ```
 
-The **domain layer** (new) multiplies this: every persona draws one of 3 domains,
-each contributing two scalar attributes + one list family, e.g. software adds
-`languages(18) × editors(12) × C(services 16,3)=560 ≈ 1.2×10⁵`; medical and legal
-are comparable (~7–9×10⁴). Counting domains lifts the skeleton to **~3×10²⁰**.
+The **domain layer** (new) multiplies this: every persona draws one of **4
+domains** (software / medical / legal / finance), each contributing two scalar
+attributes + one list family, e.g. software adds `languages(18) × editors(12) ×
+C(services 16,3)=560 ≈ 1.2×10⁵`; the others are comparable (~7–9×10⁴). Counting
+domains lifts the skeleton to **~3×10²⁰**.
 
 On top of that, still multiplicative: list-attribute subsets
 (`C(projectNames 20, k)`, trips, pets), preference/opinion draws, which
@@ -125,14 +134,13 @@ five canonical abilities `[P, arXiv:2410.10813]` plus cross-benchmark additions)
 | Knowledge update / overwrite `[LongMemEval KU]` | `knowledge-update` (latest-value-wins) | ✅ |
 | Abstention / false-premise `[LongMemEval ABS; LoCoMo adversarial]` | `abstention` (needle-absent) | ✅ |
 | Preference application / personalization `[LongMemEval single-session-preference]` | `preference` + `preference-application` | ✅ (split into recall vs *apply*) |
-| Cross-session entity/state tracking `[RULER var-tracking; LME-V2 dynamic state]` | knowledge-update on domain scalars (re-diagnosis, language migration) | ◑ partial |
+| Cross-session entity/state tracking `[RULER var-tracking; LME-V2 dynamic state]` | N-state trajectory + multi-hop state-at-event (§8.5) | ✅ |
 | Aggregation / counting `[RULER CWE/FWE; bAbI]` | `multi-session` count questions (`Numeric`) | ✅ |
 | Contradiction / conflict handling *(no benchmark owns this — you define it)* | `contradiction` (opinion reversal) | ✅ (defined, §8.3) |
 
 We cover **all five canonical abilities plus preference-application, counting,
-and contradiction** — broader than any single incumbent. The one partial is
-first-class *state tracking* (a value that changes 3+ times with intermediate
-queries); we test the 2-state update chain, not the N-state trajectory.
+contradiction, and N-state trajectory tracking** (previous-value, ordered-history,
+and state-at-event multi-hop; §8.5) — broader than any single incumbent.
 
 ---
 
@@ -157,11 +165,14 @@ jargon breaks the paraphrase + embedding match that a memory harness runs on
 
 ### 3.2 What v2 adds (worked examples — real generator output)
 
-Every persona is now assigned exactly one professional domain (seed-derived), its
-fact families layered onto the universal personal facts. Verified: across 60
-seeds all three domains appear, exactly one per persona, each domain scalar
-surfaces as a recall/update question with correct ground truth
-(`TestDomainCoverage`). Real Layer-1 renderings:
+Every persona is now assigned exactly one of **four** professional domains
+(seed-derived) — software, medical, legal, or **finance** — its fact families
+layered onto the universal personal facts. Verified: across 60 seeds all four
+domains appear, exactly one per persona, each domain scalar surfaces as a
+recall/update question with correct ground truth (`TestDomainCoverage`). Real
+Layer-1 renderings (three shown; finance adds `risk_tolerance` /
+`brokerage` / `holding[]`, e.g. *"I rebalanced to a growth-oriented stance"* →
+knowledge-update, *"I hold VTI, SCHD, QQQ"* → multi-session list):
 
 **Software engineering** (persona *Theo Moreau*, seed 2):
 
@@ -214,7 +225,7 @@ decoys pressure retrieval **on the jargon**, where BEIR predicts it hurts most.
 
 ### 3.3 Design note: why one domain per persona (not all three)
 
-Mixing three professional registers into one persona would be unnatural (few
+Mixing several professional registers into one persona would be unnatural (few
 people are simultaneously a practicing lawyer, a clinician, and a service owner)
 and would dilute the jargon-retrieval pressure that makes register matter. One
 coherent domain per persona keeps the conversation realistic while guaranteeing
@@ -268,10 +279,11 @@ domain coverage across the miner population (every submission draws a domain).
 | **Difficulty on orthogonal dials** — length, hops, distractor count/similarity, evidence distance (RULER; GSM-DC power-law) `[P/S]` | ◑ tiers + distractor presence + session gap are dials; distractor *count* and evidence↔query *distance* are not independent knobs yet |
 | **Hard negatives = near-miss, not random** (RULER MK-NIAH; HotpotQA TF-IDF distractors) `[P/S]` | ✅ same-attribute-different-value decoys |
 | **Check distractors aren't accidentally correct** (false-negative trap) `[S]` | ✅ `pickDistinct` guarantees decoy value ≠ persona value |
-| **Literal-match trap** — verbatim/lexically-overlapping needles overstate ability by huge margins (NoLiMa, arXiv:2502.05167; Context Rot) `[P]` | ⚠️ **partial** — mitigated on needle (paraphrase) not query (§8.1) |
+| **Literal-match trap** — verbatim/lexically-overlapping needles overstate ability by huge margins (NoLiMa, arXiv:2502.05167; Context Rot) `[P]` | ✅ mitigated BOTH sides — needle (paraphrase) + query (low-overlap rewrite) with `lexical_gap` telemetry (§8.1) |
 | **Lost in the Middle** — U-shaped accuracy by evidence position (arXiv:2307.03172) `[P]` | ⚠️ not explicitly controlled (§8.4) |
 | **Coherent filler**, not disjoint padding `[U critique]` | ✅ reworked (§4.1) |
-| **Human-in-the-loop answer-key + adversarial curation** (LoCoMo 6.4% key errors; LongMemEval ~70% human-edited) `[P]` | ◑ key is verbatim-guaranteed (no hallucinated key) but no human adversarial pass (§8.2) |
+| **Cross-session state tracking / trajectories** (RULER var-tracking; LME-V2 dynamic state) `[P]` | ✅ N-state chains + multi-hop state-at-event (§8.5) |
+| **Human-in-the-loop answer-key + adversarial curation** (LoCoMo 6.4% key errors; LongMemEval ~70% human-edited) `[P]` | ✅ key verbatim-guaranteed + judge adjacency-audited (accept 1.0 / adj-reject 0.975), though no *human* pass (§8.2) |
 | **Validate the judge** against wrong-but-adjacent answers (LoCoMo judge accepted 62.81%) `[P]` | ⚠️ judge hardening exists (design §6.1) but no adjacency-audit harness yet (§8.2) |
 | **Multi-domain / professional register** (BEIR non-transfer; LongMemEval-V2) `[P]` | ✅ software/medical/legal added (§3) |
 | **Scoring target shapes rankings** ("Same Ranking, Different Winner", arXiv:2605.24060) `[U]` | ◑ we pin one target (0.5/0.5 composite, containment memory); documented, not ablated |
@@ -285,7 +297,7 @@ domain coverage across the miner population (every submission draws a domain).
 | Real vs synthetic | synthetic + human-verify | hybrid (LLM + human edit) | agent web trajectories | **synthetic, seeded-procedural** |
 | Reusable fixed set? | yes (10 conv/1,540 QA) | yes (500 Q) | yes (451 Q) | **no — fresh per submission** |
 | Contamination-resistant | no | no | post-cutoff only | **yes by construction** |
-| Register | casual/personal | personal life-state | professional | **personal + software/medical/legal** |
+| Register | casual/personal | personal life-state | professional | **personal + software/medical/legal/finance** |
 | Answer-key integrity | 6.4% errors `[P]` | high (curated) | high | **verbatim-guaranteed** |
 | Abstention / false-premise | adversarial subset | ✅ | ✅ premise-awareness | ✅ |
 | Knowledge update | — | ✅ | ✅ dynamic state | ✅ (incl. domain) |
@@ -346,46 +358,80 @@ paths the `small` run does not):
 
 Together the two runs prove the enriched dataset **generates, hashes, stages, and
 grades** correctly under the real LLM pipeline, including specialist-domain cases.
-A real-recall number (memory_mean > 0) requires a memory-capable harness (the
-starter-kit + Ollama `embeddinggemma` retriever) — the recommended next
-validation, and a harness property rather than a dataset-correctness property.
+
+**End-to-end with REAL RECALL — the capstone.** Standing up the starter-kit
+harness (production retrieval stack: Ollama `embeddinggemma` 768-dim embedder +
+weight-predictor MLP + cross-encoder reranker) with an `openai/gpt-4o-mini` agent,
+a `small` run scored **memory_mean = 0.667** (composite 0.653) — the harness
+genuinely embedded the haystack, retrieved, and answered. Two findings make this
+more than a smoke test:
+
+- **The NoLiMa mitigation demonstrably bit.** `lexical_gap` reported
+  `{questions: 5, rewritten: 2, mean_before: 0.45, mean_after: 0.30}`. The two
+  reworded questions — "Which hue do I prefer most?" (from "What is my favorite
+  color?") and a paraphrased paint-shade request — were *exactly* the two the
+  harness got wrong (preference + preference-application, both answering "ochre").
+  Removing the lexical overlap removed the retrieval shortcut and exposed that the
+  harness was partly matching on shared words: the literal-match trap, caught in
+  the wild.
+- **Domain + all mechanics graded correctly.** This persona drew the **finance**
+  domain (portfolio / risk-tolerance in the haystack); knowledge-update (car),
+  multi-session count (trips), contradiction (urban sketching), and abstention
+  (film) all scored correct against real retrieval.
+
+This closes the loop: the enriched dataset generates, hashes, stages, grades, and
+is answerable by a real memory system — and its research-backed hardening
+(NoLiMa) measurably changes what the benchmark rewards.
 
 ---
 
 ## 8. Gap assessment & prioritized recommendations
 
-### 8.1 [HIGH] Close the query-side literal-match gap (NoLiMa)
+### 8.1 [RESOLVED] Query-side literal-match gap (NoLiMa)
 
 **Finding:** NoLiMa (arXiv:2502.05167 `[P]`) removes lexical overlap between
 question and needle and watches accuracy collapse — GPT-4o 99.3%→69.7% at 32K;
 restoring the literal match restores the score, proving standard NIAH measured a
-**lexical shortcut**. Several of our recall questions still share keywords with
-the stored fact ("What is my *favorite color*?" ↔ "My *favorite color* is teal";
-"What *instrument* do I *play*?" ↔ "I *play* the cello"). We paraphrase the
-*needle* (Layer 2 moves the stored wording) but the *question* is fixed in
-`scalarAsk`/`prefAsk`, so a retriever can still key on the shared phrase.
+**lexical shortcut**. Our recall questions shared keywords with the stored fact
+("What is my *favorite color*?" ↔ "My *favorite color* is teal"). We paraphrased
+the *needle* but the *question* was fixed.
 
-**Recommendation:** add a paraphrase-gap requirement to question realization —
-LLM-reword the question to remove content-word overlap with its evidence pair
-(preserving the canonical answer), and/or add a `latent`/associative question
-variant that requires an inference step ("Which of my facts would a colorblind
-friend need to know about my study repaint?" → color). Keep the deterministic
-answer key. Track a `lexical_overlap` telemetry field to prove the gap is real.
+**Shipped** (`internal/gen/lexical.go`, `question_gap.go`): an evidence-aware
+question rewrite reduces content-word overlap with the stored fact, accepted only
+if it (a) doesn't leak the answer, (b) preserves numbers, and (c) strictly drops a
+shared content word (un-gameable by padding). `protocol.LexicalGapStats`
+(`details.lexical_gap`) reports mean overlap before/after so the residual is
+visible. **Validated in the real-recall E2E**: overlap 0.45→0.30, and the two
+reworded questions were exactly the two the harness then failed — the shortcut,
+removed. *Future extension:* a fully `latent`/associative question type (an
+inference hop, not just a synonym swap) for an even harder tier.
 
-### 8.2 [HIGH] Judge-adjacency audit harness
+### 8.2 [RESOLVED] Judge-adjacency audit
 
 **Finding:** LoCoMo's gpt-4o-mini judge accepted **62.81%** of intentionally
 wrong-but-topically-adjacent answers `[P, verified]`; "Same Ranking, Different
 Winner" (arXiv:2605.24060 `[U]`) shows the scoring target flips rankings. Our
-answer key is safe (verbatim-guaranteed, no LoCoMo-style 6.4% hallucination), but
-the *judge's* behavior on near-miss answers is unmeasured.
+answer key is safe (verbatim-guaranteed), but the *judge's* near-miss behavior was
+unmeasured.
 
-**Recommendation:** a calibration harness that feeds the judge (a) the correct
-answer, (b) a plausible-but-wrong sibling from the same pool
-(`pickDistinct`), (c) an off-topic answer, and asserts accept / reject / reject.
-Run it in `benchcal` alongside the difficulty calibration; gate a `bench_version`
-bump on it. This is cheap (reuses the pools) and directly de-risks the weight
-mechanism.
+**Shipped** (`benchcal --judge-audit`): grades correct / same-type-sibling /
+off-topic responses (built from real derived questions of two personas) with the
+live judge; PASS gates on accept ≥0.90, adjacent-reject ≥0.85, off-topic-reject
+≥0.95, exits non-zero on FAIL (CI-gateable before a `bench_version` bump). **Live
+result** (gemini-3.1-flash-lite, 51 cases / 102 judge calls): **accept 1.000,
+adjacent-reject 0.975, off-topic-reject 1.000 → PASS** — the judge rejects 97.5%
+of the near-misses LoCoMo's judge waved through. *Remaining:* no *human*
+adversarial pass; mitigated by the machine-guaranteed key.
+
+### 8.5 [RESOLVED] N-state trajectory tracking
+
+**Shipped** (`Opts.LongChain`, `trajectoryQuestions`, `multiHopQuestions`): one
+update chain per run is a 3–4 state trajectory. It yields previous-value ("what
+was my X just before my current one?"), ordered-history ("list every X, first to
+most recent"), and a **state-at-event multi-hop** ("At the time of your trip to
+Osaka, what was my car?") whose answer is a genuinely *past* value — a two-fact
+join that current-state recall cannot answer (RULER variable-tracking / LME-V2
+dynamic state). Ground truth is independently recomputed in `TestTrajectoryAndMultiHop`.
 
 ### 8.3 [MED] Validate the contradiction mechanic
 
@@ -414,12 +460,6 @@ across the haystack, so difficulty can be held constant *and* ablated. Vary
 target-evidence position deliberately (start/middle/end) rather than letting the
 shuffle decide.
 
-### 8.5 [LOW] N-state trajectory tracking
-
-Extend one update chain per run to 3+ states with an intermediate query, to test
-true cross-session state tracking (RULER variable-tracking / LME-V2 dynamic
-state) rather than the 2-state latest-wins case.
-
 ### 8.6 [LOW] Multi-modal memory sources
 
 All memory is chat. The validity literature flags "limited data diversity
@@ -447,6 +487,11 @@ preprints are `[U]` — leads, not citations.
 
 ---
 
-*Review generated on the `nick/benchmark-v2` branch. Enrichment commits
-(data-driven derivation, SE/medical/legal domains, coherent filler) accompany
-this document; the gap items in §8 are the recommended Phase-C follow-ups.*
+*Review generated on the `nick/benchmark-v2` branch. Enrichment + robustness
+commits accompany this document: data-driven derivation, four professional
+domains (software/medical/legal/finance), coherent filler, the NoLiMa query-side
+gap + telemetry (§8.1), the judge-adjacency audit (§8.2), and N-state trajectory
++ multi-hop sequences (§8.5) — all unit-tested and validated in a real-recall E2E
+(memory_mean 0.667 with the Ollama-embedded starter-kit harness). Remaining §8
+items (contradiction validation, distractor/position dials, multi-modal sources)
+are the recommended next follow-ups.*
