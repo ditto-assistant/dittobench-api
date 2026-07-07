@@ -64,6 +64,16 @@ var (
 	}
 	themes = []string{"dark", "light", "system", "midnight", "solarized"}
 
+	memoryIDs = []string{"mem-1042", "mem-2087", "mem-3310", "mem-7761", "mem-9024"}
+	workflows = []string{"weekly-report", "inbox-triage", "release-notes", "standup-summary", "lead-enrichment"}
+	models    = []string{"gpt-5", "claude-sonnet-5", "gemini-3-pro", "llama-4-70b"}
+	efforts   = []string{"low", "medium", "high"}
+	toolPrefs = []string{"disable web search", "enable image tools", "turn off agent jobs", "allow only memory tools"}
+	feedback  = []string{
+		"the image tool keeps timing out", "love the new memory search",
+		"the export button is broken on mobile", "please add dark mode to artifacts",
+	}
+
 	chitchat = []string{
 		"hey, how's it going?", "thanks, that was helpful!",
 		"tell me a joke", "what's your favorite color?",
@@ -195,6 +205,56 @@ var categories = []category{
 			"%s",
 		},
 	},
+	// Full-catalog coverage (A7): single-hop categories so every remaining
+	// catalog tool is the correct answer for some case (W4: 10/18 were dead).
+	{
+		name: "memory_fetch", tool: "fetch_memories", argKey: "ids",
+		templates: []string{
+			"Fetch the full text of memory %s.",
+			"Pull up memory %s in full.",
+			"Open memory %s and show me everything in it.",
+		},
+	},
+	{
+		name: "agent_workflow", tool: "execute_agent_workflow", argKey: "workflow",
+		templates: []string{
+			"Run the %s workflow.",
+			"Kick off my %s workflow.",
+			"Execute the %s workflow now.",
+		},
+	},
+	{
+		name: "feedback", tool: "file_feedback_for_team",
+		templates: []string{
+			"Send this to the Ditto team: %s.",
+			"File feedback for the team — %s.",
+			"Report to the devs that %s.",
+		},
+	},
+	{
+		name: "set_model", tool: "set_main_model", argKey: "model",
+		templates: []string{
+			"Switch my chat model to %s.",
+			"Use %s as my main model.",
+			"Change my primary model to %s.",
+		},
+	},
+	{
+		name: "set_effort", tool: "set_reasoning_effort", argKey: "effort",
+		templates: []string{
+			"Set reasoning effort to %s.",
+			"Make responses use %s effort.",
+			"Change the thinking level to %s.",
+		},
+	},
+	{
+		name: "set_tool_prefs", tool: "set_chat_tool_preferences",
+		templates: []string{
+			"Update my tool preferences: %s.",
+			"Change my chat tools so you %s.",
+			"Adjust which tools you use — %s.",
+		},
+	},
 	// Multi-hop trajectories (A6): the correct answer is a tool SEQUENCE, scored
 	// with order credit. These exercise the previously-dormant multi-call path.
 	{
@@ -256,6 +316,18 @@ func fillerFor(r *rand.Rand, cat string) string {
 		return agentTasks[r.Intn(len(agentTasks))]
 	case "agent_read_not_run":
 		return "" // templates have no placeholder
+	case "memory_fetch":
+		return memoryIDs[r.Intn(len(memoryIDs))]
+	case "agent_workflow":
+		return workflows[r.Intn(len(workflows))]
+	case "feedback":
+		return feedback[r.Intn(len(feedback))]
+	case "set_model":
+		return models[r.Intn(len(models))]
+	case "set_effort":
+		return efforts[r.Intn(len(efforts))]
+	case "set_tool_prefs":
+		return toolPrefs[r.Intn(len(toolPrefs))]
 	case "multi_web_read":
 		return topics[r.Intn(len(topics))]
 	case "multi_subject_scope":
