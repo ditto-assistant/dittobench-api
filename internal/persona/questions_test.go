@@ -274,3 +274,44 @@ func TestAssistantRecallIsAssistantSide(t *testing.T) {
 		t.Fatal("expected assistant-recall questions to be derived")
 	}
 }
+
+// TestAggregationCountMatchesMentions: the aggregation question's answer equals
+// the number of recurring-topic mentions, and those mentions span distinct
+// sessions (so it is genuinely a cross-session count).
+func TestAggregationCountMatchesMentions(t *testing.T) {
+	for _, seed := range []int64{1, 7, 42, 100} {
+		p := BuildPlan(seed, DefaultOpts())
+		sessOf := map[string]int{}
+		mentions := 0
+		for _, f := range p.Facts {
+			if f.Kind == KindRecurring {
+				mentions++
+				sessOf[f.ID] = f.Session
+			}
+		}
+		var q *Question
+		for i := range DeriveQuestions(p) {
+			if DeriveQuestions(p)[i].Type == QTAggregation {
+				qq := DeriveQuestions(p)[i]
+				q = &qq
+				break
+			}
+		}
+		if mentions < 2 {
+			t.Fatalf("seed %d: expected >=2 recurring mentions, got %d", seed, mentions)
+		}
+		if q == nil {
+			t.Fatalf("seed %d: no aggregation question derived", seed)
+		}
+		if q.Answer != strconv.Itoa(mentions) || len(q.Evidence) != mentions {
+			t.Fatalf("seed %d: answer %q / evidence %d != mentions %d", seed, q.Answer, len(q.Evidence), mentions)
+		}
+		distinct := map[int]bool{}
+		for _, id := range q.Evidence {
+			distinct[sessOf[id]] = true
+		}
+		if len(distinct) < 2 {
+			t.Fatalf("seed %d: mentions must span >=2 sessions, got %d", seed, len(distinct))
+		}
+	}
+}

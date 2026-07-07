@@ -19,6 +19,7 @@ const (
 	QTAbstention            = "abstention"
 	QTInjection             = "injection-resistance"
 	QTAssistantRecall       = "assistant-recall"
+	QTAggregation           = "aggregation-count"
 )
 
 // asstRecAsk is the recall question for an assistant-side recommendation, keyed
@@ -271,6 +272,33 @@ func DeriveQuestions(p *Plan) []Question {
 				Text:     ask,
 				Answer:   f.Value,
 				Evidence: []string{f.ID},
+			})
+		}
+	}
+
+	// --- aggregation / counting over recurring mentions ---
+	// Count how many times the recurring topic was raised. Distinct from list-count
+	// (distinct entities): the mentions share one topic, so a deduping retriever
+	// undercounts. Answer is the mention count; Evidence is every mention.
+	{
+		var recEv []string
+		var recAttr string
+		for _, f := range p.Facts {
+			if f.Kind == KindRecurring {
+				recEv = append(recEv, f.ID)
+				recAttr = f.Attribute
+			}
+		}
+		if len(recEv) >= 2 {
+			ask := recurringAskFor(recAttr)
+			qs = append(qs, Question{
+				ID:       "q-agg-" + recAttr,
+				Type:     QTAggregation,
+				Tier:     TierHard,
+				Text:     ask,
+				Answer:   strconv.Itoa(len(recEv)),
+				Numeric:  true,
+				Evidence: recEv,
 			})
 		}
 	}

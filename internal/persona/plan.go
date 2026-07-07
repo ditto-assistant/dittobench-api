@@ -31,6 +31,11 @@ const (
 	// tests reading the assistant's past turn (assistant-side recall), not the
 	// user's — a capability user-stated facts don't exercise.
 	KindAsstRec FactKind = "asst_rec"
+	// KindRecurring is one mention of a single recurring topic the user raises
+	// several times across sessions. Counting the mentions (aggregation) is harder
+	// than counting distinct list items: a retriever that dedupes the repeated
+	// topic undercounts. All mentions share one Attribute; the count is the answer.
+	KindRecurring FactKind = "recurring"
 )
 
 // BeatKind classifies a session beat.
@@ -720,9 +725,68 @@ func BuildPlan(seed int64, opts Opts) *Plan {
 		})
 	}
 
+	// --- recurring-topic mentions (aggregation / counting) ---
+	// One topic the user raises K times across DISTINCT sessions. The count is the
+	// answer; a retriever that collapses the repeated mentions undercounts.
+	rec := recurringSpecs[r.Intn(len(recurringSpecs))]
+	kRec := 3 + r.Intn(3) // 3..5 mentions
+	if kRec > opts.Sessions {
+		kRec = opts.Sessions
+	}
+	for j := 0; j < kRec; j++ {
+		sess := j * opts.Sessions / kRec // spread across distinct sessions
+		p.Facts = append(p.Facts, Fact{
+			ID:        fmt.Sprintf("f-%s-%d", rec.attr, j),
+			Kind:      KindRecurring,
+			Entity:    "self",
+			Attribute: rec.attr,
+			Value:     rec.label,
+			Display:   rec.label,
+			Session:   sess,
+			Seq:       nextSeq(),
+			Current:   true,
+			UserText:  fill(recurringMentionTmpls[j%len(recurringMentionTmpls)], rec.label),
+			AsstText:  fill(pickStr(r, []string{"Noted — %s has come up before.", "Understood, thanks for the update on %s.", "Got it, %s again."}), rec.label),
+		})
+	}
+
 	// --- assign facts to session scripts (ordered), interleaved with noise ---
 	p.Sessions = buildSessions(r, p.Facts, opts.Sessions)
 	return p
+}
+
+// recurringSpec scripts a topic the user mentions repeatedly. label is the spoken
+// noun phrase (appears in every mention); ask is the count question.
+type recurringSpec struct {
+	attr  string
+	label string
+	ask   string
+}
+
+var recurringSpecs = []recurringSpec{
+	{"recur_backpain", "my ongoing back pain", "How many separate times have I brought up my ongoing back pain?"},
+	{"recur_account", "the Barton account", "How many separate times have I mentioned the Barton account?"},
+	{"recur_starter", "my sourdough starter", "How many times have I brought up my sourdough starter?"},
+	{"recur_thesis", "my thesis revisions", "How many separate times did I mention my thesis revisions?"},
+}
+
+// recurringAskFor returns the count question for a recurring-topic attribute.
+func recurringAskFor(attr string) string {
+	for _, s := range recurringSpecs {
+		if s.attr == attr {
+			return s.ask
+		}
+	}
+	return "How many separate times have I brought that topic up?"
+}
+
+// recurringMentionTmpls phrase one mention of the recurring topic (%s = label).
+var recurringMentionTmpls = []string{
+	"I brought up %s again today.",
+	"%s came up for me once more.",
+	"I mentioned %s again this week.",
+	"Talked about %s yet again.",
+	"%s was on my mind again today.",
 }
 
 // asstRecSpec scripts one assistant-side recommendation: a user request that
