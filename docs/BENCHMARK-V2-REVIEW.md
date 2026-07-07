@@ -326,11 +326,29 @@ refharness:**
   service) rendered correctly into the 46-pair haystack, confirmed by artifact
   inspection.
 
-The refharness path proves the enriched dataset **generates, hashes, and grades**
-correctly under the real LLM pipeline. A real-recall number (memory_mean > 0)
-requires a memory-capable harness (the starter-kit + Ollama `embeddinggemma`
-retriever) — the recommended next validation, and a harness property rather than
-a dataset-correctness property.
+**End-to-end, `medium` against the refharness** (exercises the staged/Tier
+paths the `small` run does not):
+
+- `bench_version = 3`, `dataset_sha256 = 76d2cf8a…` pinned; **2 staged Tier-C
+  seeding waves** and **2 Tier-B raw-pairs cases** (haystack seeded *without*
+  prepared subjects — the harder memory-construction test).
+- Paraphrase **48/51 applied** (94%, 3 fallback).
+- **All eight** memory question types graded by the real judge (adds
+  `single-session-recall` and `temporal-reasoning` over the small run).
+- This seed drew a **medical** persona, and a **domain knowledge-update case
+  surfaced and was graded end-to-end**: the generator paraphrased "What is my
+  current medical diagnosis?" → *"Can you provide my present medical diagnosis?"*
+  with answer **atrial fibrillation** — a re-diagnosis, i.e. exactly the
+  professional dynamic-state case LME-V2 targets, proving domain content flows
+  through generation → paraphrase → judging with the canonical value preserved.
+- Composite = `0.5*0.405 + 0.5*0 = 0.2025` (weighting exact; `memory_mean = 0` is
+  again the refharness floor).
+
+Together the two runs prove the enriched dataset **generates, hashes, stages, and
+grades** correctly under the real LLM pipeline, including specialist-domain cases.
+A real-recall number (memory_mean > 0) requires a memory-capable harness (the
+starter-kit + Ollama `embeddinggemma` retriever) — the recommended next
+validation, and a harness property rather than a dataset-correctness property.
 
 ---
 
