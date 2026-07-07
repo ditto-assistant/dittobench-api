@@ -224,11 +224,16 @@ type CaseScore struct {
 	Injection bool `json:"injection,omitempty"`
 }
 
-// CategoryStat is the mean composite score for one category.
+// CategoryStat is the mean composite score for one category, with the standard
+// error of that mean. StdErr makes per-category signal legible: with only a few
+// cases per category a mean carries a wide band (≈StdErr·1.96 for a 95% CI), so a
+// consumer can tell a real per-capability gap from sampling noise instead of
+// over-reading a 2–6-case category. 0 for a single-case category.
 type CategoryStat struct {
 	Category string  `json:"category"`
 	Count    int     `json:"count"`
 	Mean     float64 `json:"mean"`
+	StdErr   float64 `json:"std_err,omitempty"`
 }
 
 // CodeFingerprint is a bottom-k MinHash (KMV) sketch of a submission's source,

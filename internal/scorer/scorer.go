@@ -398,6 +398,22 @@ func clamp01(x float64) float64 {
 
 func round6(x float64) float64 { return math.Round(x*1e6) / 1e6 }
 
+// stdErrOfMean returns the standard error of the mean of n per-case scores given
+// their sum and sum-of-squares, using the sample variance (Bessel-corrected). It
+// is 0 for n<2 (a single case has no spread estimate). Guards tiny negative
+// variance from float rounding.
+func stdErrOfMean(sum, sumSq float64, n int) float64 {
+	if n < 2 {
+		return 0
+	}
+	fn := float64(n)
+	variance := (sumSq - sum*sum/fn) / (fn - 1)
+	if variance <= 0 {
+		return 0
+	}
+	return math.Sqrt(variance / fn)
+}
+
 // Aggregate folds per-case scores into a ScoreReport. The composite is the v2
 // 0.5*tool_mean + 0.5*memory_mean (see below); per-category breakdown and
 // median latency included.
@@ -405,6 +421,7 @@ func Aggregate(runID string, perCase []protocol.CaseScore) protocol.ScoreReport 
 	var toolSum, toolN, memSum, memN float64
 	latencies := make([]int64, 0, len(perCase))
 	catSum := map[string]float64{}
+	catSumSq := map[string]float64{}
 	catCount := map[string]int{}
 	catOrder := make([]string, 0)
 
@@ -422,6 +439,7 @@ func Aggregate(runID string, perCase []protocol.CaseScore) protocol.ScoreReport 
 			catOrder = append(catOrder, cs.Category)
 		}
 		catSum[cs.Category] += cs.Score
+		catSumSq[cs.Category] += cs.Score * cs.Score
 		catCount[cs.Category]++
 	}
 
@@ -455,10 +473,13 @@ func Aggregate(runID string, perCase []protocol.CaseScore) protocol.ScoreReport 
 
 	perCat := make([]protocol.CategoryStat, 0, len(catOrder))
 	for _, cat := range catOrder {
+		n := catCount[cat]
+		mean := catSum[cat] / float64(n)
 		perCat = append(perCat, protocol.CategoryStat{
 			Category: cat,
-			Count:    catCount[cat],
-			Mean:     catSum[cat] / float64(catCount[cat]),
+			Count:    n,
+			Mean:     round6(mean),
+			StdErr:   round6(stdErrOfMean(catSum[cat], catSumSq[cat], n)),
 		})
 	}
 
