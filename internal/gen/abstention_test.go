@@ -52,7 +52,8 @@ func TestAbstentionNeedleAbsent(t *testing.T) {
 }
 
 func TestAbstentionQuota(t *testing.T) {
-	cases := map[int]int{0: 0, 3: 0, 5: 1, 6: 1, 20: 4, 50: 10}
+	// ~1/12 of a run (see abstentionDenom): 0 below the denom, then n/12.
+	cases := map[int]int{0: 0, 3: 0, 11: 0, 12: 1, 20: 1, 50: 4}
 	for n, want := range cases {
 		if got := abstentionQuota(n); got != want {
 			t.Errorf("abstentionQuota(%d)=%d want %d", n, got, want)

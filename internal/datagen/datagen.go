@@ -26,6 +26,19 @@ type category struct {
 	// deterministically scored — right tool + wrong arg no longer gets full credit.
 	argKey    string
 	templates []string
+	// intents are prompts that imply the arg VALUE (or name a near-miss) instead of
+	// stating it verbatim, so a harness must parse intent rather than copy a token.
+	// Used for a share of a set_* category's cases; requires argKey.
+	intents []argIntent
+}
+
+// argIntent maps an intent-phrased prompt to the arg value it should resolve to.
+// Prompt either implies Value ("think harder" → "high") or names a near-miss
+// alongside it ("switch me off gpt-5 to gemini-3-pro" → "gemini-3-pro"), so a
+// token-copying harness gets it wrong.
+type argIntent struct {
+	prompt string
+	value  string
 }
 
 // word pools used to vary entities/phrasings across seeds.
@@ -141,7 +154,7 @@ var categories = []category{
 		},
 	},
 	{
-		name: "agent_job", tool: "execute_agent_job",
+		name: "agent_job", tool: "execute_agent_job", argKey: "task",
 		templates: []string{
 			"Run a background job to %s.",
 			"Kick off an agent to %s.",
@@ -154,6 +167,12 @@ var categories = []category{
 			"Switch to %s mode.",
 			"Set my theme to %s.",
 			"Change the app theme to %s.",
+		},
+		intents: []argIntent{
+			{"I had it on light, but switch me to midnight instead.", "midnight"},
+			{"Don't leave it on dark — set it to solarized.", "solarized"},
+			{"Change it from system to dark.", "dark"},
+			{"Not light — I want the solarized look.", "solarized"},
 		},
 	},
 	{
@@ -195,6 +214,26 @@ var categories = []category{
 		},
 	},
 	{
+		// Edit-vs-create trap: the user references an EXISTING image to modify, so
+		// the right tool is edit_image, not create_image.
+		name: "image_edit_not_create", tool: "edit_image",
+		templates: []string{
+			"Take the last image and make the sky purple.",
+			"Edit that picture you made to add a small hat.",
+			"Change the background of the image to a quiet beach.",
+		},
+	},
+	{
+		// Job-vs-workflow trap: phrased like a one-off background job, but it names a
+		// predefined WORKFLOW, so the right tool is execute_agent_workflow.
+		name: "workflow_not_job", tool: "execute_agent_workflow", argKey: "workflow",
+		templates: []string{
+			"Kick off a background job for my %s routine.",
+			"Dispatch an agent to run my %s process.",
+			"Start a one-off task to do my usual %s.",
+		},
+	},
+	{
 		name: "no_tool", tool: "", // chit-chat, answer directly
 		templates: []string{
 			"%s",
@@ -225,7 +264,7 @@ var categories = []category{
 		},
 	},
 	{
-		name: "feedback", tool: "file_feedback_for_team",
+		name: "feedback", tool: "file_feedback_for_team", argKey: "message",
 		templates: []string{
 			"Send this to the Ditto team: %s.",
 			"File feedback for the team — %s.",
@@ -239,8 +278,21 @@ var categories = []category{
 			"Use %s as my main model.",
 			"Change my primary model to %s.",
 		},
+		intents: []argIntent{
+			{"I'm on gemini-3-pro now — move me over to claude-sonnet-5.", "claude-sonnet-5"},
+			{"Switch me off gpt-5 and onto gemini-3-pro.", "gemini-3-pro"},
+			{"My main is llama-4-70b; change it to gpt-5.", "gpt-5"},
+			{"Take me off claude-sonnet-5 and put me on llama-4-70b.", "llama-4-70b"},
+		},
 	},
 	{
+		intents: []argIntent{
+			{"Really take your time and reason deeply on my questions from now on.", "high"},
+			{"Make your answers as thorough and careful as you can.", "high"},
+			{"Keep it quick and don't overthink my requests.", "low"},
+			{"Snappy, minimal reasoning is fine — don't burn cycles.", "low"},
+			{"Use a balanced amount of reasoning, nothing extreme.", "medium"},
+		},
 		name: "set_effort", tool: "set_reasoning_effort", argKey: "effort",
 		templates: []string{
 			"Set reasoning effort to %s.",
@@ -249,7 +301,7 @@ var categories = []category{
 		},
 	},
 	{
-		name: "set_tool_prefs", tool: "set_chat_tool_preferences",
+		name: "set_tool_prefs", tool: "set_chat_tool_preferences", argKey: "preferences",
 		templates: []string{
 			"Update my tool preferences: %s.",
 			"Change my chat tools so you %s.",
@@ -348,8 +400,10 @@ func fillerFor(r *rand.Rand, cat string) string {
 		return topics[r.Intn(len(topics))]
 	case "agent_run_not_read":
 		return agentTasks[r.Intn(len(agentTasks))]
-	case "agent_read_not_run":
+	case "agent_read_not_run", "image_edit_not_create":
 		return "" // templates have no placeholder
+	case "workflow_not_job":
+		return workflows[r.Intn(len(workflows))]
 	case "memory_fetch":
 		return memoryIDs[r.Intn(len(memoryIDs))]
 	case "agent_workflow":
@@ -469,8 +523,23 @@ func GenerateCasesWithFillers(r *rand.Rand, seed int64, n int) ([]protocol.ToolC
 			seq = []string{cat.tool}
 		}
 
+		// argValue is the value pinned into RequiredArgs (defaults to the filler; an
+		// intent variant overrides it). usedFiller is the token paraphrase must
+		// preserve ("" = freely rephrasable).
+		argValue := filler
 		usedFiller := ""
-		if strings.Contains(tmpl, "%s") {
+		useIntent := len(cat.intents) > 0 && r.Intn(2) == 0
+		switch {
+		case useIntent:
+			it := cat.intents[r.Intn(len(cat.intents))]
+			prompt = it.prompt
+			argValue = it.value
+			// Only a near-miss intent (value appears literally) needs the token kept
+			// through paraphrase; a pure-intent prompt is meaning-preservingly rephrasable.
+			if strings.Contains(it.prompt, it.value) {
+				usedFiller = it.value
+			}
+		case strings.Contains(tmpl, "%s"):
 			prompt = fmt.Sprintf(tmpl, filler)
 			// A real tool case has an entity worth preserving through paraphrase;
 			// no_tool / abstention fillers ARE the whole (freely rephrasable) message.
@@ -497,9 +566,10 @@ func GenerateCasesWithFillers(r *rand.Rand, seed int64, n int) ([]protocol.ToolC
 			}
 		case len(seq) == 1:
 			ts := protocol.ToolSpec{Name: seq[0]}
-			// Exact-value arg ground truth when the filler is a stable token.
-			if cat.argKey != "" && usedFiller != "" {
-				ts.RequiredArgs = map[string]string{cat.argKey: filler}
+			// Exact-value arg ground truth: the filler for a verbatim case, or the
+			// resolved value for an intent case (which may not appear in the prompt).
+			if cat.argKey != "" && argValue != "" && (useIntent || usedFiller != "") {
+				ts.RequiredArgs = map[string]string{cat.argKey: argValue}
 			}
 			tc.ExpectedTools = []protocol.ToolSpec{ts}
 			tc.MaxToolCalls = 1

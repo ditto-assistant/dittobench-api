@@ -503,6 +503,35 @@ func scoreCase(c protocol.ToolCase, resp protocol.RunResponse, ok bool) protocol
 		return cs
 	}
 
+	// Memory-tool cases: the expected tool is a memory-retrieval tool the mock
+	// endpoint never serves, so the harness answers from its OWN seeded memory —
+	// legitimately via internal retrieval rather than a catalog tool call. Score on
+	// ROUTING, not the exact call: credit unless the harness misroutes the memory
+	// request to a non-memory tool (e.g. search_web). This stops the suite from
+	// penalizing a competent memory harness for how it retrieves; retrieval
+	// accuracy itself is the memory suite's job.
+	if allMemoryTools(c.ExpectedTools) {
+		for _, call := range resp.ToolCalls {
+			if !memoryTools[call.Name] {
+				cs.ToolScore = 0
+				cs.Notes = append(cs.Notes, "misrouted a memory request to a non-memory tool: "+call.Name)
+				return cs
+			}
+		}
+		// Credit retrieval only with EVIDENCE of it — a memory tool call or a
+		// substantive answer. A pure no-op (no call and no answer) did not attempt
+		// to retrieve, so a routing trap still catches a harness that just ignores
+		// the memory request.
+		if len(resp.ToolCalls) > 0 || strings.TrimSpace(resp.FinalText) != "" {
+			cs.ToolScore = 1.0
+			cs.Notes = append(cs.Notes, "memory request handled via memory retrieval (internal or memory tool)")
+		} else {
+			cs.ToolScore = 0
+			cs.Notes = append(cs.Notes, "no memory retrieval attempted (no memory tool call and no answer)")
+		}
+		return cs
+	}
+
 	// Deterministic trajectory + argument scoring: name-F1, arg-F1, and a
 	// trajectory term (order credit × extra-call discipline).
 	score, notes := deterministicToolScore(c, resp.ToolCalls)
@@ -517,6 +546,30 @@ func calledNames(calls []protocol.ObservedToolCall) []string {
 		out = append(out, c.Name)
 	}
 	return out
+}
+
+// memoryTools are the catalog's memory-retrieval tools. The mock endpoint never
+// serves them (that would leak seeded answers), so a harness satisfies a
+// memory-tool case by retrieving from its own memory — by whatever mechanism.
+var memoryTools = map[string]bool{
+	"search_memories":             true,
+	"search_subjects":             true,
+	"fetch_memories":              true,
+	"search_memories_in_subjects": true,
+}
+
+// allMemoryTools reports whether every expected tool is a memory-retrieval tool
+// (so the case is answered from the harness's own memory, not a served tool).
+func allMemoryTools(specs []protocol.ToolSpec) bool {
+	if len(specs) == 0 {
+		return false
+	}
+	for _, s := range specs {
+		if !memoryTools[s.Name] {
+			return false
+		}
+	}
+	return true
 }
 
 func expectedNames(specs []protocol.ToolSpec) []string {

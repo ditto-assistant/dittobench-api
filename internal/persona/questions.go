@@ -107,20 +107,36 @@ var listAllAsk = map[string]string{
 }
 
 // absentAttributes are plausible personal facts the persona generator NEVER
-// emits, so a question about one is genuinely needle-absent — the grounded-
-// decline (abstention) material, with no evidence to withhold.
+// emits — for the user OR any decoy — so a question about one is genuinely
+// needle-absent: the grounded-decline (abstention) material, with nothing in the
+// haystack to grab.
 var absentAttributes = []string{
-	"What is my blood type?",
 	"What is my shoe size?",
-	"Which month is my birthday in?",
 	"How tall am I?",
 	"What is my favorite song?",
 	"What is my star sign?",
 	"What is my middle name?",
-	"What is my favorite sports team?",
 	"What is my eye color?",
-	"What is my favorite film?",
 	"What is my mobile phone number?",
+}
+
+// falsePremiseAbsent are HARD abstention attributes: the user never states their
+// own, but a DECOY person's value IS seeded in the haystack (see plan.go), so a
+// weak harness that retrieves without checking whose fact it is will surface the
+// friend's value and fabricate. The correct behavior is still to decline — this
+// tests grounding, not just generic "I don't know". Attribute is a namespaced key
+// (no self scalar collides); Label appears in both the decoy beat and matches the
+// question's wording so retrieval actually surfaces the near-miss.
+var falsePremiseAbsent = []struct {
+	Ask       string
+	Attribute string
+	Label     string
+	Pool      []string
+}{
+	{"What is my blood type?", "fp_blood_type", "blood type", []string{"O negative", "A positive", "B positive", "AB negative"}},
+	{"Which month is my birthday in?", "fp_birthday", "birthday month", []string{"March", "September", "November", "June"}},
+	{"Which sports team do I support the most?", "fp_sports_team", "favorite sports team", []string{"the Rangers", "Arsenal", "the Lakers", "Juventus"}},
+	{"Which movie do I like the most?", "fp_film", "favorite film", []string{"Casablanca", "Blade Runner", "Amélie", "Heat"}},
 }
 
 // DeriveQuestions builds the full candidate question pool from a plan. It is
@@ -147,14 +163,29 @@ func DeriveQuestions(p *Plan) []Question {
 			continue
 		}
 		if cur.Supersedes != "" {
-			// updated attribute → knowledge-update (latest value wins).
+			// updated attribute → knowledge-update (latest value wins). Evidence is
+			// the FULL supersession chain, so the harness must pick the latest among
+			// every stated value (a 3+-state chain is harder than a single update) and
+			// staging/overlap account for all of them.
+			// Evidence[0] is the current fact (the answer); the rest of the chain
+			// follows so staging/overlap account for every superseded value.
+			chain := scalarChain(p, cur.Attribute)
+			ev := []string{cur.ID}
+			for _, cf := range chain {
+				if cf.ID != cur.ID {
+					ev = append(ev, cf.ID)
+				}
+			}
+			if len(ev) < 2 {
+				ev = []string{cur.ID, cur.Supersedes}
+			}
 			qs = append(qs, Question{
 				ID:       "q-ku-" + cur.Attribute,
 				Type:     QTKnowledgeUpdate,
-				Tier:     pick3(distractorAttrs[cur.Attribute], TierHard, TierMedium),
+				Tier:     pick3(len(chain) >= 3, TierHard, TierMedium),
 				Text:     ask,
 				Answer:   cur.Value,
-				Evidence: []string{cur.ID, cur.Supersedes},
+				Evidence: ev,
 			})
 		} else {
 			qs = append(qs, Question{
@@ -261,7 +292,7 @@ func DeriveQuestions(p *Plan) []Question {
 	qs = append(qs, trajectoryQuestions(p)...)
 	qs = append(qs, multiHopQuestions(p)...)
 
-	// --- abstention (needle-absent) ---
+	// --- abstention: pure needle-absent (nothing seeded) ---
 	for i, q := range absentAttributes {
 		qs = append(qs, Question{
 			ID:      "q-abs-" + strconv.Itoa(i),
@@ -271,22 +302,45 @@ func DeriveQuestions(p *Plan) []Question {
 			Abstain: true,
 		})
 	}
+	// --- abstention: hard / false-premise (a decoy holds the value) ---
+	for _, fp := range falsePremiseAbsent {
+		qs = append(qs, Question{
+			ID:      "q-absfp-" + fp.Attribute,
+			Type:    QTAbstention,
+			Tier:    TierHard,
+			Text:    fp.Ask,
+			Abstain: true,
+		})
+	}
 
 	return qs
 }
 
-// temporalQuestions derives ordering questions from dated self-facts. The answer
-// is a descriptive phrase (judge-graded); the two events are described by their
-// attribute label + value so the question is answerable purely from the seeded
-// timeline.
+// temporalQuestions derives genuine temporal-reasoning questions from dated
+// self-facts (not just binary "which came first"): N-way ordering of three
+// events, and elapsed-duration between two events computed from the session day
+// offsets. It takes one representative event per session (in timeline order) so
+// ordering is unambiguous, forms disjoint triples for the harder questions, and
+// falls back to a binary ordering for any leftover pair. All answers are derived
+// purely from the seeded timeline; duration answers are approximate (judge-graded
+// with day-count tolerance).
 func temporalQuestions(p *Plan) []Question {
+	dayOf := make(map[int]int, len(p.Sessions))
+	for _, s := range p.Sessions {
+		dayOf[s.Index] = s.DayOffset
+	}
 	type dated struct {
 		f     Fact
 		label string
 	}
+	// One representative event per session, timeline order — each event is in a
+	// distinct session, so their order is a total order the harness can recover.
 	var evs []dated
-	for _, f := range p.Facts {
-		if f.Entity != "self" || !f.Current {
+	lastSession := -1
+	facts := append([]Fact(nil), p.Facts...)
+	sort.Slice(facts, func(i, j int) bool { return facts[i].Seq < facts[j].Seq })
+	for _, f := range facts {
+		if f.Entity != "self" || !f.Current || f.Session == lastSession {
 			continue
 		}
 		lbl := factLabel(f)
@@ -294,32 +348,64 @@ func temporalQuestions(p *Plan) []Question {
 			continue
 		}
 		evs = append(evs, dated{f: f, label: lbl})
+		lastSession = f.Session
 	}
-	sort.Slice(evs, func(i, j int) bool { return evs[i].f.Seq < evs[j].f.Seq })
 
 	var qs []Question
-	for i := 0; i+1 < len(evs); i += 2 {
-		a, b := evs[i], evs[i+1]
-		if a.f.Session == b.f.Session {
-			continue // need a genuine ordering across sessions
-		}
-		// a precedes b by construction (sorted by Seq; earlier session first).
-		earlier, later := a, b
-		if earlier.f.Session > later.f.Session {
-			earlier, later = later, earlier
-		}
-		gap := abs(later.f.Session - earlier.f.Session)
+	i := 0
+	for ; i+2 < len(evs); i += 3 {
+		a, b, c := evs[i], evs[i+1], evs[i+2] // a<b<c in time
+		// Present the three in a non-timeline order (sorted by label) so the listing
+		// itself leaks nothing about the sequence.
+		shown := []dated{a, b, c}
+		sort.Slice(shown, func(x, y int) bool { return shown[x].label < shown[y].label })
 		qs = append(qs, Question{
-			ID:   "q-temp-" + earlier.f.ID + "-" + later.f.ID,
+			ID:   "q-order3-" + a.f.ID,
 			Type: QTTemporal,
-			Tier: pick3(gap >= 3, TierHard, TierMedium),
-			Text: fmt.Sprintf("Which did I tell you about first: %s, or %s?", earlier.label, later.label),
-			Answer: fmt.Sprintf("You mentioned %s before %s.",
-				earlier.label, later.label),
-			Evidence: []string{earlier.f.ID, later.f.ID},
+			Tier: TierHard,
+			Text: fmt.Sprintf("Put these in the order I first mentioned them, earliest first: %s; %s; %s.",
+				shown[0].label, shown[1].label, shown[2].label),
+			Answer:   fmt.Sprintf("%s, then %s, then %s.", a.label, b.label, c.label),
+			Evidence: []string{a.f.ID, b.f.ID, c.f.ID},
+		})
+		gap := abs(dayOf[c.f.Session] - dayOf[a.f.Session])
+		qs = append(qs, Question{
+			ID:       "q-dur-" + a.f.ID,
+			Type:     QTTemporal,
+			Tier:     TierHard,
+			Text:     fmt.Sprintf("Roughly how much time passed between %s and %s?", a.label, c.label),
+			Answer:   humanDuration(gap),
+			Evidence: []string{a.f.ID, c.f.ID},
+		})
+	}
+	// Leftover pair (fewer than three remaining) → an easy binary ordering.
+	if i+1 < len(evs) {
+		a, b := evs[i], evs[i+1]
+		qs = append(qs, Question{
+			ID:       "q-temp-" + a.f.ID + "-" + b.f.ID,
+			Type:     QTTemporal,
+			Tier:     TierEasy,
+			Text:     fmt.Sprintf("Which did I tell you about first: %s, or %s?", a.label, b.label),
+			Answer:   fmt.Sprintf("You mentioned %s before %s.", a.label, b.label),
+			Evidence: []string{a.f.ID, b.f.ID},
 		})
 	}
 	return qs
+}
+
+// humanDuration renders a day count as an approximate phrase the temporal judge
+// grades with tolerance ("about 3 weeks", "about 2 months").
+func humanDuration(days int) string {
+	switch {
+	case days <= 1:
+		return "about a day"
+	case days < 14:
+		return fmt.Sprintf("about %d days", days)
+	case days < 60:
+		return fmt.Sprintf("about %d weeks", (days+3)/7)
+	default:
+		return fmt.Sprintf("about %d months", (days+15)/30)
+	}
 }
 
 // attrNoun is the human noun for a scalar attribute, used to phrase trajectory

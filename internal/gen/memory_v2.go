@@ -159,7 +159,14 @@ func GenerateMemorySuite(ctx context.Context, r *rand.Rand, seed int64, n int, f
 		ev := evidenceText(q)
 		measured := !q.Abstain && ev != ""
 		out := q.Text
-		if llm != nil && frac > 0 && r.Float64() < frac {
+		// Always consume one roll per question (keeps the RNG draw-count independent
+		// of LLM output and question type, so two runs of a seed stay identical).
+		roll := r.Float64()
+		// The easy single-fact recall types share the most wording with their stored
+		// fact, so they benefit most from the low-overlap rewrite — force it for them
+		// (when an LLM is available) rather than leaving de-overlap to the frac roll.
+		forceRewrite := measured && easyRecallType[q.Type]
+		if llm != nil && frac > 0 && (forceRewrite || roll < frac) {
 			suite.Stats.Attempted++
 			if measured {
 				rq, retried, applied := realizeQuestionLowOverlap(ctx, llm, model, q.Text, ev, q.Answer)
@@ -360,6 +367,86 @@ func personaOptsFor(n int) persona.Opts {
 	}
 }
 
+// memoryTypeWeight biases the v2 memory mix toward the types that actually
+// discriminate among competent harnesses (multi-session synthesis, applied
+// preference, real temporal, contradiction) and away from single-fact recall a
+// good retriever always aces. Types not listed default to weight 1. The mix stays
+// seed-independent — only the emphasis changes, not per-seed reproducibility.
+var memoryTypeWeight = map[string]int{
+	persona.QTMultiSession:          3,
+	persona.QTTemporal:              3,
+	persona.QTPreferenceApplication: 3,
+	persona.QTContradiction:         2,
+	persona.QTKnowledgeUpdate:       2,
+	persona.QTSingleSession:         1,
+	persona.QTPreference:            1,
+}
+
+// easyRecallType marks the single-fact recall types whose question wording most
+// overlaps its stored fact — these always get the low-overlap (NoLiMa) rewrite so
+// a lexical shortcut can't stand in for retrieval.
+var easyRecallType = map[string]bool{
+	persona.QTSingleSession:   true,
+	persona.QTPreference:      true,
+	persona.QTKnowledgeUpdate: true,
+}
+
+func typeWeight(t string) int {
+	if w, ok := memoryTypeWeight[t]; ok && w > 0 {
+		return w
+	}
+	return 1
+}
+
+// weightedTypeQuota splits n across types proportional to memoryTypeWeight,
+// capped by availability, filling any shortfall (from flooring or caps)
+// preferring higher-weight types with spare capacity. Deterministic: the fill
+// order is (weight desc, name asc), independent of the run seed.
+func weightedTypeQuota(types []string, avail map[string]int, n int) map[string]int {
+	quota := make(map[string]int, len(types))
+	if n <= 0 || len(types) == 0 {
+		return quota
+	}
+	total := 0
+	for _, t := range types {
+		total += typeWeight(t)
+	}
+	assigned := 0
+	for _, t := range types {
+		q := n * typeWeight(t) / total
+		if q > avail[t] {
+			q = avail[t]
+		}
+		quota[t] = q
+		assigned += q
+	}
+	fillOrder := append([]string(nil), types...)
+	sort.SliceStable(fillOrder, func(i, j int) bool {
+		wi, wj := typeWeight(fillOrder[i]), typeWeight(fillOrder[j])
+		if wi != wj {
+			return wi > wj
+		}
+		return fillOrder[i] < fillOrder[j]
+	})
+	for assigned < n {
+		progressed := false
+		for _, t := range fillOrder {
+			if assigned >= n {
+				break
+			}
+			if quota[t] < avail[t] {
+				quota[t]++
+				assigned++
+				progressed = true
+			}
+		}
+		if !progressed {
+			break
+		}
+	}
+	return quota
+}
+
 // stratifyByType selects up to n questions with a fixed, seed-independent
 // per-type quota (like the tool suite's category stratification): WHICH
 // questions within a type varies by seed; HOW MANY of each type does not.
@@ -380,7 +467,7 @@ func stratifyByType(r *rand.Rand, pool []persona.Question, n int) []persona.Ques
 	for t, qs := range byType {
 		avail[t] = len(qs)
 	}
-	quota := stratifiedTypeQuota(typeOrder, avail, n)
+	quota := weightedTypeQuota(typeOrder, avail, n)
 
 	var out []persona.Question
 	for _, t := range typeOrder {

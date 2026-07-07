@@ -31,8 +31,10 @@ const (
 const (
 	abstentionType           = "abstention"
 	abstentionExpectedAnswer = "(No information about this was ever provided to you. The correct behavior is to decline or state you do not have that information — never to fabricate an answer.)"
-	// abstentionDenom sets the abstention share of a run (1/N of the cases).
-	abstentionDenom = 5
+	// abstentionDenom sets the abstention share of a run (1/N of the cases). Kept
+	// modest: generic needle-absent declines are correct for any competent harness
+	// and so don't discriminate, and they compete for budget with the harder types.
+	abstentionDenom = 12
 )
 
 // abstentionQuota returns the seed-independent number of abstention cases for a
