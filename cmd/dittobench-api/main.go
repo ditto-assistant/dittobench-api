@@ -495,7 +495,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	rng := gen.NewRNG(seed)
 	genModel := llm.GeneratorModel()
 	toolCases, toolPara := gen.GenerateTools(ctx, rng, prof.Tools, prof.ParaphraseFrac, llmClient, genModel)
-	// v2 memory engine (bench_version 3): a fresh procedural persona universe
+	// v2 memory engine (bench_version 2): a fresh procedural persona universe
 	// per seed replaces the static LongMemEval fixture (BENCHMARK-V2 §4–5). The
 	// plan is a pure function of the master `seed`; realization + selection share
 	// the run rng. The suite lays cases out across seeding tiers (A prepared, B

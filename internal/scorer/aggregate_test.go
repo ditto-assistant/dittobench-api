@@ -71,7 +71,7 @@ func TestAggregate(t *testing.T) {
 
 func TestAggregateCompositeWeighting(t *testing.T) {
 	// tool_mean=1.0, memory_mean=0.0 → 0.5*1.0 + 0.5*0.0 = 0.5, pinning the v2
-	// (bench_version 3) 0.5/0.5 rebalance: memory is the core product value and
+	// (bench_version 2) 0.5/0.5 rebalance: memory is the core product value and
 	// the raw-pairs tier makes memory_mean the harder axis (BENCHMARK-V2 §5.3).
 	r := Aggregate("run", []protocol.CaseScore{
 		{CaseID: "t1", Category: "web_search", Kind: protocol.KindTool, Score: 1.0},

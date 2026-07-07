@@ -326,7 +326,7 @@ questions).
 **End-to-end (real generator + real judge), `small` against the deterministic
 refharness:**
 
-- `bench_version = 3`, `dataset_sha256 = 6090ebcd…6193` present and pinned.
+- `bench_version = 2`, `dataset_sha256 = 6090ebcd…6193` present and pinned.
 - Paraphrase: **19/20 applied, 1 fallback** — the real generator rewrote nearly
   every beat with no template collapse (v1's W5 failure mode absent).
 - All six memory question types graded by the real judge (preference,
@@ -341,7 +341,7 @@ refharness:**
 **End-to-end, `medium` against the refharness** (exercises the staged/Tier
 paths the `small` run does not):
 
-- `bench_version = 3`, `dataset_sha256 = 76d2cf8a…` pinned; **2 staged Tier-C
+- `bench_version = 2`, `dataset_sha256 = 76d2cf8a…` pinned; **2 staged Tier-C
   seeding waves** and **2 Tier-B raw-pairs cases** (haystack seeded *without*
   prepared subjects — the harder memory-construction test).
 - Paraphrase **48/51 applied** (94%, 3 fallback).
@@ -469,7 +469,7 @@ product surface.
 
 ---
 
-## 8.7 [SHIPPED] Phase C — observed execution (bench_version 4)
+## 8.7 [SHIPPED] Phase C — observed execution (held at bench_version 2)
 
 Phase B closed the *dataset* gaps; the residual scoring risk was **self-reported
 tool calls** (v1's W3): the validator trusted the harness's `tool_calls` and had
@@ -477,6 +477,13 @@ no way to see what actually executed, and no way to reward *using* a tool's
 result. Phase C (design §7, WPs C1–C3) retires that residual. All three WPs are
 implemented on `nick/benchmark-v2` and unit-tested; a keyed `run_size` E2E is the
 remaining validation (as with Phase B).
+
+*Version note:* Phases A/B/C are all stamped **`bench_version = 2`** and held
+there. The §9 per-change bump-and-re-score policy protects a *live* ledger's
+comparability, but no miner has ever scored against benchmark v2, so there is
+nothing to keep comparable and nothing to re-score — minting versions 3/4 for a
+pre-launch benchmark would only add throwaway re-score sweeps. The escalation
+resumes from version 3 for the first scoring change *after* v2 goes live.
 
 1. **Observed execution (C1).** The validator now serves its own mock
    tool-execution endpoint (`internal/toolexec`, advertised as

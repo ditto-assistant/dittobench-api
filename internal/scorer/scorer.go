@@ -368,7 +368,7 @@ func Aggregate(runID string, perCase []protocol.CaseScore) protocol.ScoreReport 
 	if memN > 0 {
 		memMean = memSum / memN
 	}
-	// DittoBench v2 composite (bench_version 3): 0.5*tool_mean + 0.5*memory_mean
+	// DittoBench v2 composite (bench_version 2): 0.5*tool_mean + 0.5*memory_mean
 	// when both kinds are present; falls back to the single present mean for
 	// tool-only or memory-only runs. Rebalanced from v1's 0.6/0.4 (§5.3, §10.1):
 	// memory is the core product value, memory-coupled tool cases already push

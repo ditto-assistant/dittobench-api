@@ -90,7 +90,7 @@ The validator sends one `RunRequest` per case; the harness returns a
 { "name": "search_web", "args": { /* raw JSON */ }, "hop": 0 }
 ```
 
-## Observed tool execution (Phase C, `bench_version` 4)
+## Observed tool execution (Phase C, `bench_version` 2)
 
 Two optional `RunRequest` fields let the validator **observe** what a harness
 actually does, instead of trusting its self-reported `tool_calls`.

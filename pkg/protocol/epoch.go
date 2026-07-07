@@ -3,25 +3,32 @@ package protocol
 import "time"
 
 // BenchVersion is the scoring benchmark version stamped into every run's
-// details. Bump it with EVERY scoring-affecting change so old and new ledger
-// scores are never silently compared (BENCHMARK-V2.md §9). Phase A (the v1
-// hardening: seed-derived time, graded memory, trajectory/arg scoring, judge
-// hardening) shipped as version 2; v1 was version 1.
+// details. The §9 policy — bump it with EVERY scoring-affecting change so old and
+// new ledger scores are never silently compared, and re-score the ledger on a
+// bump — exists to protect a LIVE ledger's comparability. It only matters once
+// miners are actually scoring against a version.
 //
-// Phase B (version 3) — the data engine: the static LongMemEval fixture is
-// replaced by the procedural persona/fact-graph generator (internal/persona +
-// gen.GenerateMemoryV2), with difficulty tiers, near-miss distractors, seeding
-// tiers, dataset hashing, and the 0.5/0.5 composite rebalance. Every one of
-// those changes scoring, so they all ride this single bump.
+// v1 was version 1. The v2 redesign (Phases A/B/C below) is stamped **version 2**
+// and held there: NO miner has ever been scored against benchmark v2, so there is
+// no ledger to keep comparable and nothing to re-score. Collapsing A/B/C into a
+// single version 2 avoids minting throwaway versions (and throwaway re-score
+// sweeps) for a benchmark that has never gone live. The per-change bump policy
+// resumes from version 3 for the FIRST scoring change made AFTER v2 is live and a
+// miner has scored against it.
 //
-// Phase C (version 4) — observed execution (§7): the validator serves a mock
-// tool-execution endpoint (RunRequest.ToolEndpoint) and scores a tool case on
-// the trajectory it OBSERVES the harness execute through that endpoint rather
-// than the harness's self-reported tool_calls (retires W3). An observable case
-// (every expected tool validator-served) whose harness does not execute through
-// the endpoint is capped (scorer.UnobservedCeiling) — a scoring change, hence the
-// bump. C2 (result-usage) and C3 (multi-graph isolation) ride this same version.
-const BenchVersion = 4
+//   - Phase A — v1 hardening: seed-derived time, graded memory, trajectory/arg
+//     scoring, judge hardening.
+//   - Phase B — the data engine: the static LongMemEval fixture replaced by the
+//     procedural persona/fact-graph generator (internal/persona +
+//     gen.GenerateMemoryV2), difficulty tiers, near-miss distractors, seeding
+//     tiers, dataset hashing, the 0.5/0.5 composite rebalance.
+//   - Phase C — observed execution (§7): the validator serves a mock
+//     tool-execution endpoint (RunRequest.ToolEndpoint) and scores a tool case on
+//     the OBSERVED trajectory rather than self-report (retires W3); result-usage
+//     scoring (C2) and multi-graph isolation (C3).
+//
+// All three ship together as version 2 while v2 is pre-launch.
+const BenchVersion = 2
 
 // DatasetEpoch is the pinned reference "as-of" instant for all generated
 // datasets. Benchmark generation must be a pure function of the run seed and
