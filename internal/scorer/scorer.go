@@ -351,7 +351,33 @@ func deterministicMemoryHit(expected, response string) bool {
 	if isPureNumber(e) {
 		return containsNumberToken(r, e)
 	}
-	return strings.Contains(r, e)
+	// Whole-word/phrase match (bounded by non-alphanumerics) so a short answer
+	// like "no" does not spuriously match inside "know", nor "Ann" inside
+	// "annoyingly" — a raw substring check would credit a wrong answer.
+	return containsBoundedPhrase(r, e)
+}
+
+// containsBoundedPhrase reports whether phrase appears in text bounded on both
+// sides by a non-alphanumeric char (or the string edge). Interior spaces in a
+// multi-word phrase are fine; only the outer boundaries are checked.
+func containsBoundedPhrase(text, phrase string) bool {
+	for i := 0; ; {
+		j := strings.Index(text[i:], phrase)
+		if j < 0 {
+			return false
+		}
+		j += i
+		before := j == 0 || !isAlnum(text[j-1])
+		after := j+len(phrase) >= len(text) || !isAlnum(text[j+len(phrase)])
+		if before && after {
+			return true
+		}
+		i = j + 1
+	}
+}
+
+func isAlnum(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
 }
 
 // normalizeAnswer lowercases, trims surrounding punctuation/quotes, and collapses
