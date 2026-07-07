@@ -52,7 +52,7 @@ func buildLMEJudgeSystem(questionType string, isAbstention bool) string {
 	var clause string
 	switch {
 	case strings.Contains(qt, "temporal"):
-		clause = "\n\nIMPORTANT: For temporal reasoning questions, do NOT penalize off-by-one errors in day counts. If the correct answer says \"5 days\" and the response says \"4 days\" or \"6 days\", that is still correct. Focus on whether the temporal reasoning approach and the approximate answer are right."
+		clause = "\n\nIMPORTANT: For temporal reasoning questions, allow approximation ONLY in elapsed-duration estimates — if the correct answer is \"about 3 weeks\" and the response says \"about 2 weeks\" or \"roughly a month\", accept it. But the EVENT ORDER or SEQUENCE must be correct: if the question asks which came first, or to order several events, a wrong ordering is incorrect. Grade the sequence strictly and the duration leniently."
 	case strings.Contains(qt, "knowledge-update"), strings.Contains(qt, "knowledge_update"):
 		clause = "\n\nIMPORTANT: For knowledge update questions, the response may contain both outdated and updated information. As long as the UPDATED (most recent) information matches the correct answer, mark as correct. The presence of older information alongside the correct update is acceptable."
 	case strings.Contains(qt, "preference"):

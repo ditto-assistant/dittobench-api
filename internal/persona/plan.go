@@ -650,11 +650,12 @@ func BuildPlan(seed int64, opts Opts) *Plan {
 	for d := 0; d < opts.DecoyPeople; d++ {
 		who := pick(r, firstNames)
 		rel := relations[d%len(relations)]
-		// Each decoy asserts one same-attribute-different-value fact against a
-		// random scalar spec (universal OR domain), so the haystack holds a
-		// plausible near-miss for that attribute's recall question — including the
-		// specialist attributes, where jargon most pressures retrieval.
-		s := scalars[r.Intn(len(scalars))]
+		// Round-robin over the scalar specs (not random) so decoys reliably COVER
+		// the self attributes being recalled — every recall/knowledge-update
+		// question then faces a same-attribute, different-value near-miss, instead
+		// of coverage being a coin flip. Includes the specialist attributes, where
+		// jargon most pressures retrieval.
+		s := scalars[d%len(scalars)]
 		v := pick(r, s.pool)
 		p.Facts = append(p.Facts, Fact{
 			ID:        fmt.Sprintf("f-distractor-%d", d),
@@ -667,6 +668,28 @@ func BuildPlan(seed int64, opts Opts) *Plan {
 			Seq:       nextSeq(),
 			UserText:  fmt.Sprintf("By the way, %s %s's %s is %s.", rel, who, s.label, v),
 			AsstText:  fmt.Sprintf("Noted — that %s is about %s, not you.", s.label, who),
+		})
+	}
+
+	// --- false-premise decoys: a friend's value for an attribute the user NEVER
+	// states, seeded so a hard abstention question ("what is MY blood type?") has a
+	// near-miss in the haystack. Never a self fact, so it yields no recall/temporal
+	// question; the only correct behavior is still to decline. ---
+	for d, fp := range falsePremiseAbsent {
+		who := pick(r, firstNames)
+		rel := relations[d%len(relations)]
+		v := pick(r, fp.Pool)
+		p.Facts = append(p.Facts, Fact{
+			ID:        fmt.Sprintf("f-fp-%d", d),
+			Kind:      KindDistractor,
+			Entity:    who,
+			Attribute: fp.Attribute,
+			Value:     v,
+			Display:   v,
+			Session:   spread(0, opts.Sessions),
+			Seq:       nextSeq(),
+			UserText:  fmt.Sprintf("Oh, %s %s's %s is %s.", rel, who, fp.Label, v),
+			AsstText:  fmt.Sprintf("Noted — that %s is %s's, not yours.", fp.Label, who),
 		})
 	}
 

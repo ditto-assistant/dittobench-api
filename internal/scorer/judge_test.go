@@ -57,7 +57,7 @@ func TestDim(t *testing.T) {
 }
 
 func TestBuildLMEJudgeSystemClauses(t *testing.T) {
-	if !strings.Contains(buildLMEJudgeSystem("temporal-reasoning", false), "off-by-one") {
+	if !strings.Contains(buildLMEJudgeSystem("temporal-reasoning", false), "elapsed-duration") {
 		t.Fatal("temporal clause missing")
 	}
 	if !strings.Contains(buildLMEJudgeSystem("knowledge-update", false), "outdated and updated") {
