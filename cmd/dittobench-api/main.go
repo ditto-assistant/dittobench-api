@@ -490,14 +490,17 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	s.store.SetStage(runID, store.StatusGenerating, 0, total)
 	rng := gen.NewRNG(seed)
 	genModel := llm.GeneratorModel()
-	toolCases := gen.GenerateTools(ctx, rng, prof.Tools, prof.ParaphraseFrac, llmClient, genModel)
-	seedReq, memCases, err := gen.GenerateMemory(ctx, rng, prof.Mem, prof.Distractors, prof.ParaphraseFrac, llmClient, genModel, gen.SeedDir(), gen.OraclePath())
+	toolCases, toolPara := gen.GenerateTools(ctx, rng, prof.Tools, prof.ParaphraseFrac, llmClient, genModel)
+	seedReq, memCases, memPara, err := gen.GenerateMemory(ctx, rng, prof.Mem, prof.Distractors, prof.ParaphraseFrac, llmClient, genModel, gen.SeedDir(), gen.OraclePath())
 	if err != nil {
 		s.store.Fail(runID, "dataset generation failed: "+err.Error())
 		return
 	}
-	log.Printf("run %s generated: %d tool cases, %d memory cases, %d haystack pairs (%d subjects)",
-		runID, len(toolCases), len(memCases), len(seedReq.Pairs), len(seedReq.Subjects))
+	para := toolPara
+	para.Add(memPara)
+	log.Printf("run %s generated: %d tool cases, %d memory cases, %d haystack pairs (%d subjects); paraphrase attempted=%d applied=%d retried=%d fallback=%d",
+		runID, len(toolCases), len(memCases), len(seedReq.Pairs), len(seedReq.Subjects),
+		para.Attempted, para.Applied, para.Retried, para.Fallback)
 
 	// 3. start the container, forwarding the OpenRouter key + provider config so
 	//    the crate's agent + embedder can run. On the local harness_url path we
@@ -571,6 +574,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	report := scorer.Aggregate(runID, perCase)
 	report.Seed = seed
 	report.StructuralFingerprint = structuralFP
+	report.Details = &protocol.RunDetails{Paraphrase: &para}
 	s.store.Finish(runID, report)
 	log.Printf("run %s done: composite=%.3f tool_mean=%.3f memory_mean=%.3f", runID, report.Composite, report.ToolMean, report.MemoryMean)
 }

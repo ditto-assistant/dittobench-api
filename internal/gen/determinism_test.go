@@ -27,11 +27,11 @@ func marshal(t *testing.T, v any) string {
 // contract in docs/BENCHMARK-V2.md §4.2.
 func TestMemoryPlanByteIdenticalPerSeed(t *testing.T) {
 	const seed = 20260706
-	seedA, casesA, err := GenerateMemory(context.Background(), NewRNG(seed), 8, 25, 0, nil, "m", "", "")
+	seedA, casesA, _, err := GenerateMemory(context.Background(), NewRNG(seed), 8, 25, 0, nil, "m", "", "")
 	if err != nil {
 		t.Fatalf("GenerateMemory A: %v", err)
 	}
-	seedB, casesB, err := GenerateMemory(context.Background(), NewRNG(seed), 8, 25, 0, nil, "m", "", "")
+	seedB, casesB, _, err := GenerateMemory(context.Background(), NewRNG(seed), 8, 25, 0, nil, "m", "", "")
 	if err != nil {
 		t.Fatalf("GenerateMemory B: %v", err)
 	}
@@ -55,11 +55,11 @@ func TestMemoryPlanByteIdenticalPerSeed(t *testing.T) {
 // TestMemoryPlanVariesAcrossSeeds guards the flip side: determinism must not
 // collapse the datasets to a constant — different seeds still differ.
 func TestMemoryPlanVariesAcrossSeeds(t *testing.T) {
-	seedA, _, err := GenerateMemory(context.Background(), NewRNG(1), 8, 25, 0, nil, "m", "", "")
+	seedA, _, _, err := GenerateMemory(context.Background(), NewRNG(1), 8, 25, 0, nil, "m", "", "")
 	if err != nil {
 		t.Fatalf("GenerateMemory seed 1: %v", err)
 	}
-	seedB, _, err := GenerateMemory(context.Background(), NewRNG(2), 8, 25, 0, nil, "m", "", "")
+	seedB, _, _, err := GenerateMemory(context.Background(), NewRNG(2), 8, 25, 0, nil, "m", "", "")
 	if err != nil {
 		t.Fatalf("GenerateMemory seed 2: %v", err)
 	}

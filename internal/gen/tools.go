@@ -19,24 +19,40 @@ const paraphraseSystem = "You rewrite a single user message to a chat assistant 
 // then LLM-paraphrases a random `frac` of the prompts via the generator model so
 // the surface wording is novel every run. A nil llm (or frac<=0) skips
 // paraphrasing — used by cheap/offline paths and tests.
-func GenerateTools(ctx context.Context, r *rand.Rand, n int, frac float64, llm LLM, model string) []protocol.ToolCase {
-	cases := datagen.GenerateCases(r, r.Int63(), n)
+//
+// Each attempted paraphrase retries once on LLM error and is verified before use
+// (the case's concrete entity must survive — see preservesEntity); a rewrite
+// that errors or drops the entity falls back to the templated prompt and is
+// counted, so a paraphrase collapse is visible in ParaphraseStats rather than a
+// silent verbatim skip (v1's W5).
+func GenerateTools(ctx context.Context, r *rand.Rand, n int, frac float64, llm LLM, model string) ([]protocol.ToolCase, protocol.ParaphraseStats) {
+	cases, fillers := datagen.GenerateCasesWithFillers(r, r.Int63(), n)
+	var stats protocol.ParaphraseStats
 	if llm == nil || frac <= 0 {
-		return cases
+		return cases, stats
 	}
 	for i := range cases {
 		if r.Float64() >= frac {
 			continue
 		}
-		rewritten, err := llm.Complete(ctx, model, paraphraseSystem, cases[i].Prompt)
-		if err != nil {
-			continue // keep the templated prompt on any failure
+		stats.Attempted++
+		rewritten, retried, err := completeWithRetry(ctx, llm, model, paraphraseSystem, cases[i].Prompt)
+		if retried {
+			stats.Retried++
 		}
-		if clean := sanitizeParaphrase(rewritten); clean != "" {
-			cases[i].Prompt = clean
+		clean := ""
+		if err == nil {
+			clean = sanitizeParaphrase(rewritten)
 		}
+		// Accept only a non-degenerate rewrite that preserves the entity.
+		if clean == "" || (fillers[i] != "" && !preservesEntity(fillers[i], clean)) {
+			stats.Fallback++ // keep the templated prompt
+			continue
+		}
+		cases[i].Prompt = clean
+		stats.Applied++
 	}
-	return cases
+	return cases, stats
 }
 
 // sanitizeParaphrase trims model chatter (surrounding quotes/whitespace, leading

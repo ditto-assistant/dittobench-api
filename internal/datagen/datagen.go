@@ -273,18 +273,36 @@ func stratifiedCategoryOrder(r *rand.Rand, n int) []int {
 // anti-cheat generator (internal/gen) can reuse the same templated ground-truth
 // and then LLM-paraphrase the prompts. seed is only used for stable case IDs.
 func GenerateCases(r *rand.Rand, seed int64, n int) []protocol.ToolCase {
+	cases, _ := GenerateCasesWithFillers(r, seed, n)
+	return cases
+}
+
+// GenerateCasesWithFillers is GenerateCases plus, for each case, the concrete
+// entity ("filler") substituted into its template (empty for templates with no
+// %s slot). The paraphrase verifier (internal/gen) checks that this entity
+// survives realization, so a rewrite that drops it falls back to the template
+// rather than silently shipping a case whose ground truth no longer matches the
+// prompt.
+func GenerateCasesWithFillers(r *rand.Rand, seed int64, n int) ([]protocol.ToolCase, []string) {
 	if n < 1 {
 		n = 1
 	}
 	order := stratifiedCategoryOrder(r, n)
 	cases := make([]protocol.ToolCase, 0, n)
+	fillers := make([]string, 0, n)
 	for i := 0; i < n; i++ {
 		cat := categories[order[i]]
 		tmpl := cat.templates[r.Intn(len(cat.templates))]
 		filler := fillerFor(r, cat.name)
 		prompt := tmpl
+		usedFiller := ""
 		if strings.Contains(tmpl, "%s") {
 			prompt = fmt.Sprintf(tmpl, filler)
+			// Only a real tool case has an entity worth preserving; no_tool /
+			// abstention fillers ARE the whole (freely rephrasable) message.
+			if cat.tool != "" {
+				usedFiller = filler
+			}
 		}
 
 		tc := protocol.ToolCase{
@@ -309,6 +327,7 @@ func GenerateCases(r *rand.Rand, seed int64, n int) []protocol.ToolCase {
 		}
 
 		cases = append(cases, tc)
+		fillers = append(fillers, usedFiller)
 	}
-	return cases
+	return cases, fillers
 }

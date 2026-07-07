@@ -162,6 +162,34 @@ type CodeFingerprint struct {
 	M    []string `json:"m"`
 }
 
+// ParaphraseStats counts the outcomes of the surface-realization (LLM
+// paraphrase) pass for one generation. It exists so a spike in template
+// fallbacks — an LLM outage or an over-strict verifier silently collapsing the
+// dataset back to verbatim templates (v1's W5) — is visible in the report
+// rather than invisible. Purely advisory telemetry; never affects the score.
+type ParaphraseStats struct {
+	Attempted int `json:"attempted"` // paraphrase was attempted (frac roll hit, LLM present)
+	Applied   int `json:"applied"`   // paraphrase verified (fact/entity preserved) and used
+	Retried   int `json:"retried"`   // first LLM call failed; a second was made
+	Fallback  int `json:"fallback"`  // kept the template/verbatim original (LLM error or failed verify)
+}
+
+// Add folds another ParaphraseStats into the receiver (tool + memory passes).
+func (p *ParaphraseStats) Add(o ParaphraseStats) {
+	p.Attempted += o.Attempted
+	p.Applied += o.Applied
+	p.Retried += o.Retried
+	p.Fallback += o.Fallback
+}
+
+// RunDetails is the opaque, additive telemetry blob for a run (BENCHMARK-V2 §7).
+// It is NOT part of the platform's DB/signature contract, so new fields may be
+// added freely (later WPs add bench_version, judge-audit stats, token totals).
+// Serialized under ScoreReport.details.
+type RunDetails struct {
+	Paraphrase *ParaphraseStats `json:"paraphrase,omitempty"`
+}
+
 // ScoreReport is the full result of scoring a run.
 type ScoreReport struct {
 	RunID       string         `json:"run_id"`
@@ -174,6 +202,9 @@ type ScoreReport struct {
 	N           int            `json:"n"`
 	PerCase     []CaseScore    `json:"per_case"`
 	PerCategory []CategoryStat `json:"per_category,omitempty"`
+	// Details is opaque, additive run telemetry (paraphrase fallback counts and,
+	// in later bench versions, more). Advisory only — never scored or signed.
+	Details *RunDetails `json:"details,omitempty"`
 	// StructuralFingerprint is an AST-level shingle sketch of the built crate
 	// (nil when unavailable), forwarded to the platform's anti-copy gate as
 	// advisory (unsigned) moderation metadata. It never affects the score.

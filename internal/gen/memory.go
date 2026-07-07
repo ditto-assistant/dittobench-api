@@ -36,10 +36,11 @@ const (
 // It returns the SeedRequest to POST to <harness>/seed and the MemoryCases to
 // run. A nil llm (or frac<=0) skips paraphrasing. Errors clearly (no crash) if
 // the seed assets are absent.
-func GenerateMemory(ctx context.Context, r *rand.Rand, n, distractors int, frac float64, llm LLM, model, seedDir, oraclePath string) (protocol.SeedRequest, []protocol.MemoryCase, error) {
+func GenerateMemory(ctx context.Context, r *rand.Rand, n, distractors int, frac float64, llm LLM, model, seedDir, oraclePath string) (protocol.SeedRequest, []protocol.MemoryCase, protocol.ParaphraseStats, error) {
+	var stats protocol.ParaphraseStats
 	assets, err := loadSeedAssets(seedDir, oraclePath)
 	if err != nil {
-		return protocol.SeedRequest{}, nil, fmtErr("memory", err)
+		return protocol.SeedRequest{}, nil, stats, fmtErr("memory", err)
 	}
 
 	// Candidate questions: have a manifest case with at least one resolvable pair.
@@ -54,7 +55,7 @@ func GenerateMemory(ctx context.Context, r *rand.Rand, n, distractors int, frac 
 		}
 	}
 	if len(candidates) == 0 {
-		return protocol.SeedRequest{}, nil, fmtErr("memory", fmt.Errorf("no usable oracle questions with manifest pairs"))
+		return protocol.SeedRequest{}, nil, stats, fmtErr("memory", fmt.Errorf("no usable oracle questions with manifest pairs"))
 	}
 	if n > len(candidates) {
 		n = len(candidates)
@@ -135,8 +136,16 @@ func GenerateMemory(ctx context.Context, r *rand.Rand, n, distractors int, frac 
 		sp := assets.pairsByID[h.pairID]
 		prompt, response := sp.Prompt, sp.Response
 		if llm != nil && frac > 0 && r.Float64() < frac {
-			if p, rsp, ok := paraphrasePair(ctx, llm, model, prompt, response); ok {
+			stats.Attempted++
+			p, rsp, retried, ok := paraphrasePair(ctx, llm, model, prompt, response)
+			if retried {
+				stats.Retried++
+			}
+			if ok {
 				prompt, response = p, rsp
+				stats.Applied++
+			} else {
+				stats.Fallback++ // keep the verbatim pair; never a silent skip
 			}
 		}
 		// per-pair timestamp: session base + intra-session jitter (minutes..hours)
@@ -178,8 +187,16 @@ func GenerateMemory(ctx context.Context, r *rand.Rand, n, distractors int, frac 
 		q := assets.oracle[qid]
 		question := q.Question
 		if llm != nil && frac > 0 && r.Float64() < frac {
-			if pq := paraphraseQuestion(ctx, llm, model, question); pq != "" {
+			stats.Attempted++
+			pq, retried, ok := paraphraseQuestion(ctx, llm, model, question)
+			if retried {
+				stats.Retried++
+			}
+			if ok {
 				question = pq
+				stats.Applied++
+			} else {
+				stats.Fallback++
 			}
 		}
 		cases = append(cases, protocol.MemoryCase{
@@ -197,7 +214,7 @@ func GenerateMemory(ctx context.Context, r *rand.Rand, n, distractors int, frac 
 		Subjects: outSubjects,
 		Links:    links,
 	}
-	return seed, cases, nil
+	return seed, cases, stats, nil
 }
 
 func countResolvablePairs(a *seedAssets, mc manifestCase) int {
