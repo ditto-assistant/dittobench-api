@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"log"
 	"math/rand"
 	"net"
@@ -551,11 +552,21 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	tools := catalog.Catalog()
 	judgeCfg := scorer.JudgeConfig{Model: llm.ScorerModel(), ModelB: llm.ScorerModelB()}
 	perCase := make([]protocol.CaseScore, 0, total)
+	judgeAttempts, judgeErrors := 0, 0
+	countJudge := func(o scorer.JudgeOutcome) {
+		if o.Attempted {
+			judgeAttempts++
+			if o.Errored {
+				judgeErrors++
+			}
+		}
+	}
 
 	for _, c := range toolCases {
 		resp, runErr := runner.RunCase(ctx, harnessURL, c.ID, c.Prompt, tools)
 		cs := scorer.ScoreToolCase(c, resp, runErr == nil)
-		quality, injected := scorer.GradeToolQuality(ctx, llmClient, judgeCfg, c.ID, c.Prompt, cs.Called, c.ExpectedBehavior, resp.FinalText)
+		quality, injected, jo := scorer.GradeToolQuality(ctx, llmClient, judgeCfg, c.ID, c.Prompt, cs.Called, c.ExpectedBehavior, resp.FinalText)
+		countJudge(jo)
 		cs = scorer.ComposeTool(cs, quality)
 		if injected {
 			cs.Score, cs.Injection = 0, true
@@ -567,9 +578,21 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 
 	for _, mc := range memCases {
 		resp, _ := runner.RunCase(ctx, harnessURL, mc.ID, mc.Question, tools)
-		cs := scorer.GradeMemory(ctx, llmClient, judgeCfg, mc, resp)
+		cs, jo := scorer.GradeMemory(ctx, llmClient, judgeCfg, mc, resp)
+		countJudge(jo)
 		perCase = append(perCase, cs)
 		s.store.AppendPartial(runID, cs)
+	}
+
+	// Run-level LLM-availability gate (§11.3): a persistent judge outage would
+	// otherwise record a deflated but validly-signed score (every judged case
+	// scored 0). If a majority of the judge calls that were actually attempted
+	// failed (after their per-call retry), fail the RUN as infrastructure error
+	// rather than persisting garbage.
+	if judgeAttempts > 0 && judgeErrors*2 >= judgeAttempts {
+		s.store.Fail(runID, fmt.Sprintf("judge LLM unavailable: %d/%d judge calls failed; run aborted (no score recorded)", judgeErrors, judgeAttempts))
+		log.Printf("run %s aborted: judge LLM unavailable (%d/%d judge calls failed)", runID, judgeErrors, judgeAttempts)
+		return
 	}
 
 	// 6. scoring — aggregate + finish.

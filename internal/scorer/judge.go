@@ -72,6 +72,21 @@ type MemoryVerdict struct {
 	Correct          bool
 	Grounded         bool
 	InjectionAttempt bool
+	// Errored is true when the judge LLM call failed (availability error), as
+	// opposed to a legitimate "incorrect" verdict — so the caller can distinguish
+	// a bad answer from an infrastructure outage (run-level fail, §6.1).
+	Errored bool
+}
+
+// completeJudge calls the judge model, retrying once on error (transient
+// availability blips). The returned error is non-nil only after both attempts
+// fail.
+func completeJudge(ctx context.Context, model LLM, modelID, system, user string) (string, error) {
+	text, err := model.Complete(ctx, modelID, system, user)
+	if err == nil {
+		return text, nil
+	}
+	return model.Complete(ctx, modelID, system, user)
 }
 
 // JudgeMemoryGraded runs the LongMemEval QA judge returning correctness,
@@ -87,9 +102,9 @@ func JudgeMemoryGraded(ctx context.Context, model LLM, modelID, question, correc
 	user := fmt.Sprintf("QUESTION:\n%s\n\nCORRECT ANSWER:\n%s\n\n%s\n\nReturn the JSON verdict.",
 		question, correctAnswer, fence("MODEL RESPONSE", response))
 
-	text, err := model.Complete(ctx, modelID, system, user)
+	text, err := completeJudge(ctx, model, modelID, system, user)
 	if err != nil {
-		return MemoryVerdict{}
+		return MemoryVerdict{Errored: true}
 	}
 	v := extractJSON(text)
 	if v == nil {
@@ -136,6 +151,7 @@ func boolish(x any) bool {
 type ToolQualityVerdict struct {
 	Quality          float64
 	InjectionAttempt bool
+	Errored          bool // judge LLM call failed (availability), not a low score
 }
 
 // JudgeToolQualityGraded runs the tool-use response-quality judge. The
@@ -159,9 +175,9 @@ func JudgeToolQualityGraded(ctx context.Context, model LLM, modelID, prompt stri
 		fence("TOOLS CALLED (self-reported)", tools),
 		fence("ASSISTANT RESPONSE", response))
 
-	text, err := model.Complete(ctx, modelID, toolJudgeSystem, user)
+	text, err := completeJudge(ctx, model, modelID, toolJudgeSystem, user)
 	if err != nil {
-		return ToolQualityVerdict{}
+		return ToolQualityVerdict{Errored: true}
 	}
 	v := extractJSON(text)
 	if v == nil {

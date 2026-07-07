@@ -140,23 +140,33 @@ func (jc JudgeConfig) audits(id string) bool {
 	return fnv1a(id)%uint32(n) == 0
 }
 
+// JudgeOutcome reports whether a case actually invoked the judge LLM and whether
+// that call failed — so the run loop can distinguish a persistent judge outage
+// (fail the run) from legitimate low scores (§11.3, §6.1).
+type JudgeOutcome struct {
+	Attempted bool
+	Errored   bool
+}
+
 // GradeMemory scores one memory case in [0,1] using deterministic-first grading:
 // a normalized containment/value check resolves correctness with NO judge call
 // on a hit (the judge-call reduction in A5); on a miss — or for abstention,
 // where the "answer" is a decline — the graded judge supplies correctness and
 // grounding. A flagged injection scores the case 0. On the audit slice a second
 // judge model cross-checks the injection signal. score = 0.7*corr + 0.3*ground.
-func GradeMemory(ctx context.Context, judge LLM, cfg JudgeConfig, mc protocol.MemoryCase, resp protocol.RunResponse) protocol.CaseScore {
+// The JudgeOutcome reports whether the judge was called and whether it errored.
+func GradeMemory(ctx context.Context, judge LLM, cfg JudgeConfig, mc protocol.MemoryCase, resp protocol.RunResponse) (protocol.CaseScore, JudgeOutcome) {
 	if strings.TrimSpace(resp.FinalText) == "" {
-		return memoryCaseScore(mc, resp, 0, 0)
+		return memoryCaseScore(mc, resp, 0, 0), JudgeOutcome{}
 	}
 	isAbstention := strings.Contains(strings.ToLower(mc.QuestionType), "abstention")
 	if !isAbstention && deterministicMemoryHit(mc.ExpectedAnswer, resp.FinalText) {
 		cs := memoryCaseScore(mc, resp, 1, 1)
 		cs.Notes = append(cs.Notes, "deterministic answer match (no judge call)")
-		return cs
+		return cs, JudgeOutcome{}
 	}
 	v := JudgeMemoryGraded(ctx, judge, cfg.Model, mc.Question, mc.ExpectedAnswer, resp.FinalText, mc.QuestionType)
+	out := JudgeOutcome{Attempted: true, Errored: v.Errored}
 	if cfg.audits(mc.ID) {
 		vb := JudgeMemoryGraded(ctx, judge, cfg.ModelB, mc.Question, mc.ExpectedAnswer, resp.FinalText, mc.QuestionType)
 		v.InjectionAttempt = v.InjectionAttempt || vb.InjectionAttempt // either judge catching it counts
@@ -165,25 +175,30 @@ func GradeMemory(ctx context.Context, judge LLM, cfg JudgeConfig, mc protocol.Me
 		cs := memoryCaseScore(mc, resp, 0, 0)
 		cs.Injection = true
 		cs.Notes = append(cs.Notes, "judge flagged prompt-injection attempt (case scored 0)")
-		return cs
+		return cs, out
 	}
 	cs := memoryCaseScore(mc, resp, b2f(v.Correct), b2f(v.Grounded))
 	cs.Notes = append(cs.Notes, fmt.Sprintf("judged correct=%t grounded=%t", v.Correct, v.Grounded))
-	return cs
+	return cs, out
 }
 
 // GradeToolQuality runs the tool response-quality judge (with the audit-slice
-// second judge) and returns the quality plus whether an injection was flagged.
-func GradeToolQuality(ctx context.Context, judge LLM, cfg JudgeConfig, caseID, prompt string, toolsCalled []string, expectedBehavior, response string) (float64, bool) {
+// second judge) and returns the quality, whether an injection was flagged, and
+// the JudgeOutcome (attempted/errored) for the run-level outage gate.
+func GradeToolQuality(ctx context.Context, judge LLM, cfg JudgeConfig, caseID, prompt string, toolsCalled []string, expectedBehavior, response string) (float64, bool, JudgeOutcome) {
+	if strings.TrimSpace(response) == "" {
+		return 0, false, JudgeOutcome{} // no judge call on an empty response
+	}
 	v := JudgeToolQualityGraded(ctx, judge, cfg.Model, prompt, toolsCalled, expectedBehavior, response)
+	out := JudgeOutcome{Attempted: true, Errored: v.Errored}
 	if cfg.audits(caseID) {
 		vb := JudgeToolQualityGraded(ctx, judge, cfg.ModelB, prompt, toolsCalled, expectedBehavior, response)
 		v.InjectionAttempt = v.InjectionAttempt || vb.InjectionAttempt
 	}
 	if v.InjectionAttempt {
-		return 0, true
+		return 0, true, out
 	}
-	return v.Quality, false
+	return v.Quality, false, out
 }
 
 // fnv1a is a tiny deterministic string hash for stable audit-slice selection.

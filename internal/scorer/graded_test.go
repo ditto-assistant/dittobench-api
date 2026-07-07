@@ -41,7 +41,7 @@ func TestDeterministicMemoryHit(t *testing.T) {
 func TestGradeMemoryDeterministicNoJudge(t *testing.T) {
 	f := &fakeLLM{err: errors.New("judge must not be called")}
 	mc := protocol.MemoryCase{ID: "m1", QuestionType: "multi-session", ExpectedAnswer: "blue", Question: "what color?"}
-	cs := GradeMemory(context.Background(), f, JudgeConfig{Model: "m"}, mc, protocol.RunResponse{FinalText: "it was blue", LatencyMs: 7})
+	cs, _ := GradeMemory(context.Background(), f, JudgeConfig{Model: "m"}, mc, protocol.RunResponse{FinalText: "it was blue", LatencyMs: 7})
 	if !approx(cs.Score, 1.0) || !cs.Correct {
 		t.Fatalf("deterministic hit should score 1.0 correct: %+v", cs)
 	}
@@ -63,7 +63,7 @@ func TestGradeMemoryGradedCredit(t *testing.T) {
 	}
 	for _, tc := range tests {
 		// FinalText that does NOT deterministically contain "blue" → judge path.
-		cs := GradeMemory(context.Background(), &fakeLLM{reply: tc.reply}, JudgeConfig{Model: "m"}, mc, protocol.RunResponse{FinalText: "some other answer"})
+		cs, _ := GradeMemory(context.Background(), &fakeLLM{reply: tc.reply}, JudgeConfig{Model: "m"}, mc, protocol.RunResponse{FinalText: "some other answer"})
 		if !approx(cs.Score, tc.want) {
 			t.Fatalf("reply %s: score %v want %v", tc.reply, cs.Score, tc.want)
 		}
@@ -76,12 +76,12 @@ func TestGradeMemoryAbstentionAlwaysJudged(t *testing.T) {
 	// Clean decline → judged correct+grounded → 1.0. Judge IS called even though
 	// the expected marker text is not present in the response.
 	f := &fakeLLM{reply: `{"correct":"yes","grounded":"yes"}`}
-	cs := GradeMemory(context.Background(), f, JudgeConfig{Model: "m"}, mc, protocol.RunResponse{FinalText: "I don't have that information."})
+	cs, _ := GradeMemory(context.Background(), f, JudgeConfig{Model: "m"}, mc, protocol.RunResponse{FinalText: "I don't have that information."})
 	if !approx(cs.Score, 1.0) || f.calls != 1 {
 		t.Fatalf("clean decline should score 1.0 via the judge: score=%v calls=%d", cs.Score, f.calls)
 	}
 	// Fabrication → correct=no grounded=no → 0.0.
-	cs = GradeMemory(context.Background(), &fakeLLM{reply: `{"correct":"no","grounded":"no"}`}, JudgeConfig{Model: "m"}, mc, protocol.RunResponse{FinalText: "It's X1234567."})
+	cs, _ = GradeMemory(context.Background(), &fakeLLM{reply: `{"correct":"no","grounded":"no"}`}, JudgeConfig{Model: "m"}, mc, protocol.RunResponse{FinalText: "It's X1234567."})
 	if !approx(cs.Score, 0.0) {
 		t.Fatalf("fabrication should score 0.0, got %v", cs.Score)
 	}
@@ -89,7 +89,7 @@ func TestGradeMemoryAbstentionAlwaysJudged(t *testing.T) {
 
 func TestGradeMemoryEmptyNoJudge(t *testing.T) {
 	f := &fakeLLM{err: errors.New("no")}
-	cs := GradeMemory(context.Background(), f, JudgeConfig{Model: "m"},
+	cs, _ := GradeMemory(context.Background(), f, JudgeConfig{Model: "m"},
 		protocol.MemoryCase{ID: "m", QuestionType: "multi-session", ExpectedAnswer: "x"},
 		protocol.RunResponse{FinalText: "   "})
 	if cs.Score != 0 || cs.Correct {
@@ -104,4 +104,45 @@ func TestGradeMemoryEmptyNoJudge(t *testing.T) {
 // won't contain, so the deterministic check misses and the judge decides).
 func abstentionMarker() string {
 	return "(no information about this was ever provided)"
+}
+
+func TestGradeMemoryReportsJudgeOutage(t *testing.T) {
+	// A judge availability error must surface as Attempted+Errored (so the run
+	// loop can fail the whole run) — retried once first (2 calls).
+	f := &fakeLLM{err: errors.New("openrouter 503")}
+	mc := protocol.MemoryCase{ID: "m1", QuestionType: "multi-session", ExpectedAnswer: "blue", Question: "q"}
+	cs, jo := GradeMemory(context.Background(), f, JudgeConfig{Model: "m"}, mc, protocol.RunResponse{FinalText: "some answer"})
+	if !jo.Attempted || !jo.Errored {
+		t.Fatalf("judge error should surface as Attempted+Errored: %+v", jo)
+	}
+	if cs.Score != 0 { // fail-closed per case still holds
+		t.Fatalf("errored judge should fail-closed to 0 per case, got %v", cs.Score)
+	}
+	if f.calls != 2 { // one retry
+		t.Fatalf("judge should retry once on error (2 calls), got %d", f.calls)
+	}
+}
+
+func TestGradeMemoryNoJudgeOutcomeOnDeterministicHit(t *testing.T) {
+	// Deterministic hit and empty response never invoke the judge → not Attempted,
+	// so they never count toward the outage gate.
+	f := &fakeLLM{err: errors.New("should not be called")}
+	mc := protocol.MemoryCase{ID: "m1", QuestionType: "multi-session", ExpectedAnswer: "blue", Question: "q"}
+	_, jo := GradeMemory(context.Background(), f, JudgeConfig{Model: "m"}, mc, protocol.RunResponse{FinalText: "it was blue"})
+	if jo.Attempted {
+		t.Fatalf("deterministic hit must not mark the judge as attempted: %+v", jo)
+	}
+}
+
+func TestGradeToolQualityReportsJudgeOutage(t *testing.T) {
+	f := &fakeLLM{err: errors.New("openrouter 503")}
+	_, _, jo := GradeToolQuality(context.Background(), f, JudgeConfig{Model: "m"}, "c1", "p", []string{"search_web"}, "b", "resp")
+	if !jo.Attempted || !jo.Errored {
+		t.Fatalf("tool judge error should surface as Attempted+Errored: %+v", jo)
+	}
+	// empty response → no judge call, not attempted
+	_, _, jo2 := GradeToolQuality(context.Background(), f, JudgeConfig{Model: "m"}, "c2", "p", nil, "b", "  ")
+	if jo2.Attempted {
+		t.Fatalf("empty response must not attempt the judge: %+v", jo2)
+	}
 }
