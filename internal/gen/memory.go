@@ -6,6 +6,7 @@ import (
 	"maps"
 	"math/rand"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
@@ -61,14 +62,38 @@ func GenerateMemory(ctx context.Context, r *rand.Rand, n, distractors int, frac 
 		n = len(candidates)
 	}
 
-	// Uniform random selection without replacement → C(candidates, n).
-	perm := r.Perm(len(candidates))
+	// Stratify the selection by question_type with a fixed, seed-independent
+	// per-type quota (like the tool suite's stratifiedCategoryOrder). WHICH
+	// questions are drawn within a type varies by seed; HOW MANY of each type
+	// does not — removing the multinomial question-type-draw variance that v1's
+	// single uniform draw incurred (a variance lever for W1, and it guarantees
+	// every type is exercised for the per-type discrimination gate, §8 gate 3).
+	byType := map[string][]string{}
+	typeOrder := make([]string, 0)
+	for _, qid := range candidates {
+		qt := memQuestionType(assets.oracle[qid].QuestionType)
+		if _, seen := byType[qt]; !seen {
+			typeOrder = append(typeOrder, qt)
+		}
+		byType[qt] = append(byType[qt], qid)
+	}
+	slices.Sort(typeOrder)
+	avail := make(map[string]int, len(typeOrder))
+	for qt, qs := range byType {
+		avail[qt] = len(qs)
+	}
+	quota := stratifiedTypeQuota(typeOrder, avail, n)
+
 	selected := make(map[string]bool, n)
 	selectedOrder := make([]string, 0, n)
-	for i := 0; i < n; i++ {
-		qid := candidates[perm[i]]
-		selected[qid] = true
-		selectedOrder = append(selectedOrder, qid)
+	for _, qt := range typeOrder {
+		pool := byType[qt] // stable order (candidates follow assets.oracleOrder)
+		perm := r.Perm(len(pool))
+		for i := 0; i < quota[qt] && i < len(pool); i++ {
+			qid := pool[perm[i]]
+			selected[qid] = true
+			selectedOrder = append(selectedOrder, qid)
+		}
 	}
 
 	// Collect the haystack pairs of the selected questions (dedup pair_ids).
@@ -215,6 +240,60 @@ func GenerateMemory(ctx context.Context, r *rand.Rand, n, distractors int, frac 
 		Links:    links,
 	}
 	return seed, cases, stats, nil
+}
+
+// memQuestionType normalizes an oracle question_type for bucketing (empty →
+// "unknown" so it never collides with a real, scorable type).
+func memQuestionType(qt string) string {
+	if strings.TrimSpace(qt) == "" {
+		return "unknown"
+	}
+	return qt
+}
+
+// stratifiedTypeQuota splits n across the given types with a balanced,
+// seed-independent quota (floor/ceil of n/len(types)), capped by each type's
+// availability; any shortfall from a scarce type is redistributed round-robin
+// over types with spare capacity. Deterministic for a given (types, avail, n)
+// regardless of seed — so the per-type case mix is identical across seeds.
+func stratifiedTypeQuota(types []string, avail map[string]int, n int) map[string]int {
+	quota := make(map[string]int, len(types))
+	t := len(types)
+	if t == 0 || n <= 0 {
+		return quota
+	}
+	base, rem := n/t, n%t
+	for i, qt := range types {
+		q := base
+		if i < rem {
+			q++
+		}
+		if q > avail[qt] {
+			q = avail[qt]
+		}
+		quota[qt] = q
+	}
+	assigned := 0
+	for _, qt := range types {
+		assigned += quota[qt]
+	}
+	for assigned < n {
+		progressed := false
+		for _, qt := range types {
+			if assigned >= n {
+				break
+			}
+			if quota[qt] < avail[qt] {
+				quota[qt]++
+				assigned++
+				progressed = true
+			}
+		}
+		if !progressed {
+			break // no spare capacity anywhere
+		}
+	}
+	return quota
 }
 
 func countResolvablePairs(a *seedAssets, mc manifestCase) int {
