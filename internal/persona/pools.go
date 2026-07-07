@@ -173,3 +173,91 @@ var noiseTopics = []string{
 	"a podcast episode", "the football scores", "a house plant that is wilting",
 	"a recipe that went wrong",
 }
+
+// --- Professional-domain pools (BENCHMARK-V2 §4.1, domain register) ---
+//
+// Every persona is assigned ONE professional domain (software / medical / legal)
+// whose fact families layer onto the universal personal facts. The register
+// matters for the benchmark's validity: retrieval and entity-matching quality
+// demonstrably do NOT transfer from casual to specialist text (BEIR,
+// arXiv:2104.08663), and domain jargon breaks paraphrase + embedding match — the
+// exact store→retrieve→match path a memory harness runs. LongMemEval-V2
+// (arXiv:2605.12493) makes the same move, reframing the target from a personal
+// assistant to an "experienced colleague" over professional environments. These
+// pools stay clean canonical tokens (verbatim-preserved answer values) like the
+// universal pools above.
+
+// softwareLanguages / softwareEditors / softwareServices feed the
+// software-engineering persona. Languages + editors are scalar (with update
+// chains: a dev switches primary language / editor); services are a list
+// (microservices they own — multi-session "how many / list all" material).
+var softwareLanguages = []string{
+	"Rust", "Go", "TypeScript", "Python", "Kotlin", "Elixir", "Scala",
+	"Swift", "Zig", "Haskell", "Clojure", "Ruby", "OCaml", "Erlang",
+	"F#", "Julia", "Nim", "Crystal",
+}
+
+var softwareEditors = []string{
+	"Neovim", "VS Code", "Zed", "GoLand", "Emacs", "Sublime Text", "Helix",
+	"IntelliJ IDEA", "Xcode", "Cursor", "Fleet", "Kakoune",
+}
+
+var softwareServices = []string{
+	"auth-proxy", "billing-gateway", "notification-hub", "inventory-sync",
+	"search-indexer", "payment-router", "session-store", "rate-limiter",
+	"webhook-dispatcher", "audit-logger", "image-resizer", "feature-flag-service",
+	"schema-registry", "event-collector", "config-server", "token-vault",
+}
+
+// medicalDiagnoses / medicalMedications / medicalAllergies feed the medical
+// (patient) persona — a person tracking their own care with the assistant.
+// Diagnosis + medication are scalar (with update chains: a re-diagnosis or a
+// medication switch — a professional-register knowledge update); allergies are a
+// list. Multi-word canonical tokens (e.g. "type 2 diabetes") survive containment
+// scoring verbatim, exercising the jargon-paraphrase gap.
+var medicalDiagnoses = []string{
+	"type 2 diabetes", "hypertension", "hypothyroidism", "asthma",
+	"rheumatoid arthritis", "acid reflux", "migraine", "atrial fibrillation",
+	"high cholesterol", "psoriasis", "Crohn's disease", "sleep apnea",
+	"osteoporosis", "eczema", "gout", "anemia",
+}
+
+var medicalMedications = []string{
+	"metformin", "lisinopril", "levothyroxine", "atorvastatin", "albuterol",
+	"omeprazole", "amlodipine", "sertraline", "gabapentin", "montelukast",
+	"warfarin", "prednisone", "losartan", "escitalopram", "pantoprazole",
+	"rosuvastatin",
+}
+
+var medicalAllergies = []string{
+	"penicillin", "peanuts", "latex", "sulfa drugs", "shellfish", "aspirin",
+	"codeine", "ibuprofen", "eggs", "soy", "cephalosporins", "tree nuts",
+	"bee stings", "iodine contrast",
+}
+
+// legalPracticeAreas / legalJurisdictions / legalMatters feed the legal (lawyer)
+// persona. Practice area is scalar-updatable (a lateral move into a new
+// specialty); jurisdiction is scalar; matters are a list (active cases/deals —
+// multi-session synthesis). Matter names read like real case captions/deal
+// codenames so the terminology is genuinely specialist.
+var legalPracticeAreas = []string{
+	"intellectual property law", "corporate mergers and acquisitions",
+	"criminal defense", "family law", "immigration law", "employment law",
+	"tax law", "environmental law", "bankruptcy law", "real estate law",
+	"antitrust law", "securities regulation", "estate planning",
+	"maritime law", "patent litigation", "data privacy law",
+}
+
+var legalJurisdictions = []string{
+	"New York", "California", "Illinois", "Texas", "Massachusetts", "Florida",
+	"Washington", "Georgia", "Delaware", "Pennsylvania", "Ontario", "Virginia",
+}
+
+var legalMatters = []string{
+	"the Hollings acquisition", "Doe v. Meridian", "the Castellan estate",
+	"the Ridgeway patent dispute", "the Ashford merger", "the Vantage bankruptcy",
+	"the Pelham zoning appeal", "the Karsten trademark filing",
+	"the Bellweather class action", "the Orsini custody matter",
+	"the Dunmore lease arbitration", "the Fenwick licensing deal",
+	"the Marsh v. Coleridge appeal", "the Thornbury estate dispute",
+}

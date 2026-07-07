@@ -56,6 +56,15 @@ var scalarAsk = map[string]string{
 	"partner":    "What is my partner's name?",
 	"instrument": "What instrument do I play?",
 	"alma_mater": "Where did I go to university?",
+	// software domain
+	"primary_language": "What is my primary programming language?",
+	"code_editor":      "What code editor do I use?",
+	// medical domain
+	"diagnosis":  "What is my current medical diagnosis?",
+	"medication": "What medication am I currently taking?",
+	// legal domain
+	"practice_area": "What area of law do I practice?",
+	"bar_admission": "Which state's bar am I admitted to?",
 }
 
 var prefAsk = map[string]string{
@@ -76,12 +85,20 @@ var listCountAsk = map[string]string{
 	"project": "How many different projects have I told you about?",
 	"trip":    "How many separate trips have I mentioned taking?",
 	"pet":     "How many pets do I have?",
+	// domain list families
+	"service":      "How many services do I maintain?",
+	"allergy":      "How many things am I allergic to?",
+	"legal_matter": "How many legal matters am I handling?",
 }
 
 var listAllAsk = map[string]string{
 	"project": "List all the projects I have mentioned.",
 	"trip":    "Which places have I told you I traveled to?",
 	"pet":     "What are the names of all my pets?",
+	// domain list families
+	"service":      "List all the services I maintain.",
+	"allergy":      "What am I allergic to?",
+	"legal_matter": "List all the legal matters I've told you about.",
 }
 
 // absentAttributes are plausible personal facts the persona generator NEVER
@@ -96,7 +113,6 @@ var absentAttributes = []string{
 	"What is my star sign?",
 	"What is my middle name?",
 	"What is my favorite sports team?",
-	"Which languages do I speak?",
 	"What is my eye color?",
 	"What is my favorite film?",
 	"What is my mobile phone number?",
@@ -117,31 +133,29 @@ func DeriveQuestions(p *Plan) []Question {
 	}
 
 	// --- scalar recall + knowledge-update ---
-	for _, s := range scalarSpecs {
-		cur, ok := currentScalar(p, s.attr)
-		if !ok {
-			continue
-		}
-		ask := scalarAsk[s.attr]
+	// Data-driven: iterate the plan's current scalar facts (universal AND any
+	// domain facts) and look the question phrasing up by attribute, so adding a
+	// domain fact family requires only pool + spec + scalarAsk/factLabel entries.
+	for _, cur := range currentScalarFacts(p) {
+		ask := scalarAsk[cur.Attribute]
 		if ask == "" {
 			continue
 		}
 		if cur.Supersedes != "" {
 			// updated attribute → knowledge-update (latest value wins).
-			ev := []string{cur.ID, cur.Supersedes}
 			qs = append(qs, Question{
-				ID:       "q-ku-" + s.attr,
+				ID:       "q-ku-" + cur.Attribute,
 				Type:     QTKnowledgeUpdate,
-				Tier:     pick3(distractorAttrs[s.attr], TierHard, TierMedium),
+				Tier:     pick3(distractorAttrs[cur.Attribute], TierHard, TierMedium),
 				Text:     ask,
 				Answer:   cur.Value,
-				Evidence: ev,
+				Evidence: []string{cur.ID, cur.Supersedes},
 			})
 		} else {
 			qs = append(qs, Question{
-				ID:       "q-rec-" + s.attr,
+				ID:       "q-rec-" + cur.Attribute,
 				Type:     QTSingleSession,
-				Tier:     pick3(distractorAttrs[s.attr], TierMedium, TierEasy),
+				Tier:     pick3(distractorAttrs[cur.Attribute], TierMedium, TierEasy),
 				Text:     ask,
 				Answer:   cur.Value,
 				Evidence: []string{cur.ID},
@@ -177,7 +191,10 @@ func DeriveQuestions(p *Plan) []Question {
 	}
 
 	// --- multi-session synthesis over list attributes (count questions) ---
-	for _, attr := range []string{"project", "trip", "pet"} {
+	// Iterate the distinct list attributes present (universal + domain) in
+	// timeline order, so a domain list family (e.g. services, medications) is
+	// picked up from listCountAsk/listAllAsk without touching this loop.
+	for _, attr := range listAttributesPresent(p) {
 		items := listFacts(p, attr)
 		if len(items) == 0 {
 			continue
@@ -326,19 +343,46 @@ func factLabel(f Fact) string {
 		return "your love of " + f.Value + " food"
 	case "favorite_color":
 		return "your favorite color " + f.Value
+	// software domain
+	case "primary_language":
+		return "picking up " + f.Value
+	case "code_editor":
+		return "switching to " + f.Value
+	case "service":
+		return "taking on the " + f.Value + " service"
+	// medical domain
+	case "diagnosis":
+		return "being diagnosed with " + f.Value
+	case "medication":
+		return "starting " + f.Value
+	case "allergy":
+		return "your " + f.Value + " allergy"
+	// legal domain
+	case "practice_area":
+		return "moving into " + f.Value
+	case "bar_admission":
+		return "being admitted to the " + f.Value + " bar"
+	case "legal_matter":
+		return "taking on " + f.Value
 	default:
 		return ""
 	}
 }
 
-// currentScalar returns the current-state scalar fact for an attribute.
-func currentScalar(p *Plan, attr string) (Fact, bool) {
+// currentScalarFacts returns every current-state scalar self-fact (universal AND
+// domain), in timeline (Seq) order. This is the data-driven spine of scalar
+// recall / knowledge-update question derivation: a new domain scalar family
+// flows through automatically once its facts are planned and it has scalarAsk +
+// factLabel entries — DeriveQuestions never hard-codes the attribute list.
+func currentScalarFacts(p *Plan) []Fact {
+	var out []Fact
 	for _, f := range p.Facts {
-		if f.Kind == KindScalar && f.Entity == "self" && f.Attribute == attr && f.Current {
-			return f, true
+		if f.Kind == KindScalar && f.Entity == "self" && f.Current {
+			out = append(out, f)
 		}
 	}
-	return Fact{}, false
+	sort.Slice(out, func(i, j int) bool { return out[i].Seq < out[j].Seq })
+	return out
 }
 
 // listFacts returns all list-attribute facts for attr, in timeline order.
@@ -350,6 +394,29 @@ func listFacts(p *Plan, attr string) []Fact {
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Seq < out[j].Seq })
+	return out
+}
+
+// listAttributesPresent returns the distinct list attributes present in the
+// plan, ordered by first appearance (Seq). Like currentScalarFacts this keeps
+// the multi-session synthesis loop data-driven: a domain list family is picked
+// up from its listCountAsk/listAllAsk entries with no change to DeriveQuestions.
+func listAttributesPresent(p *Plan) []string {
+	facts := make([]Fact, 0, len(p.Facts))
+	for _, f := range p.Facts {
+		if f.Kind == KindList {
+			facts = append(facts, f)
+		}
+	}
+	sort.Slice(facts, func(i, j int) bool { return facts[i].Seq < facts[j].Seq })
+	seen := map[string]bool{}
+	var out []string
+	for _, f := range facts {
+		if !seen[f.Attribute] {
+			seen[f.Attribute] = true
+			out = append(out, f.Attribute)
+		}
+	}
 	return out
 }
 

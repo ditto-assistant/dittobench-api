@@ -80,6 +80,73 @@ func TestAnswersMatchGroundTruth(t *testing.T) {
 	}
 }
 
+// TestDomainCoverage checks that every persona is assigned exactly one
+// professional domain, that all three domains are reachable across seeds, and
+// that a domain's specialist facts flow through DeriveQuestions as real
+// questions with correct ground truth (the data-driven-derivation contract).
+func TestDomainCoverage(t *testing.T) {
+	domainAttrs := map[string][]string{
+		"software": {"primary_language", "code_editor", "service"},
+		"medical":  {"diagnosis", "medication", "allergy"},
+		"legal":    {"practice_area", "bar_admission", "legal_matter"},
+	}
+	// attr → its domain, for the exclusivity check.
+	attrDomain := map[string]string{}
+	for d, attrs := range domainAttrs {
+		for _, a := range attrs {
+			attrDomain[a] = d
+		}
+	}
+
+	seenDomain := map[string]bool{}
+	for seed := int64(0); seed < 60; seed++ {
+		p := BuildPlan(seed, DefaultOpts())
+
+		// exactly one domain present in the plan's facts.
+		present := map[string]bool{}
+		for _, f := range p.Facts {
+			if d, ok := attrDomain[f.Attribute]; ok {
+				present[d] = true
+			}
+		}
+		if len(present) != 1 {
+			t.Fatalf("seed %d: expected exactly one domain, got %v", seed, present)
+		}
+		var dom string
+		for d := range present {
+			dom = d
+		}
+		seenDomain[dom] = true
+
+		// the domain's scalar attributes must surface as a recall OR
+		// knowledge-update question (evidence[0] == the fact) whose answer is the
+		// canonical value.
+		recallByFact := map[string]Question{}
+		for _, q := range DeriveQuestions(p) {
+			if (q.Type == QTSingleSession || q.Type == QTKnowledgeUpdate) && len(q.Evidence) > 0 {
+				recallByFact[q.Evidence[0]] = q
+			}
+		}
+		for _, f := range p.Facts {
+			if attrDomain[f.Attribute] != dom || !f.Current || f.Kind != KindScalar {
+				continue
+			}
+			q, ok := recallByFact[f.ID]
+			if !ok {
+				t.Fatalf("seed %d: domain scalar %s produced no recall/update question", seed, f.ID)
+			}
+			if q.Answer != f.Value {
+				t.Fatalf("seed %d: %s answer %q != value %q", seed, q.ID, q.Answer, f.Value)
+			}
+		}
+	}
+	for d := range domainAttrs {
+		if !seenDomain[d] {
+			t.Errorf("domain %q never assigned across 60 seeds", d)
+		}
+	}
+}
+
 // TestKnowledgeUpdateAnswerIsLatest guards the latest-value-wins semantics: the
 // update answer must be the current value and must differ from the superseded one.
 func TestKnowledgeUpdateAnswerIsLatest(t *testing.T) {

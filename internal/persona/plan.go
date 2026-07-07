@@ -122,6 +122,7 @@ type Opts struct {
 	UpdateChains int // scalar attributes that receive a value update
 	Reversals    int // opinion facts that get reversed (contradiction material)
 	DecoyPeople  int // near-miss distractor entities
+	DomainItems  int // items drawn for each professional-domain list family
 }
 
 // DefaultOpts is a medium-sized, well-populated universe: enough facts for the
@@ -135,6 +136,7 @@ func DefaultOpts() Opts {
 		UpdateChains: 3,
 		Reversals:    2,
 		DecoyPeople:  6,
+		DomainItems:  3,
 	}
 }
 
@@ -159,6 +161,9 @@ func (o Opts) normalized() Opts {
 	}
 	if o.DecoyPeople < 0 {
 		o.DecoyPeople = 0
+	}
+	if o.DomainItems < 0 {
+		o.DomainItems = 0
 	}
 	return o
 }
@@ -283,6 +288,107 @@ var prefSpecs = []prefSpec{
 	},
 }
 
+// domainSpec bundles the professional-domain fact families layered onto a
+// persona (software / medical / legal). Exactly one domain is chosen per seed
+// (deterministically) and its scalars + list are emitted alongside the universal
+// personal facts, so every run carries a specialist register (BENCHMARK-V2 §4.1,
+// motivated by BEIR's cross-domain retrieval collapse and LongMemEval-V2's
+// professional reframe). Adding a family here flows through DeriveQuestions with
+// no change to its loops — it reads currentScalarFacts / listAttributesPresent
+// and looks phrasing up by attribute (scalarAsk / listCountAsk / factLabel).
+type domainSpec struct {
+	name    string
+	scalars []scalarSpec
+	lists   []listSpecCount // list families + their per-persona item counts
+}
+
+// listSpecCount pairs a list family with how many items to draw for it.
+type listSpecCount struct {
+	spec  listSpec
+	count int
+}
+
+// domains is the ordered domain registry (a slice, never a map range, so domain
+// choice is reproducible from the seed).
+var domains = []domainSpec{
+	{
+		name: "software",
+		scalars: []scalarSpec{
+			{
+				attr: "primary_language", label: "primary programming language", pool: softwareLanguages, updatable: true,
+				stmt:       []string{"My primary language is %s these days.", "I mostly write %s at work.", "I do most of my coding in %s."},
+				ack:        []string{"%s is a solid choice for that.", "Noted that you work mainly in %s."},
+				updateStmt: []string{"I've switched my main language to %s.", "We migrated the codebase, so I'm writing %s now."},
+				updateAck:  []string{"Got it — updating your primary language to %s.", "Noted, %s is your main language now."},
+			},
+			{
+				attr: "code_editor", label: "code editor", pool: softwareEditors, updatable: true,
+				stmt:       []string{"My editor of choice is %s.", "I do all my work in %s.", "I've settled on %s as my editor."},
+				ack:        []string{"%s — a fine setup.", "Noted that you use %s."},
+				updateStmt: []string{"I've switched editors to %s.", "I gave up my old editor and moved to %s."},
+				updateAck:  []string{"Noted your new editor, %s.", "Updating your editor to %s."},
+			},
+		},
+		lists: []listSpecCount{{
+			spec: listSpec{
+				attr: "service", pool: softwareServices,
+				stmt: []string{"I maintain the %s service.", "I own the %s service now.", "I picked up the %s service this sprint."},
+				ack:  []string{"Noted you maintain %s.", "Got it — %s is one of yours."},
+			},
+		}},
+	},
+	{
+		name: "medical",
+		scalars: []scalarSpec{
+			{
+				attr: "diagnosis", label: "medical diagnosis", pool: medicalDiagnoses, updatable: true,
+				stmt:       []string{"I was diagnosed with %s.", "My doctor says I have %s.", "I'm managing %s."},
+				ack:        []string{"Thanks for telling me — I'll remember your %s.", "Noted your diagnosis of %s."},
+				updateStmt: []string{"My diagnosis was revised — it's actually %s.", "Update from my doctor: it's now %s, not what we thought."},
+				updateAck:  []string{"Understood — updating your diagnosis to %s.", "Noted the change to %s."},
+			},
+			{
+				attr: "medication", label: "medication", pool: medicalMedications, updatable: true,
+				stmt:       []string{"I take %s daily.", "My doctor put me on %s.", "I'm currently on %s."},
+				ack:        []string{"Noted that you take %s.", "Got it — %s is your current medication."},
+				updateStmt: []string{"My doctor switched me from that to %s.", "I've changed medication — I'm on %s now."},
+				updateAck:  []string{"Understood — updating your medication to %s.", "Noted the switch to %s."},
+			},
+		},
+		lists: []listSpecCount{{
+			spec: listSpec{
+				attr: "allergy", pool: medicalAllergies,
+				stmt: []string{"I'm allergic to %s.", "I have an allergy to %s.", "I react badly to %s."},
+				ack:  []string{"Noted your %s allergy.", "Got it — I'll remember you react to %s."},
+			},
+		}},
+	},
+	{
+		name: "legal",
+		scalars: []scalarSpec{
+			{
+				attr: "practice_area", label: "area of law", pool: legalPracticeAreas, updatable: true,
+				stmt:       []string{"I practice %s.", "My specialty is %s.", "I work in %s."},
+				ack:        []string{"Noted that you practice %s.", "Got it — %s is your field."},
+				updateStmt: []string{"I've moved my practice into %s.", "I switched specialties — I'm doing %s now."},
+				updateAck:  []string{"Noted your move into %s.", "Updating your practice area to %s."},
+			},
+			{
+				attr: "bar_admission", label: "state bar", pool: legalJurisdictions,
+				stmt: []string{"I'm admitted to the %s bar.", "I passed the %s bar.", "I'm licensed to practice in %s."},
+				ack:  []string{"Noted you're admitted in %s.", "Got it — %s bar."},
+			},
+		},
+		lists: []listSpecCount{{
+			spec: listSpec{
+				attr: "legal_matter", pool: legalMatters,
+				stmt: []string{"I'm handling %s.", "I picked up %s this week.", "I'm lead counsel on %s."},
+				ack:  []string{"Noted your matter, %s.", "Got it — %s is on your docket."},
+			},
+		}},
+	},
+}
+
 // BuildPlan produces the Layer-1 plan for (seed, opts). It is a PURE function:
 // the only entropy source is a math/rand stream seeded from seed; there is no
 // wall clock, no crypto-rand, and every iteration is over an ordered slice (no
@@ -293,6 +399,15 @@ func BuildPlan(seed int64, opts Opts) *Plan {
 
 	name := pick(r, firstNames) + " " + pick(r, lastNames)
 	p := &Plan{Seed: seed, Name: name}
+
+	// Assign one professional domain (seed-derived) and fold its scalar families
+	// into the universal registry, so scalar recall / update-chain / distractor
+	// logic below treats domain attributes uniformly. The domain's list families
+	// are emitted with the universal list families further down.
+	domain := domains[r.Intn(len(domains))]
+	scalars := make([]scalarSpec, 0, len(scalarSpecs)+len(domain.scalars))
+	scalars = append(scalars, scalarSpecs...)
+	scalars = append(scalars, domain.scalars...)
 
 	seq := 0
 	nextSeq := func() int { s := seq; seq++; return s }
@@ -305,9 +420,11 @@ func BuildPlan(seed int64, opts Opts) *Plan {
 	}
 
 	// --- scalar facts (some with update chains) ---
-	// Choose which updatable scalars get a value update this run.
-	updatableIdx := make([]int, 0, len(scalarSpecs))
-	for i, s := range scalarSpecs {
+	// Choose which updatable scalars get a value update this run. Domain scalars
+	// are in `scalars` too, so a knowledge-update can land on a professional
+	// attribute (a re-diagnosis, a language migration) — the dynamic-state case.
+	updatableIdx := make([]int, 0, len(scalars))
+	for i, s := range scalars {
 		if s.updatable {
 			updatableIdx = append(updatableIdx, i)
 		}
@@ -322,7 +439,7 @@ func BuildPlan(seed int64, opts Opts) *Plan {
 	if half < 1 {
 		half = 1
 	}
-	for i, s := range scalarSpecs {
+	for i, s := range scalars {
 		v1 := pick(r, s.pool)
 		stmt := pickStr(r, s.stmt)
 		ack := pickStr(r, s.ack)
@@ -392,6 +509,10 @@ func BuildPlan(seed int64, opts Opts) *Plan {
 	appendList(projectSpec, opts.Projects)
 	appendList(tripSpec, opts.Trips)
 	appendList(petSpec, opts.Pets)
+	// domain list families (services / allergies / legal matters).
+	for _, lc := range domain.lists {
+		appendList(lc.spec, opts.DomainItems)
+	}
 
 	// --- preference facts ---
 	for _, s := range prefSpecs {
@@ -452,9 +573,10 @@ func BuildPlan(seed int64, opts Opts) *Plan {
 		who := pick(r, firstNames)
 		rel := relations[d%len(relations)]
 		// Each decoy asserts one same-attribute-different-value fact against a
-		// random scalar spec, so the haystack holds a plausible near-miss for
-		// that attribute's recall question.
-		s := scalarSpecs[r.Intn(len(scalarSpecs))]
+		// random scalar spec (universal OR domain), so the haystack holds a
+		// plausible near-miss for that attribute's recall question — including the
+		// specialist attributes, where jargon most pressures retrieval.
+		s := scalars[r.Intn(len(scalars))]
 		v := pick(r, s.pool)
 		p.Facts = append(p.Facts, Fact{
 			ID:        fmt.Sprintf("f-distractor-%d", d),
