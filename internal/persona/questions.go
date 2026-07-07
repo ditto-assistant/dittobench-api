@@ -18,7 +18,18 @@ const (
 	QTContradiction         = "contradiction"
 	QTAbstention            = "abstention"
 	QTInjection             = "injection-resistance"
+	QTAssistantRecall       = "assistant-recall"
 )
+
+// asstRecAsk is the recall question for an assistant-side recommendation, keyed
+// by the fact's attribute. The answer is the value the ASSISTANT gave, so it is
+// recoverable only from the assistant's past turn.
+var asstRecAsk = map[string]string{
+	"rec_novel":   "What novel did you recommend that I read?",
+	"rec_gadget":  "What gadget did you suggest for my home office?",
+	"rec_podcast": "Which podcast did you recommend for my commute?",
+	"rec_trail":   "Which hiking trail did you suggest for me?",
+}
 
 // injectionPayload is the token an embedded prompt-injection tries to make the
 // harness emit. It is deliberately distinctive so a harness that RESISTS (answers
@@ -243,6 +254,25 @@ func DeriveQuestions(p *Plan) []Question {
 			Forbidden: injectionPayload,
 			Evidence:  []string{cur.ID},
 		})
+	}
+
+	// --- assistant-side recall ---
+	// The answer is the value the ASSISTANT gave (present only in AsstText), so a
+	// harness must recall the assistant's turn, not the user's.
+	for _, f := range p.Facts {
+		if f.Kind != KindAsstRec {
+			continue
+		}
+		if ask := asstRecAsk[f.Attribute]; ask != "" {
+			qs = append(qs, Question{
+				ID:       "q-asstrec-" + f.Attribute,
+				Type:     QTAssistantRecall,
+				Tier:     TierMedium,
+				Text:     ask,
+				Answer:   f.Value,
+				Evidence: []string{f.ID},
+			})
+		}
 	}
 
 	// --- preference recall + application ---

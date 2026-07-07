@@ -26,6 +26,11 @@ const (
 	// SAME pools as a target fact (same attribute, different entity/value). It is
 	// never a correct answer; it exists to pressure retrieval.
 	KindDistractor FactKind = "distractor"
+	// KindAsstRec is an assistant-side recommendation: the ASSISTANT proposed a
+	// value the user never stated, so its Value lives only in AsstText. Recalling it
+	// tests reading the assistant's past turn (assistant-side recall), not the
+	// user's — a capability user-stated facts don't exercise.
+	KindAsstRec FactKind = "asst_rec"
 )
 
 // BeatKind classifies a session beat.
@@ -693,9 +698,47 @@ func BuildPlan(seed int64, opts Opts) *Plan {
 		})
 	}
 
+	// --- assistant-side recommendations ---
+	// The assistant proposes a value the user never states (a book, a gadget, …),
+	// so its Value lives ONLY in AsstText: recalling it requires reading the
+	// assistant's past turn, not the user's. Spread across the timeline like other
+	// facts; sampled down by the question layer.
+	for _, s := range asstRecSpecs {
+		v := pick(r, s.pool)
+		p.Facts = append(p.Facts, Fact{
+			ID:        "f-" + s.attr,
+			Kind:      KindAsstRec,
+			Entity:    "self",
+			Attribute: s.attr,
+			Value:     v,
+			Display:   v,
+			Session:   spread(0, opts.Sessions),
+			Seq:       nextSeq(),
+			Current:   true,
+			UserText:  s.user,                // request WITHOUT the value
+			AsstText:  fmt.Sprintf(s.ack, v), // value appears only here
+		})
+	}
+
 	// --- assign facts to session scripts (ordered), interleaved with noise ---
 	p.Sessions = buildSessions(r, p.Facts, opts.Sessions)
 	return p
+}
+
+// asstRecSpec scripts one assistant-side recommendation: a user request that
+// carries NO value and an assistant reply (ack, one %s) that supplies it.
+type asstRecSpec struct {
+	attr string
+	user string
+	ack  string
+	pool []string
+}
+
+var asstRecSpecs = []asstRecSpec{
+	{"rec_novel", "Can you recommend a novel I should read next?", "I'd recommend reading %s.", asstNovels},
+	{"rec_gadget", "What's a good gadget for my home office?", "I'd go with %s.", asstGadgets},
+	{"rec_podcast", "Suggest a podcast for my commute.", "You should try %s.", asstPodcasts},
+	{"rec_trail", "Where should I go hiking this weekend?", "I'd suggest %s.", asstTrails},
 }
 
 // buildSessions groups facts into their assigned sessions (fact order within a

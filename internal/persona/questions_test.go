@@ -3,6 +3,7 @@ package persona
 import (
 	"encoding/json"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -239,5 +240,37 @@ func TestKnowledgeUpdateAnswerIsLatest(t *testing.T) {
 	}
 	if !found {
 		t.Skip("no knowledge-update question in this plan")
+	}
+}
+
+// TestAssistantRecallIsAssistantSide: every assistant-recall question's answer
+// lives in the assistant turn of its evidence beat and NOT the user turn — so it
+// genuinely tests recalling what the assistant said.
+func TestAssistantRecallIsAssistantSide(t *testing.T) {
+	p := BuildPlan(7, DefaultOpts())
+	beat := map[string]Beat{}
+	for _, s := range p.Sessions {
+		for _, b := range s.Beats {
+			if b.Kind == BeatFact {
+				beat[b.FactID] = b
+			}
+		}
+	}
+	n := 0
+	for _, q := range DeriveQuestions(p) {
+		if q.Type != QTAssistantRecall {
+			continue
+		}
+		n++
+		b := beat[q.Evidence[0]]
+		if !strings.Contains(b.AsstText, q.Answer) {
+			t.Fatalf("%s: answer %q not in assistant text %q", q.ID, q.Answer, b.AsstText)
+		}
+		if strings.Contains(b.UserText, q.Answer) {
+			t.Fatalf("%s: answer %q leaked into user text %q", q.ID, q.Answer, b.UserText)
+		}
+	}
+	if n == 0 {
+		t.Fatal("expected assistant-recall questions to be derived")
 	}
 }

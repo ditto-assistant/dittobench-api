@@ -386,6 +386,7 @@ var memoryTypeWeight = map[string]int{
 	persona.QTContradiction:         2,
 	persona.QTKnowledgeUpdate:       2,
 	persona.QTInjection:             2,
+	persona.QTAssistantRecall:       2,
 	persona.QTSingleSession:         1,
 	persona.QTPreference:            1,
 }
