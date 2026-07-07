@@ -189,6 +189,10 @@ type CaseScore struct {
 	Score     float64  `json:"score"`             // 0..1 composite for this case
 	ToolScore float64  `json:"tool_score"`        // 0..1 deterministic tool accuracy (tool cases)
 	Quality   float64  `json:"quality,omitempty"` // 0..1 LLM response-quality judge (tool cases)
+	// ResultUsage is 0..1 for a result-usage tool case (§7 Phase C / C2): whether
+	// the final answer incorporated the distinctive value the executed tool
+	// returned. It replaces the LLM quality judge for those cases (deterministic).
+	ResultUsage float64 `json:"result_usage,omitempty"`
 	Correct   bool     `json:"correct,omitempty"` // memory judge verdict (memory cases)
 	LatencyMs int64    `json:"latency_ms"`
 	Called    []string `json:"called"`

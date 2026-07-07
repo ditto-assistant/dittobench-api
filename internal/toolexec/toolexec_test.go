@@ -51,19 +51,23 @@ func TestBuildFixtureDeterministic(t *testing.T) {
 	c := webCase("web_search-42-0001")
 	a := BuildFixture(42, c)
 	b := BuildFixture(42, c)
-	if a.Needle != b.Needle {
-		t.Fatalf("same seed must give same needle: %q vs %q", a.Needle, b.Needle)
+	if a.NeedleText() != b.NeedleText() {
+		t.Fatalf("same seed must give same needle: %q vs %q", a.NeedleText(), b.NeedleText())
 	}
-	if a.Needle == "" {
-		t.Fatal("content case should carry a needle")
+	if a.NeedleText() == "" || a.NeedleValue() == "" || a.Subject() == "" {
+		t.Fatal("content case should carry a needle (subject + value + text)")
 	}
 	// Different seed → (almost surely) different needle.
-	if BuildFixture(43, c).Needle == a.Needle {
+	if BuildFixture(43, c).NeedleText() == a.NeedleText() {
 		t.Fatal("different seed should change the needle")
+	}
+	// NeedleFor is the shared deriver both the fixture and prompt use — coherent.
+	if NeedleFor(42, c.ID).Value != a.NeedleValue() {
+		t.Fatal("NeedleFor must match the fixture's served needle")
 	}
 	// A settings case carries no needle (confirmation-only tool).
 	settings := protocol.ToolCase{ID: "settings-1-0", ExpectedTools: []protocol.ToolSpec{{Name: "set_theme"}}}
-	if BuildFixture(1, settings).Needle != "" {
+	if BuildFixture(1, settings).NeedleText() != "" {
 		t.Fatal("settings case should carry no needle")
 	}
 }

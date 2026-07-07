@@ -530,7 +530,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	for i, c := range toolCases {
 		f := toolexec.BuildFixture(seed, c)
 		toolFixtures[i] = f
-		fixtureDigests[i] = gen.FixtureDigest{CaseID: c.ID, Needle: f.Needle}
+		fixtureDigests[i] = gen.FixtureDigest{CaseID: c.ID, Needle: f.NeedleText()}
 	}
 	sort.Slice(fixtureDigests, func(i, j int) bool { return fixtureDigests[i].CaseID < fixtureDigests[j].CaseID })
 	artifact := gen.DatasetArtifact{
@@ -627,13 +627,22 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	// 4. tool cases — independent of the memory haystack, so run before seeding.
 	observedTool, cappedTool := 0, 0
 	s.store.SetStage(runID, store.StatusRunning, 0, total)
-	for _, c := range toolCases {
+	for i, c := range toolCases {
 		resp, runErr := runner.RunCase(ctx, harnessURL, c.ID, c.Prompt, tools, runner.CaseOptions{ToolEndpoint: toolEndpoint})
 		observed := toolSrv.Observed(c.ID)
 		cs := scorer.ScoreToolCaseObserved(c, resp, runErr == nil, observed)
-		quality, injected, jo := scorer.GradeToolQuality(ctx, llmClient, judgeCfg, c.ID, c.Prompt, cs.Called, c.ExpectedBehavior, resp.FinalText)
-		countJudge(jo)
-		cs = scorer.ComposeTool(cs, quality)
+		injected := false
+		if datagen.IsResultUsage(c.Category) {
+			// Result-usage (C2): deterministic — trajectory + whether the answer
+			// carried the served needle value. No LLM quality judge (the needle is a
+			// fabricated value only the executed tool could reveal).
+			cs = scorer.ComposeResultUsage(cs, resp.FinalText, toolFixtures[i].NeedleValue())
+		} else {
+			quality, inj, jo := scorer.GradeToolQuality(ctx, llmClient, judgeCfg, c.ID, c.Prompt, cs.Called, c.ExpectedBehavior, resp.FinalText)
+			countJudge(jo)
+			cs = scorer.ComposeTool(cs, quality)
+			injected = inj
+		}
 		switch {
 		case injected:
 			cs.Score, cs.Injection = 0, true

@@ -10,6 +10,7 @@ import (
 	"math/rand"
 	"strings"
 
+	"github.com/ditto-assistant/dittobench-api/internal/toolexec"
 	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
 )
 
@@ -289,7 +290,40 @@ var categories = []category{
 			"Create a picture of %s and tweak the colors.",
 		},
 	},
+	// Result-usage (Phase C / C2, §5.2 capability 13): the answer requires a value
+	// that exists ONLY in the tool's returned content — a fabricated per-seed
+	// needle (toolexec) — so the case cannot be answered by self-report or base-
+	// model knowledge; the harness must actually execute the tool and USE the
+	// result. The %s is the needle's Subject (filled below), keeping the question
+	// and the served fact coherent. Scored deterministically (trajectory + needle-
+	// in-answer), no LLM quality judge.
+	{
+		name: "web_result_usage", tool: "search_web",
+		templates: []string{
+			"Search the web for the latest figure on %s and tell me the exact number.",
+			"What number does the current top result report for %s?",
+			"Look up %s online and give me the precise figure it cites.",
+		},
+	},
+	{
+		name: "multi_web_result_usage", tools: []string{"search_web", "read_links"},
+		templates: []string{
+			"Look up %s online, open the top result, and tell me the exact figure it reports.",
+			"Find a page about %s, read it, and give me the precise number.",
+			"Research %s on the web, read the leading source, and report its exact figure.",
+		},
+	},
 }
+
+// resultUsageSuffix marks the categories whose correct answer must incorporate a
+// tool's returned content (result-usage). Their prompt %s is the fixture needle's
+// Subject and they are scored deterministically against the needle Value.
+const resultUsageSuffix = "_result_usage"
+
+// IsResultUsage reports whether a case category is a result-usage category — the
+// pipeline scores these on trajectory + answer-incorporates-needle rather than
+// the LLM quality judge (C2).
+func IsResultUsage(category string) bool { return strings.HasSuffix(category, resultUsageSuffix) }
 
 // fillerFor returns a random entity string appropriate for a category.
 func fillerFor(r *rand.Rand, cat string) string {
@@ -414,7 +448,17 @@ func GenerateCasesWithFillers(r *rand.Rand, seed int64, n int) ([]protocol.ToolC
 	for i := 0; i < n; i++ {
 		cat := categories[order[i]]
 		tmpl := cat.templates[r.Intn(len(cat.templates))]
-		filler := fillerFor(r, cat.name)
+		caseID := fmt.Sprintf("%s-%d-%04d", cat.name, seed, i)
+		// Result-usage cases: the filler is the fixture needle's Subject, derived
+		// from the SAME (seed, caseID) the mock server uses to serve the answer — so
+		// the question ("...figure on the Veltrix index...") and the served fact
+		// ("the Veltrix index reached 3,418 points") are always coherent.
+		var filler string
+		if IsResultUsage(cat.name) {
+			filler = toolexec.NeedleFor(seed, caseID).Subject
+		} else {
+			filler = fillerFor(r, cat.name)
+		}
 		prompt := tmpl
 
 		// Expected tool sequence: multi-hop tools, else the single tool, else none.
@@ -434,7 +478,7 @@ func GenerateCasesWithFillers(r *rand.Rand, seed int64, n int) ([]protocol.ToolC
 		}
 
 		tc := protocol.ToolCase{
-			ID:              fmt.Sprintf("%s-%d-%04d", cat.name, seed, i),
+			ID:              caseID,
 			Category:        cat.name,
 			Prompt:          prompt,
 			AllowExtraTools: false,

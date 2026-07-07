@@ -67,24 +67,74 @@ func Observable(c protocol.ToolCase) bool {
 	return true
 }
 
+// Needle is the coined, fabricated fact a content tool embeds in its result. Its
+// Subject is what a result-usage prompt asks about ("the Veltrix index") and its
+// Value is the distinctive number a correct answer must echo ("3,418") — a value
+// that CANNOT be known without executing the tool (it is invented per seed), so a
+// result-usage case cannot be answered by self-report or base-model knowledge.
+type Needle struct {
+	Subject string // "the <Name> <noun>"
+	Value   string // comma-formatted number, e.g. "3,418"
+	Unit    string // "points", "acre-feet", …
+}
+
+// Sentence renders the needle as the fact a content tool returns.
+func (n Needle) Sentence() string {
+	return fmt.Sprintf("%s reached %s %s", n.Subject, n.Value, n.Unit)
+}
+
+// NeedleFor derives the coined fact for a case — a pure function of (masterSeed,
+// caseID). Both the fixture (which serves it) and the prompt generator (which
+// asks about its Subject) call this, so the question and the served answer are
+// always coherent without threading any state between them.
+func NeedleFor(masterSeed int64, caseID string) Needle {
+	return synthNeedle(rand.New(rand.NewSource(caseSeed(masterSeed, caseID))))
+}
+
 // Fixture is the per-case mock tool environment. It is a pure function of the
 // master seed and the case, so the same run seed always serves the same content.
-// Needle is the coined fact the content tools embed in their result; a correct
-// result-usage answer must incorporate it (scored in C2). Empty for cases whose
-// served tools carry no answer-bearing content (settings, feedback, image).
+// The needle is present only for cases whose expected tools return answer-bearing
+// content (web/read/job); cases whose served tools return a bare confirmation
+// (settings, feedback, image) carry none.
 type Fixture struct {
-	seed   int64  // per-case seed derived from (masterSeed, caseID)
-	Needle string `json:"needle,omitempty"`
+	seed   int64
+	needle Needle
+	has    bool
 }
 
 // BuildFixture derives the deterministic mock environment for one tool case.
 func BuildFixture(masterSeed int64, c protocol.ToolCase) Fixture {
-	seed := caseSeed(masterSeed, c.ID)
-	f := Fixture{seed: seed}
+	f := Fixture{seed: caseSeed(masterSeed, c.ID)}
 	if caseCarriesNeedle(c) {
-		f.Needle = synthNeedle(rand.New(rand.NewSource(seed)))
+		f.needle = NeedleFor(masterSeed, c.ID)
+		f.has = true
 	}
 	return f
+}
+
+// Subject is the needle's subject ("the Veltrix index"), or "" when the fixture
+// carries no needle. NeedleValue is the distinctive number a result-usage answer
+// must contain ("3,418"). NeedleText is the full served sentence (for the
+// hashable dataset artifact). All three return "" when there is no needle.
+func (f Fixture) Subject() string {
+	if !f.has {
+		return ""
+	}
+	return f.needle.Subject
+}
+
+func (f Fixture) NeedleValue() string {
+	if !f.has {
+		return ""
+	}
+	return f.needle.Value
+}
+
+func (f Fixture) NeedleText() string {
+	if !f.has {
+		return ""
+	}
+	return f.needle.Sentence()
 }
 
 // caseCarriesNeedle reports whether any of a case's expected tools returns
@@ -152,10 +202,10 @@ func (f Fixture) Result(name string, args json.RawMessage) (string, bool) {
 // filler when the fixture carries no needle (a served tool called on a case that
 // did not expect a content tool).
 func (f Fixture) needleSentence() string {
-	if f.Needle == "" {
+	if !f.has {
 		return "No notable details were found."
 	}
-	return f.Needle + "."
+	return f.needle.Sentence() + "."
 }
 
 // --- content pools (fabricated so results can't be answered from base-model
@@ -180,30 +230,15 @@ var (
 	}
 )
 
-// synthNeedle coins a fabricated fact of the form "the <Name> <noun> reached
-// <number> <unit>" — a distinctive value a correct result-usage answer must echo.
-func synthNeedle(r *rand.Rand) string {
+// synthNeedle coins a fabricated fact "the <Name> <noun> reached <number>
+// <unit>" — a distinctive, unguessable value a correct result-usage answer must
+// echo (it exists only in the served content).
+func synthNeedle(r *rand.Rand) Needle {
 	name := coinedNames[r.Intn(len(coinedNames))]
 	noun := coinedNouns[r.Intn(len(coinedNouns))]
-	num := 100 + r.Intn(99900) // 100..99999, thousands-formatted below
+	num := 100 + r.Intn(99900) // 100..99999
 	unit := coinedUnits[r.Intn(len(coinedUnits))]
-	return fmt.Sprintf("the %s %s reached %s %s", name, noun, commaNumber(num), unit)
-}
-
-// NeedleValue extracts the distinctive value token a result-usage answer must
-// carry from a needle — the comma-formatted number (e.g. "3,418"). Empty when the
-// fixture has no needle. Used by the scorer (C2) to check answer incorporation.
-func (f Fixture) NeedleValue() string {
-	if f.Needle == "" {
-		return ""
-	}
-	fields := strings.Fields(f.Needle)
-	for _, tok := range fields {
-		if isCommaNumber(tok) {
-			return tok
-		}
-	}
-	return ""
+	return Needle{Subject: fmt.Sprintf("the %s %s", name, noun), Value: commaNumber(num), Unit: unit}
 }
 
 func coinedURL(r *rand.Rand) string {
@@ -239,20 +274,6 @@ func commaNumber(n int) string {
 		}
 	}
 	return b.String()
-}
-
-func isCommaNumber(s string) bool {
-	if s == "" {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if (c >= '0' && c <= '9') || c == ',' {
-			continue
-		}
-		return false
-	}
-	return strings.ContainsAny(s, "0123456789")
 }
 
 // caseSeed derives a per-case seed from the master seed and case id — pure and

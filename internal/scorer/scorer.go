@@ -72,6 +72,63 @@ func ComposeTool(cs protocol.CaseScore, quality float64) protocol.CaseScore {
 	return cs
 }
 
+// ResultUsageTrajectoryWeight / ResultUsageAnswerWeight split a result-usage tool
+// case's score between calling the right tool(s) and actually USING the returned
+// content. The answer half dominates: the whole point (capability 13, §5.2) is
+// that the answer incorporates a value obtainable only by executing the tool.
+const (
+	resultUsageTrajectoryWeight = 0.4
+	resultUsageAnswerWeight     = 0.6
+)
+
+// ComposeResultUsage finishes a result-usage tool case (C2, §7). Instead of the
+// LLM quality judge, it scores deterministically: 0.4·trajectory (did it call the
+// right tool) + 0.6·(answer carries the served needle value). Because the needle
+// is a fabricated per-seed value that exists only in the tool's returned content,
+// the answer half is unachievable without actually executing the tool and reading
+// the result — self-report and base-model knowledge both score 0 on it.
+func ComposeResultUsage(cs protocol.CaseScore, answer, needleValue string) protocol.CaseScore {
+	usage := 0.0
+	if answerCarriesValue(answer, needleValue) {
+		usage = 1.0
+	}
+	cs.ResultUsage = usage
+	cs.Score = round6(resultUsageTrajectoryWeight*cs.ToolScore + resultUsageAnswerWeight*usage)
+	if usage == 1.0 {
+		cs.Notes = append(cs.Notes, "answer incorporated the served tool result")
+	} else {
+		cs.Notes = append(cs.Notes, "answer did NOT incorporate the served tool result")
+	}
+	return cs
+}
+
+// answerCarriesValue reports whether a numeric needle value (e.g. "3,418")
+// appears in the answer, tolerant of thousands separators — "3418", "3,418", and
+// "3 418" all count, but not a coincidental substring inside a longer number.
+func answerCarriesValue(answer, needleValue string) bool {
+	want := stripSeparators(needleValue)
+	if want == "" {
+		return false
+	}
+	got := stripSeparators(normalizeAnswer(answer))
+	return containsNumberToken(got, want)
+}
+
+// stripSeparators removes thousands separators (commas, spaces) that fall between
+// digits so "3,418" / "3 418" / "3418" all normalize to "3418", without merging
+// two genuinely separate numbers ("call 5, order 9" stays "call 5, order 9").
+func stripSeparators(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c == ',' || c == ' ') && i > 0 && isDigit(s[i-1]) && i+1 < len(s) && isDigit(s[i+1]) {
+			continue
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
+}
+
 // UnobservedCeiling caps the composite of an OBSERVABLE tool case (every expected
 // tool is validator-served) that the harness did NOT execute through the mock
 // tool_endpoint (Phase C, §7). Its self-reported trajectory is untrusted (W3):

@@ -2,12 +2,14 @@ package refharness_test
 
 import (
 	"context"
+	"math/rand"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/ditto-assistant/dittobench-api/internal/catalog"
+	"github.com/ditto-assistant/dittobench-api/internal/datagen"
 	"github.com/ditto-assistant/dittobench-api/internal/refharness"
 	"github.com/ditto-assistant/dittobench-api/internal/scorer"
 	"github.com/ditto-assistant/dittobench-api/internal/toolexec"
@@ -59,6 +61,60 @@ func TestObservedExecutionRoundTrip(t *testing.T) {
 	cs := scorer.ScoreToolCaseObserved(c, resp, true, observed)
 	if cs.ToolScore == 0 {
 		t.Fatalf("observed correct trajectory should score > 0, got %v", cs.ToolScore)
+	}
+}
+
+// Full result-usage (C2) flow across datagen → toolexec → refharness → scorer: a
+// generated result-usage case whose answer requires the fabricated needle value.
+// The reference harness executes the tool, gets the needle in the result,
+// incorporates it into its answer, and the scorer credits result-usage.
+func TestResultUsageEndToEnd(t *testing.T) {
+	const seed = 20260707
+	r := rand.New(rand.NewSource(seed))
+	cases := datagen.GenerateCases(r, seed, 200)
+
+	var ruc protocol.ToolCase
+	for _, c := range cases {
+		if datagen.IsResultUsage(c.Category) && len(c.ExpectedTools) == 1 { // single-hop web_result_usage
+			ruc = c
+			break
+		}
+	}
+	if ruc.ID == "" {
+		t.Fatal("no single-hop result-usage case generated")
+	}
+	fixture := toolexec.BuildFixture(seed, ruc)
+
+	srv := toolexec.NewServer()
+	srv.Register(ruc.ID, fixture)
+	mux := http.NewServeMux()
+	mux.Handle("POST /tool", srv)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	calls := refharness.Route(ruc.Prompt, catalog.Catalog())
+	answer, err := refharness.Execute(context.Background(), ts.URL+"/tool", ruc.ID, "", calls)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	nv := fixture.NeedleValue()
+	if nv == "" || !strings.Contains(answer, nv) {
+		t.Fatalf("harness answer %q should carry needle value %q", answer, nv)
+	}
+
+	observed := srv.Observed(ruc.ID)
+	cs := scorer.ScoreToolCaseObserved(ruc, protocol.RunResponse{FinalText: answer, ToolCalls: calls}, true, observed)
+	cs = scorer.ComposeResultUsage(cs, answer, nv)
+	if cs.ResultUsage != 1.0 {
+		t.Fatalf("executed + used result should score usage 1.0, got %v (answer=%q)", cs.ResultUsage, answer)
+	}
+
+	// A harness that never executes cannot produce the fabricated value.
+	noExec := scorer.ComposeResultUsage(
+		scorer.ScoreToolCaseObserved(ruc, protocol.RunResponse{FinalText: "I think it's 5,000."}, true, nil),
+		"I think it's 5,000.", nv)
+	if noExec.ResultUsage != 0 {
+		t.Fatalf("unexecuted harness should score usage 0, got %v", noExec.ResultUsage)
 	}
 }
 
