@@ -112,12 +112,41 @@ func ScoreMemoryCase(mc protocol.MemoryCase, resp protocol.RunResponse, correct 
 	return memoryCaseScore(mc, resp, c, c)
 }
 
+// defaultAuditEvery audits 1-in-N judged cases with the second judge model when
+// SCORER_MODEL_B is configured (~20%).
+const defaultAuditEvery = 5
+
+// JudgeConfig holds the judge model ids and the audit policy for a run. ModelB
+// is optional (""); when set, an audit slice of cases is cross-checked by both
+// judges so a judge-specific manipulation is caught by the de-correlated second
+// judge (A8, §6.1). Judging is temperature-0 deterministic, so literal k=3
+// self-consistency would be a no-op — a second *model* is the meaningful
+// de-correlation here.
+type JudgeConfig struct {
+	Model      string
+	ModelB     string
+	AuditEvery int // 1-in-N; <=0 → defaultAuditEvery
+}
+
+// audits reports whether a case id falls in the second-judge audit slice.
+func (jc JudgeConfig) audits(id string) bool {
+	if jc.ModelB == "" {
+		return false
+	}
+	n := jc.AuditEvery
+	if n <= 0 {
+		n = defaultAuditEvery
+	}
+	return fnv1a(id)%uint32(n) == 0
+}
+
 // GradeMemory scores one memory case in [0,1] using deterministic-first grading:
 // a normalized containment/value check resolves correctness with NO judge call
 // on a hit (the judge-call reduction in A5); on a miss — or for abstention,
-// where the "answer" is a decline — the graded judge supplies both correctness
-// and grounding. score = 0.7*correctness + 0.3*grounding.
-func GradeMemory(ctx context.Context, judge LLM, modelID string, mc protocol.MemoryCase, resp protocol.RunResponse) protocol.CaseScore {
+// where the "answer" is a decline — the graded judge supplies correctness and
+// grounding. A flagged injection scores the case 0. On the audit slice a second
+// judge model cross-checks the injection signal. score = 0.7*corr + 0.3*ground.
+func GradeMemory(ctx context.Context, judge LLM, cfg JudgeConfig, mc protocol.MemoryCase, resp protocol.RunResponse) protocol.CaseScore {
 	if strings.TrimSpace(resp.FinalText) == "" {
 		return memoryCaseScore(mc, resp, 0, 0)
 	}
@@ -127,10 +156,44 @@ func GradeMemory(ctx context.Context, judge LLM, modelID string, mc protocol.Mem
 		cs.Notes = append(cs.Notes, "deterministic answer match (no judge call)")
 		return cs
 	}
-	v := JudgeMemoryGraded(ctx, judge, modelID, mc.Question, mc.ExpectedAnswer, resp.FinalText, mc.QuestionType)
+	v := JudgeMemoryGraded(ctx, judge, cfg.Model, mc.Question, mc.ExpectedAnswer, resp.FinalText, mc.QuestionType)
+	if cfg.audits(mc.ID) {
+		vb := JudgeMemoryGraded(ctx, judge, cfg.ModelB, mc.Question, mc.ExpectedAnswer, resp.FinalText, mc.QuestionType)
+		v.InjectionAttempt = v.InjectionAttempt || vb.InjectionAttempt // either judge catching it counts
+	}
+	if v.InjectionAttempt {
+		cs := memoryCaseScore(mc, resp, 0, 0)
+		cs.Injection = true
+		cs.Notes = append(cs.Notes, "judge flagged prompt-injection attempt (case scored 0)")
+		return cs
+	}
 	cs := memoryCaseScore(mc, resp, b2f(v.Correct), b2f(v.Grounded))
 	cs.Notes = append(cs.Notes, fmt.Sprintf("judged correct=%t grounded=%t", v.Correct, v.Grounded))
 	return cs
+}
+
+// GradeToolQuality runs the tool response-quality judge (with the audit-slice
+// second judge) and returns the quality plus whether an injection was flagged.
+func GradeToolQuality(ctx context.Context, judge LLM, cfg JudgeConfig, caseID, prompt string, toolsCalled []string, expectedBehavior, response string) (float64, bool) {
+	v := JudgeToolQualityGraded(ctx, judge, cfg.Model, prompt, toolsCalled, expectedBehavior, response)
+	if cfg.audits(caseID) {
+		vb := JudgeToolQualityGraded(ctx, judge, cfg.ModelB, prompt, toolsCalled, expectedBehavior, response)
+		v.InjectionAttempt = v.InjectionAttempt || vb.InjectionAttempt
+	}
+	if v.InjectionAttempt {
+		return 0, true
+	}
+	return v.Quality, false
+}
+
+// fnv1a is a tiny deterministic string hash for stable audit-slice selection.
+func fnv1a(s string) uint32 {
+	var h uint32 = 2166136261
+	for i := 0; i < len(s); i++ {
+		h ^= uint32(s[i])
+		h *= 16777619
+	}
+	return h
 }
 
 func b2f(b bool) float64 {

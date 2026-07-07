@@ -140,6 +140,10 @@ type CaseScore struct {
 	Called    []string `json:"called"`
 	Expected  []string `json:"expected"`
 	Notes     []string `json:"notes,omitempty"`
+	// Injection is true when a judge flagged the harness output as an attempt to
+	// manipulate the judge (prompt injection). Such a case is scored 0 and the
+	// run is flagged for moderation review (A8, §6.1).
+	Injection bool `json:"injection,omitempty"`
 }
 
 // CategoryStat is the mean composite score for one category.
@@ -188,6 +192,10 @@ func (p *ParaphraseStats) Add(o ParaphraseStats) {
 // Serialized under ScoreReport.details.
 type RunDetails struct {
 	Paraphrase *ParaphraseStats `json:"paraphrase,omitempty"`
+	// InjectionAttempts counts cases a judge flagged as judge-manipulation
+	// attempts (each scored 0). A non-zero value is moderation-relevant evidence,
+	// the same policy channel as plagiarism (A8, §6.1).
+	InjectionAttempts int `json:"injection_attempts,omitempty"`
 }
 
 // ScoreReport is the full result of scoring a run.

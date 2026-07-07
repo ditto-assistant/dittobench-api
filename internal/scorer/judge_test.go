@@ -69,9 +69,9 @@ func TestBuildLMEJudgeSystemClauses(t *testing.T) {
 	if !strings.Contains(buildLMEJudgeSystem("multi-session", true), "ABSTENTION") {
 		t.Fatal("abstention clause missing")
 	}
-	// plain type, not abstention → no clause appended
-	if got := buildLMEJudgeSystem("multi-session", false); got != lmeJudgeBase {
-		t.Fatalf("plain type should be base prompt, got extra clause")
+	// plain type, not abstention → base prompt + the untrusted-data guard.
+	if got := buildLMEJudgeSystem("multi-session", false); got != lmeJudgeBase+untrustedGuard {
+		t.Fatalf("plain type should be base prompt + guard, got %q", got)
 	}
 }
 
@@ -135,7 +135,11 @@ func TestJudgeToolQuality(t *testing.T) {
 func TestToolJudgeFormatsToolsNone(t *testing.T) {
 	f := &fakeLLM{reply: `{"helpfulness":3,"accuracy":3}`}
 	JudgeToolQuality(context.Background(), f, "m", "p", nil, "b", "resp")
-	if !strings.Contains(f.lastUser, "TOOLS CALLED: none") {
-		t.Fatalf("no tools should render 'none', got user=%q", f.lastUser)
+	if !strings.Contains(f.lastUser, "TOOLS CALLED (self-reported)") || !strings.Contains(f.lastUser, "none") {
+		t.Fatalf("no tools should render a fenced 'none', got user=%q", f.lastUser)
+	}
+	// Untrusted harness output must be fenced, not inlined as bare instructions.
+	if !strings.Contains(f.lastUser, "UNTRUSTED ASSISTANT RESPONSE") {
+		t.Fatalf("assistant response should be fenced as untrusted, got %q", f.lastUser)
 	}
 }

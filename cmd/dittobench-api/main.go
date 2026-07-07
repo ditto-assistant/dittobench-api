@@ -549,21 +549,25 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	// 5. running — execute + score each case, appending partials for the UI.
 	s.store.SetStage(runID, store.StatusRunning, 0, total)
 	tools := catalog.Catalog()
-	scorerModel := llm.ScorerModel()
+	judgeCfg := scorer.JudgeConfig{Model: llm.ScorerModel(), ModelB: llm.ScorerModelB()}
 	perCase := make([]protocol.CaseScore, 0, total)
 
 	for _, c := range toolCases {
 		resp, runErr := runner.RunCase(ctx, harnessURL, c.ID, c.Prompt, tools)
 		cs := scorer.ScoreToolCase(c, resp, runErr == nil)
-		quality := scorer.JudgeToolQuality(ctx, llmClient, scorerModel, c.Prompt, cs.Called, c.ExpectedBehavior, resp.FinalText)
+		quality, injected := scorer.GradeToolQuality(ctx, llmClient, judgeCfg, c.ID, c.Prompt, cs.Called, c.ExpectedBehavior, resp.FinalText)
 		cs = scorer.ComposeTool(cs, quality)
+		if injected {
+			cs.Score, cs.Injection = 0, true
+			cs.Notes = append(cs.Notes, "judge flagged prompt-injection attempt (case scored 0)")
+		}
 		perCase = append(perCase, cs)
 		s.store.AppendPartial(runID, cs)
 	}
 
 	for _, mc := range memCases {
 		resp, _ := runner.RunCase(ctx, harnessURL, mc.ID, mc.Question, tools)
-		cs := scorer.GradeMemory(ctx, llmClient, scorerModel, mc, resp)
+		cs := scorer.GradeMemory(ctx, llmClient, judgeCfg, mc, resp)
 		perCase = append(perCase, cs)
 		s.store.AppendPartial(runID, cs)
 	}
@@ -573,7 +577,16 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	report := scorer.Aggregate(runID, perCase)
 	report.Seed = seed
 	report.StructuralFingerprint = structuralFP
-	report.Details = &protocol.RunDetails{Paraphrase: &para}
+	injections := 0
+	for _, cs := range perCase {
+		if cs.Injection {
+			injections++
+		}
+	}
+	report.Details = &protocol.RunDetails{Paraphrase: &para, InjectionAttempts: injections}
+	if injections > 0 {
+		log.Printf("run %s: %d judge-injection attempt(s) flagged", runID, injections)
+	}
 	s.store.Finish(runID, report)
 	log.Printf("run %s done: composite=%.3f tool_mean=%.3f memory_mean=%.3f", runID, report.Composite, report.ToolMean, report.MemoryMean)
 }

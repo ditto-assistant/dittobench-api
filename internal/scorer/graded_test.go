@@ -34,7 +34,7 @@ func TestDeterministicMemoryHit(t *testing.T) {
 func TestGradeMemoryDeterministicNoJudge(t *testing.T) {
 	f := &fakeLLM{err: errors.New("judge must not be called")}
 	mc := protocol.MemoryCase{ID: "m1", QuestionType: "multi-session", ExpectedAnswer: "blue", Question: "what color?"}
-	cs := GradeMemory(context.Background(), f, "m", mc, protocol.RunResponse{FinalText: "it was blue", LatencyMs: 7})
+	cs := GradeMemory(context.Background(), f, JudgeConfig{Model: "m"}, mc, protocol.RunResponse{FinalText: "it was blue", LatencyMs: 7})
 	if !approx(cs.Score, 1.0) || !cs.Correct {
 		t.Fatalf("deterministic hit should score 1.0 correct: %+v", cs)
 	}
@@ -56,7 +56,7 @@ func TestGradeMemoryGradedCredit(t *testing.T) {
 	}
 	for _, tc := range tests {
 		// FinalText that does NOT deterministically contain "blue" → judge path.
-		cs := GradeMemory(context.Background(), &fakeLLM{reply: tc.reply}, "m", mc, protocol.RunResponse{FinalText: "some other answer"})
+		cs := GradeMemory(context.Background(), &fakeLLM{reply: tc.reply}, JudgeConfig{Model: "m"}, mc, protocol.RunResponse{FinalText: "some other answer"})
 		if !approx(cs.Score, tc.want) {
 			t.Fatalf("reply %s: score %v want %v", tc.reply, cs.Score, tc.want)
 		}
@@ -69,12 +69,12 @@ func TestGradeMemoryAbstentionAlwaysJudged(t *testing.T) {
 	// Clean decline → judged correct+grounded → 1.0. Judge IS called even though
 	// the expected marker text is not present in the response.
 	f := &fakeLLM{reply: `{"correct":"yes","grounded":"yes"}`}
-	cs := GradeMemory(context.Background(), f, "m", mc, protocol.RunResponse{FinalText: "I don't have that information."})
+	cs := GradeMemory(context.Background(), f, JudgeConfig{Model: "m"}, mc, protocol.RunResponse{FinalText: "I don't have that information."})
 	if !approx(cs.Score, 1.0) || f.calls != 1 {
 		t.Fatalf("clean decline should score 1.0 via the judge: score=%v calls=%d", cs.Score, f.calls)
 	}
 	// Fabrication → correct=no grounded=no → 0.0.
-	cs = GradeMemory(context.Background(), &fakeLLM{reply: `{"correct":"no","grounded":"no"}`}, "m", mc, protocol.RunResponse{FinalText: "It's X1234567."})
+	cs = GradeMemory(context.Background(), &fakeLLM{reply: `{"correct":"no","grounded":"no"}`}, JudgeConfig{Model: "m"}, mc, protocol.RunResponse{FinalText: "It's X1234567."})
 	if !approx(cs.Score, 0.0) {
 		t.Fatalf("fabrication should score 0.0, got %v", cs.Score)
 	}
@@ -82,7 +82,7 @@ func TestGradeMemoryAbstentionAlwaysJudged(t *testing.T) {
 
 func TestGradeMemoryEmptyNoJudge(t *testing.T) {
 	f := &fakeLLM{err: errors.New("no")}
-	cs := GradeMemory(context.Background(), f, "m",
+	cs := GradeMemory(context.Background(), f, JudgeConfig{Model: "m"},
 		protocol.MemoryCase{ID: "m", QuestionType: "multi-session", ExpectedAnswer: "x"},
 		protocol.RunResponse{FinalText: "   "})
 	if cs.Score != 0 || cs.Correct {
