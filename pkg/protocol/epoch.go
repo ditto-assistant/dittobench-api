@@ -6,8 +6,14 @@ import "time"
 // details. Bump it with EVERY scoring-affecting change so old and new ledger
 // scores are never silently compared (BENCHMARK-V2.md §9). Phase A (the v1
 // hardening: seed-derived time, graded memory, trajectory/arg scoring, judge
-// hardening) ships as version 2; v1 was version 1.
-const BenchVersion = 2
+// hardening) shipped as version 2; v1 was version 1.
+//
+// Phase B (version 3) — the data engine: the static LongMemEval fixture is
+// replaced by the procedural persona/fact-graph generator (internal/persona +
+// gen.GenerateMemoryV2), with difficulty tiers, near-miss distractors, seeding
+// tiers, dataset hashing, and the 0.5/0.5 composite rebalance. Every one of
+// those changes scoring, so they all ride this single bump.
+const BenchVersion = 3
 
 // DatasetEpoch is the pinned reference "as-of" instant for all generated
 // datasets. Benchmark generation must be a pure function of the run seed and

@@ -492,7 +492,11 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	rng := gen.NewRNG(seed)
 	genModel := llm.GeneratorModel()
 	toolCases, toolPara := gen.GenerateTools(ctx, rng, prof.Tools, prof.ParaphraseFrac, llmClient, genModel)
-	seedReq, memCases, memPara, err := gen.GenerateMemory(ctx, rng, prof.Mem, prof.Distractors, prof.ParaphraseFrac, llmClient, genModel, gen.SeedDir(), gen.OraclePath())
+	// v2 memory engine (bench_version 3): a fresh procedural persona universe
+	// per seed replaces the static LongMemEval fixture (BENCHMARK-V2 §4–5). The
+	// plan is a pure function of the master `seed`; realization + selection share
+	// the run rng.
+	seedReq, memCases, memPara, err := gen.GenerateMemoryV2(ctx, rng, seed, prof.Mem, prof.ParaphraseFrac, llmClient, genModel)
 	if err != nil {
 		s.store.Fail(runID, "dataset generation failed: "+err.Error())
 		return
