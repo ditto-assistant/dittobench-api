@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -510,6 +511,33 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		para.Attempted, para.Applied, para.Retried, para.Fallback)
 	total = prof.Tools + len(memSuite.Cases) // actual case count for progress
 
+	// Dataset hashing + optional artifact persistence (BENCHMARK-V2 §4.2, B5):
+	// hash the fully-rendered dataset so a dispute can be pinned to exact bytes;
+	// when DITTOBENCH_ARTIFACT_DIR is set, persist the artifact keyed by run_id
+	// (the local-file form of the "upload rendered dataset" persistence; a
+	// platform bucket is the drop-in replacement for os.WriteFile here).
+	memCasesFlat := make([]protocol.MemoryCase, 0, len(memSuite.Cases))
+	for _, sc := range memSuite.Cases {
+		memCasesFlat = append(memCasesFlat, sc.Case)
+	}
+	artifact := gen.DatasetArtifact{
+		Seed:         seed,
+		BenchVersion: protocol.BenchVersion,
+		GeneratedAt:  protocol.DatasetEpochRFC3339,
+		ToolCases:    toolCases,
+		MemoryWaves:  memSuite.Waves,
+		MemoryCases:  memCasesFlat,
+	}
+	datasetHash, artifactBytes, hashErr := artifact.SHA256Hex()
+	if hashErr != nil {
+		log.Printf("run %s: dataset hashing failed: %v", runID, hashErr)
+	}
+	if dir := strings.TrimSpace(os.Getenv("DITTOBENCH_ARTIFACT_DIR")); dir != "" && artifactBytes != nil {
+		if err := os.WriteFile(filepath.Join(dir, runID+".json"), artifactBytes, 0o644); err != nil {
+			log.Printf("run %s: artifact persist failed: %v", runID, err)
+		}
+	}
+
 	// 3. start the container, forwarding the OpenRouter key + provider config so
 	//    the crate's agent + embedder can run. On the local harness_url path we
 	//    skip the container and target the miner's already-running harness.
@@ -632,6 +660,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	}
 	report.Details = &protocol.RunDetails{
 		BenchVersion:      protocol.BenchVersion,
+		DatasetSHA256:     datasetHash,
 		Paraphrase:        &para,
 		InjectionAttempts: injections,
 		Tokens:            llmClient.Spent(),

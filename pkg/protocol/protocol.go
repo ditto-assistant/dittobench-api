@@ -203,8 +203,14 @@ type RunDetails struct {
 	// BenchVersion is the scoring benchmark version (see protocol.BenchVersion).
 	// The weight fold only compares entries of the max bench_version present, so a
 	// bump makes new scores non-comparable to old until a re-score (§9).
-	BenchVersion int              `json:"bench_version"`
-	Paraphrase   *ParaphraseStats `json:"paraphrase,omitempty"`
+	BenchVersion int `json:"bench_version"`
+	// DatasetSHA256 is the hex SHA-256 of the fully-rendered dataset (tool cases +
+	// memory waves + memory cases). It pins the exact artifact a dispute re-scores
+	// (BENCHMARK-V2 §4.2): the recorded hash must match a re-hash of the persisted
+	// artifact. With no LLM surface variation it is also reproducible from
+	// (seed, bench_version).
+	DatasetSHA256 string           `json:"dataset_sha256,omitempty"`
+	Paraphrase    *ParaphraseStats `json:"paraphrase,omitempty"`
 	// InjectionAttempts counts cases a judge flagged as judge-manipulation
 	// attempts (each scored 0). A non-zero value is moderation-relevant evidence,
 	// the same policy channel as plagiarism (A8, §6.1).
