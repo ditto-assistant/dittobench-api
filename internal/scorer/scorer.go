@@ -15,7 +15,6 @@ package scorer
 import (
 	"fmt"
 	"sort"
-	"time"
 
 	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
 )
@@ -44,7 +43,7 @@ func Score(runID string, cases []protocol.ToolCase, resps map[string]protocol.Ru
 
 	report := protocol.ScoreReport{
 		RunID:       runID,
-		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		GeneratedAt: protocol.DatasetEpochRFC3339,
 		Composite:   toolMean, // tool-mean is the composite for the practice scope
 		ToolMean:    toolMean,
 		MedianMs:    median(latencies),
@@ -153,7 +152,7 @@ func Aggregate(runID string, perCase []protocol.CaseScore) protocol.ScoreReport 
 
 	return protocol.ScoreReport{
 		RunID:       runID,
-		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		GeneratedAt: protocol.DatasetEpochRFC3339,
 		Composite:   composite,
 		ToolMean:    toolMean,
 		MemoryMean:  memMean,

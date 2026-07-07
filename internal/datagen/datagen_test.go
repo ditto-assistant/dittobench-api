@@ -1,13 +1,22 @@
 package datagen
 
-import "testing"
+import (
+	"testing"
 
-// TestDeterministicPerSeed: same seed yields byte-identical cases (ignoring the
-// GeneratedAt timestamp which is wall-clock).
+	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
+)
+
+// TestDeterministicPerSeed: same seed yields byte-identical datasets. Since A1
+// (seed-derived time) the GeneratedAt envelope is the pinned dataset epoch, not
+// a wall clock, so it is part of the reproducible dataset too.
 func TestDeterministicPerSeed(t *testing.T) {
 	a := Generate(42, 30)
 	b := Generate(42, 30)
 
+	if a.GeneratedAt != b.GeneratedAt || a.GeneratedAt != protocol.DatasetEpochRFC3339 {
+		t.Fatalf("GeneratedAt must be the pinned epoch, deterministic per seed: a=%q b=%q want=%q",
+			a.GeneratedAt, b.GeneratedAt, protocol.DatasetEpochRFC3339)
+	}
 	if len(a.ToolCases) != len(b.ToolCases) {
 		t.Fatalf("len mismatch: %d vs %d", len(a.ToolCases), len(b.ToolCases))
 	}

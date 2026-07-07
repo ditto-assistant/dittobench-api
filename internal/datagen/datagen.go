@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"math/rand"
 	"strings"
-	"time"
 
 	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
 )
@@ -238,7 +237,7 @@ func Generate(seed int64, n int) protocol.Dataset {
 	r := rand.New(rand.NewSource(seed))
 	return protocol.Dataset{
 		Seed:        seed,
-		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		GeneratedAt: protocol.DatasetEpochRFC3339,
 		ToolCases:   GenerateCases(r, seed, n),
 	}
 }

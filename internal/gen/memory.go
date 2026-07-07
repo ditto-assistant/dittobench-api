@@ -3,7 +3,9 @@ package gen
 import (
 	"context"
 	"fmt"
+	"maps"
 	"math/rand"
+	"slices"
 	"time"
 
 	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
@@ -77,8 +79,10 @@ func GenerateMemory(ctx context.Context, r *rand.Rand, n, distractors int, frac 
 	var haystack []pairWithSession
 	for _, qid := range selectedOrder {
 		mc := assets.manifest[qid]
-		for sessIdx, pids := range mc.SessionToPairs {
-			for _, pid := range pids {
+		// Sort session keys before ranging: Go map iteration order is randomized,
+		// which would make the plan layer non-reproducible from the seed.
+		for _, sessIdx := range slices.Sorted(maps.Keys(mc.SessionToPairs)) {
+			for _, pid := range mc.SessionToPairs[sessIdx] {
 				if _, ok := assets.pairsByID[pid]; !ok || usedPairs[pid] {
 					continue
 				}
@@ -94,8 +98,9 @@ func GenerateMemory(ctx context.Context, r *rand.Rand, n, distractors int, frac 
 		if selected[qid] {
 			continue
 		}
-		for _, pids := range assets.manifest[qid].SessionToPairs {
-			for _, pid := range pids {
+		mc := assets.manifest[qid]
+		for _, sessIdx := range slices.Sorted(maps.Keys(mc.SessionToPairs)) {
+			for _, pid := range mc.SessionToPairs[sessIdx] {
 				if _, ok := assets.pairsByID[pid]; ok && !usedPairs[pid] {
 					distractorPool = append(distractorPool, pid)
 				}
@@ -155,7 +160,7 @@ func GenerateMemory(ctx context.Context, r *rand.Rand, n, distractors int, frac 
 
 	// Collect the subjects referenced by the haystack.
 	outSubjects := make([]protocol.Subject, 0, len(subjectIDs))
-	for sid := range subjectIDs {
+	for _, sid := range slices.Sorted(maps.Keys(subjectIDs)) {
 		s, ok := assets.subjectsByID[sid]
 		if !ok {
 			continue
@@ -207,9 +212,11 @@ func countResolvablePairs(a *seedAssets, mc manifestCase) int {
 	return count
 }
 
-// randomBaseDate draws a base date over a multi-year window ending ~now.
+// randomBaseDate draws a base date over a multi-year window ending at the pinned
+// dataset epoch. It is deliberately anchored to protocol.DatasetEpoch rather
+// than time.Now() so the haystack timestamps — and hence the whole plan-layer
+// dataset — are a pure function of the seed (reproducibility contract; W5).
 func randomBaseDate(r *rand.Rand) time.Time {
-	now := time.Now().UTC()
 	back := time.Duration(r.Intn(baseWindowDays)) * 24 * time.Hour
-	return now.Add(-back).Truncate(24 * time.Hour)
+	return protocol.DatasetEpoch.Add(-back).Truncate(24 * time.Hour)
 }
