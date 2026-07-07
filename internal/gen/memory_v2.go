@@ -28,6 +28,10 @@ type MemorySuite struct {
 	Stats        protocol.ParaphraseStats
 	TierBCases   int
 	SeedingWaves int
+	// LexicalGap is the query↔needle overlap telemetry (NoLiMa, §8.1): how much
+	// content wording the emitted questions share with their evidence, before and
+	// after the low-overlap rewrite.
+	LexicalGap protocol.LexicalGapStats
 }
 
 // GenerateMemorySuite is the DittoBench v2 memory generator (BENCHMARK-V2.md
@@ -121,21 +125,69 @@ func GenerateMemorySuite(ctx context.Context, r *rand.Rand, seed int64, n int, f
 		}
 	}
 
-	// Build cases (paraphrase question text; abstention → decline sentinel).
-	maybeParaphraseQ := func(question string) string {
+	// pairText: rendered text of each haystack pair, keyed by pair ID — the needle
+	// side of the query↔needle overlap measurement.
+	pairText := make(map[string]string, len(pairs))
+	for _, p := range pairs {
+		pairText[p.PairID] = p.Prompt + " " + p.Response
+	}
+	evidenceText := func(q persona.Question) string {
+		var sb strings.Builder
+		for _, fid := range q.Evidence {
+			if pid, ok := evidence[fid]; ok {
+				if t, ok := pairText[pid]; ok {
+					sb.WriteString(t)
+					sb.WriteByte(' ')
+				}
+			}
+		}
+		return sb.String()
+	}
+
+	// realizeQuestion emits the final question text. An evidence-bearing question
+	// gets a NoLiMa low-overlap rewrite (query side, §8.1) — reword to share fewer
+	// content words with its stored fact, keeping the answer key; abstention /
+	// evidence-free questions get a plain meaning-preserving paraphrase. Records
+	// paraphrase telemetry AND, for measured questions, the overlap before/after so
+	// the literal-match gap stays visible.
+	var gapBeforeSum, gapAfterSum float64
+	realizeQuestion := func(q persona.Question) string {
+		ev := evidenceText(q)
+		measured := !q.Abstain && ev != ""
+		out := q.Text
 		if llm != nil && frac > 0 && r.Float64() < frac {
 			suite.Stats.Attempted++
-			pq, retried, ok := paraphraseQuestion(ctx, llm, model, question)
-			if retried {
-				suite.Stats.Retried++
+			if measured {
+				rq, retried, applied := realizeQuestionLowOverlap(ctx, llm, model, q.Text, ev, q.Answer)
+				if retried {
+					suite.Stats.Retried++
+				}
+				if applied {
+					suite.Stats.Applied++
+					suite.LexicalGap.Rewritten++
+					out = rq
+				} else {
+					suite.Stats.Fallback++
+				}
+			} else {
+				pq, retried, ok := paraphraseQuestion(ctx, llm, model, q.Text)
+				if retried {
+					suite.Stats.Retried++
+				}
+				if ok {
+					suite.Stats.Applied++
+					out = pq
+				} else {
+					suite.Stats.Fallback++
+				}
 			}
-			if ok {
-				suite.Stats.Applied++
-				return pq
-			}
-			suite.Stats.Fallback++
 		}
-		return question
+		if measured {
+			suite.LexicalGap.Questions++
+			gapBeforeSum += lexicalOverlap(q.Text, ev)
+			gapAfterSum += lexicalOverlap(out, ev)
+		}
+		return out
 	}
 
 	fw := factWaves(plan, nWaves)
@@ -150,11 +202,15 @@ func GenerateMemorySuite(ctx context.Context, r *rand.Rand, seed int64, n int, f
 				ID:             fmt.Sprintf("mem-%04d-%s", i, q.ID),
 				QuestionID:     q.ID,
 				QuestionType:   q.Type,
-				Question:       maybeParaphraseQ(q.Text),
+				Question:       realizeQuestion(q),
 				ExpectedAnswer: expected,
 			},
 			RunAfterWave: caseUnlockWave(q, fw),
 		})
+	}
+	if suite.LexicalGap.Questions > 0 {
+		suite.LexicalGap.MeanBefore = gapBeforeSum / float64(suite.LexicalGap.Questions)
+		suite.LexicalGap.MeanAfter = gapAfterSum / float64(suite.LexicalGap.Questions)
 	}
 	r.Shuffle(len(staged), func(i, j int) { staged[i], staged[j] = staged[j], staged[i] })
 	suite.Cases = staged

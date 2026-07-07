@@ -669,6 +669,10 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		SeedingWaves:      memSuite.SeedingWaves,
 		RawPairsCases:     memSuite.TierBCases,
 	}
+	if memSuite.LexicalGap.Questions > 0 {
+		lg := memSuite.LexicalGap
+		report.Details.LexicalGap = &lg
+	}
 	if injections > 0 {
 		log.Printf("run %s: %d judge-injection attempt(s) flagged", runID, injections)
 	}

@@ -195,6 +195,18 @@ func (p *ParaphraseStats) Add(o ParaphraseStats) {
 	p.Fallback += o.Fallback
 }
 
+// LexicalGapStats reports the query↔needle content-word overlap of the memory
+// suite — the NoLiMa literal-match signal (BENCHMARK-V2 review §8.1). A question
+// that shares wording with its stored fact can be answered by lexical shortcut,
+// overstating memory ability; the generator rewords questions to reduce overlap
+// and this makes the residual visible. Purely advisory telemetry; never scored.
+type LexicalGapStats struct {
+	Questions  int     `json:"questions"`   // non-abstention questions measured
+	Rewritten  int     `json:"rewritten"`   // low-overlap rewrite applied
+	MeanBefore float64 `json:"mean_before"` // mean question↔evidence content overlap, original text
+	MeanAfter  float64 `json:"mean_after"`  // ... after rewrite (or original where not rewritten)
+}
+
 // RunDetails is the opaque, additive telemetry blob for a run (BENCHMARK-V2 §7).
 // It is NOT part of the platform's DB/signature contract, so new fields may be
 // added freely (later WPs add bench_version, judge-audit stats, token totals).
@@ -229,6 +241,9 @@ type RunDetails struct {
 	// per-category breakdown in ScoreReport.per_category.
 	ToolMean   float64 `json:"tool_mean"`
 	MemoryMean float64 `json:"memory_mean"`
+	// LexicalGap is the query↔needle overlap telemetry for the memory suite (the
+	// NoLiMa literal-match signal, §8.1). Advisory only.
+	LexicalGap *LexicalGapStats `json:"lexical_gap,omitempty"`
 }
 
 // ScoreReport is the full result of scoring a run.
