@@ -1,0 +1,172 @@
+package persona
+
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
+
+// TestBuildPlanDeterministic is the WP B1 golden test: same (seed, opts) ⇒
+// byte-identical plan. This is the reproducibility contract (§4.2, §11.3) — if
+// any wall-clock, crypto-rand, or map-iteration nondeterminism creeps into the
+// plan layer, this fails.
+func TestBuildPlanDeterministic(t *testing.T) {
+	opts := DefaultOpts()
+	for _, seed := range []int64{1, 42, 1 << 40, 9223372036854775807} {
+		a := marshal(t, BuildPlan(seed, opts))
+		b := marshal(t, BuildPlan(seed, opts))
+		if a != b {
+			t.Fatalf("seed %d: plan not reproducible across two builds", seed)
+		}
+	}
+}
+
+// TestBuildPlanDistinctSeeds guards against a degenerate generator that ignores
+// the seed (every universe identical would defeat the anti-memorization point).
+func TestBuildPlanDistinctSeeds(t *testing.T) {
+	opts := DefaultOpts()
+	seen := map[string]bool{}
+	for _, seed := range []int64{1, 2, 3, 100, 12345, 999999} {
+		m := marshal(t, BuildPlan(seed, opts))
+		if seen[m] {
+			t.Fatalf("seed %d produced a duplicate plan — seed is not driving generation", seed)
+		}
+		seen[m] = true
+	}
+}
+
+// TestPlanStructure checks the plan contains the material every question type
+// (WP B3) needs: an update chain, a reversal, list facts, preferences, and
+// near-miss distractors — and that no fact carries an empty canonical value.
+func TestPlanStructure(t *testing.T) {
+	p := BuildPlan(42, DefaultOpts())
+	if p.Name == "" || !strings.Contains(p.Name, " ") {
+		t.Fatalf("persona name malformed: %q", p.Name)
+	}
+	var updates, reversals, lists, prefs, distractors, current int
+	for _, f := range p.Facts {
+		if strings.TrimSpace(f.Value) == "" {
+			t.Fatalf("fact %s has empty canonical value", f.ID)
+		}
+		if f.Supersedes != "" && !f.Reversal {
+			updates++
+		}
+		if f.Reversal {
+			reversals++
+		}
+		switch f.Kind {
+		case KindList:
+			lists++
+		case KindPreference:
+			prefs++
+		case KindDistractor:
+			distractors++
+		}
+		if f.Current {
+			current++
+		}
+	}
+	if updates == 0 {
+		t.Error("no update-chain fact (knowledge-update material missing)")
+	}
+	if reversals == 0 {
+		t.Error("no reversal fact (contradiction material missing)")
+	}
+	if lists == 0 {
+		t.Error("no list facts (multi-session synthesis material missing)")
+	}
+	if prefs == 0 {
+		t.Error("no preference facts")
+	}
+	if distractors == 0 {
+		t.Error("no near-miss distractors")
+	}
+	if current == 0 {
+		t.Error("no current-state facts")
+	}
+
+	// Every superseded fact must reference a real predecessor of the same
+	// attribute, and the successor must be the current one.
+	byID := map[string]Fact{}
+	for _, f := range p.Facts {
+		byID[f.ID] = f
+	}
+	for _, f := range p.Facts {
+		if f.Supersedes == "" {
+			continue
+		}
+		prev, ok := byID[f.Supersedes]
+		if !ok {
+			t.Fatalf("fact %s supersedes unknown %s", f.ID, f.Supersedes)
+		}
+		if prev.Attribute != f.Attribute {
+			t.Fatalf("fact %s supersedes a different attribute (%s vs %s)", f.ID, prev.Attribute, f.Attribute)
+		}
+		if prev.Current {
+			t.Fatalf("superseded fact %s still marked current", prev.ID)
+		}
+		if !f.Current {
+			t.Fatalf("superseding fact %s not marked current", f.ID)
+		}
+	}
+}
+
+// TestSessionsCoverFacts checks every fact is scripted into exactly one session
+// beat and sessions have strictly increasing day offsets (temporal-reasoning
+// ground truth).
+func TestSessionsCoverFacts(t *testing.T) {
+	p := BuildPlan(7, DefaultOpts())
+	beatFor := map[string]int{}
+	prevDay := -1
+	for _, s := range p.Sessions {
+		if s.DayOffset <= prevDay {
+			t.Fatalf("session %d day offset %d not strictly increasing (prev %d)", s.Index, s.DayOffset, prevDay)
+		}
+		prevDay = s.DayOffset
+		if len(s.Beats) == 0 {
+			t.Fatalf("session %d has no beats", s.Index)
+		}
+		for _, b := range s.Beats {
+			if b.Kind == BeatFact {
+				beatFor[b.FactID]++
+			}
+			if strings.TrimSpace(b.UserText) == "" || strings.TrimSpace(b.AsstText) == "" {
+				t.Fatalf("session %d beat has empty text", s.Index)
+			}
+		}
+	}
+	for _, f := range p.Facts {
+		if beatFor[f.ID] != 1 {
+			t.Fatalf("fact %s scripted into %d beats (want 1)", f.ID, beatFor[f.ID])
+		}
+	}
+}
+
+// TestFactValuePreservedInBeat ensures the template surface already carries the
+// canonical value verbatim — the invariant WP B2's LLM verification enforces.
+func TestFactValuePreservedInBeat(t *testing.T) {
+	p := BuildPlan(123, DefaultOpts())
+	beat := map[string]Beat{}
+	for _, s := range p.Sessions {
+		for _, b := range s.Beats {
+			if b.Kind == BeatFact {
+				beat[b.FactID] = b
+			}
+		}
+	}
+	for _, f := range p.Facts {
+		b := beat[f.ID]
+		if !strings.Contains(b.UserText, f.Value) {
+			t.Fatalf("fact %s value %q not present in its beat user text %q", f.ID, f.Value, b.UserText)
+		}
+	}
+}
+
+func marshal(t *testing.T, v any) string {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return string(b)
+}
