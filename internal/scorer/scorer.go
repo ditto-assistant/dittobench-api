@@ -256,8 +256,14 @@ func GradeMemory(ctx context.Context, judge LLM, cfg JudgeConfig, mc protocol.Me
 	if strings.TrimSpace(resp.FinalText) == "" {
 		return memoryCaseScore(mc, resp, 0, 0), JudgeOutcome{}
 	}
-	isAbstention := strings.Contains(strings.ToLower(mc.QuestionType), "abstention")
-	if !isAbstention && deterministicMemoryHit(mc.ExpectedAnswer, resp.FinalText) {
+	qt := strings.ToLower(mc.QuestionType)
+	isAbstention := strings.Contains(qt, "abstention")
+	// Isolation cases (C3, §7): don't let a positive containment short-circuit the
+	// judge. A cross-graph leak that dumps BOTH users' values can incidentally
+	// contain the right token, so correctness+grounding must be judged rather than
+	// credited on raw containment. Force the graded judge (like abstention).
+	alwaysJudge := isAbstention || strings.Contains(qt, "isolation")
+	if !alwaysJudge && deterministicMemoryHit(mc.ExpectedAnswer, resp.FinalText) {
 		cs := memoryCaseScore(mc, resp, 1, 1)
 		cs.Notes = append(cs.Notes, "deterministic answer match (no judge call)")
 		return cs, JudgeOutcome{}

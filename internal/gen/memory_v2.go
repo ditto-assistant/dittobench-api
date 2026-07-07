@@ -18,6 +18,10 @@ import (
 type StagedCase struct {
 	Case         protocol.MemoryCase
 	RunAfterWave int
+	// UserID is the memory graph the case must be answered under (multi-graph
+	// isolation, C3 §7). Empty means the primary graph (PrimaryUser); isolation
+	// cases set it explicitly so the pipeline scopes RunRequest.UserID per case.
+	UserID string
 }
 
 // MemorySuite is the full v2 memory dataset: the ordered seeding waves (Tier C),

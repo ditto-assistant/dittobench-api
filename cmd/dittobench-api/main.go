@@ -501,6 +501,12 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	// the run rng. The suite lays cases out across seeding tiers (A prepared, B
 	// raw-pairs) and staged Tier-C waves.
 	memSuite := gen.GenerateMemorySuite(ctx, rng, seed, prof.Mem, prof.ParaphraseFrac, prof.Waves, prof.RawPairsFrac, llmClient, genModel)
+	// Multi-graph isolation (C3, §7): seed a second persona under a different
+	// user_id and add cross-user isolation cases. The secondary graph is template-
+	// rendered (no generator tokens). Cases carry the user_id they must be answered
+	// under; they merge into the primary staged-case stream.
+	iso := gen.GenerateIsolation(ctx, rng, seed, prof.Mem, prof.Waves, prof.IsoCases)
+	memSuite.Cases = append(memSuite.Cases, iso.Cases...)
 	para := toolPara
 	para.Add(memSuite.Stats)
 	totalPairs, totalSubjects := 0, 0
@@ -533,12 +539,18 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		fixtureDigests[i] = gen.FixtureDigest{CaseID: c.ID, Needle: f.NeedleText()}
 	}
 	sort.Slice(fixtureDigests, func(i, j int) bool { return fixtureDigests[i].CaseID < fixtureDigests[j].CaseID })
+	// The hashed artifact covers the secondary isolation graph too (when present),
+	// so a dispute re-scores the exact multi-graph seeding.
+	memWaves := memSuite.Waves
+	if len(iso.SecondaryWave.Pairs) > 0 {
+		memWaves = append(append([]protocol.SeedRequest{}, memSuite.Waves...), iso.SecondaryWave)
+	}
 	artifact := gen.DatasetArtifact{
 		Seed:         seed,
 		BenchVersion: protocol.BenchVersion,
 		GeneratedAt:  protocol.DatasetEpochRFC3339,
 		ToolCases:    toolCases,
-		MemoryWaves:  memSuite.Waves,
+		MemoryWaves:  memWaves,
 		MemoryCases:  memCasesFlat,
 		ToolFixtures: fixtureDigests,
 	}
@@ -671,6 +683,15 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		}
 		casesByWave[w] = append(casesByWave[w], sc)
 	}
+	// Seed the secondary isolation graph up front (a distinct user_id), so cross-
+	// user isolation cases can run in any wave (C3, §7).
+	if len(iso.SecondaryWave.Pairs) > 0 {
+		s.store.SetStage(runID, store.StatusSeeding, len(perCase), total)
+		if _, err := runner.Seed(ctx, harnessURL, iso.SecondaryWave); err != nil {
+			s.store.Fail(runID, "seeding secondary isolation graph failed: "+err.Error())
+			return
+		}
+	}
 	for w, wave := range memSuite.Waves {
 		if len(wave.Pairs) > 0 {
 			s.store.SetStage(runID, store.StatusSeeding, len(perCase), total)
@@ -682,7 +703,13 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		s.store.SetStage(runID, store.StatusRunning, len(perCase), total)
 		for _, sc := range casesByWave[w] {
 			mc := sc.Case
-			resp, _ := runner.RunCase(ctx, harnessURL, mc.ID, mc.Question, tools, runner.CaseOptions{ToolEndpoint: toolEndpoint, UserID: wave.UserID})
+			// Scope the query to the case's memory graph: isolation cases carry an
+			// explicit user_id; all others default to the primary wave's user.
+			uid := sc.UserID
+			if uid == "" {
+				uid = wave.UserID
+			}
+			resp, _ := runner.RunCase(ctx, harnessURL, mc.ID, mc.Question, tools, runner.CaseOptions{ToolEndpoint: toolEndpoint, UserID: uid})
 			cs, jo := scorer.GradeMemory(ctx, llmClient, judgeCfg, mc, resp)
 			countJudge(jo)
 			perCase = append(perCase, cs)
@@ -724,6 +751,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		RawPairsCases:     memSuite.TierBCases,
 		ObservedToolCases: observedTool,
 		CappedToolCases:   cappedTool,
+		IsolationCases:    len(iso.Cases),
 	}
 	if memSuite.LexicalGap.Questions > 0 {
 		lg := memSuite.LexicalGap

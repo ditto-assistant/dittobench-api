@@ -60,14 +60,19 @@ type Profile struct {
 	// §5.1). small stays a single Tier-A wave so the smoke path is cheap + simple.
 	Waves        int
 	RawPairsFrac float64
+	// IsoCases is the number of multi-graph isolation cases (C3 §7): a second
+	// persona is seeded under a different user_id and these cases query one user
+	// while the other holds a conflicting value. 0 keeps the small/smoke path
+	// single-user and cheap.
+	IsoCases int
 }
 
 // Profiles maps run_size → counts. small is kept CHEAP (few LLM calls) so local
 // testing is fast.
 var Profiles = map[string]Profile{
-	"small":  {Tools: 6, Mem: 6, Distractors: 20, ParaphraseFrac: 0.3, Waves: 1, RawPairsFrac: 0},
-	"medium": {Tools: 20, Mem: 20, Distractors: 100, ParaphraseFrac: 0.5, Waves: 2, RawPairsFrac: 0.3},
-	"full":   {Tools: 60, Mem: 50, Distractors: 300, ParaphraseFrac: 0.7, Waves: 2, RawPairsFrac: 0.35},
+	"small":  {Tools: 6, Mem: 6, Distractors: 20, ParaphraseFrac: 0.3, Waves: 1, RawPairsFrac: 0, IsoCases: 0},
+	"medium": {Tools: 20, Mem: 20, Distractors: 100, ParaphraseFrac: 0.5, Waves: 2, RawPairsFrac: 0.3, IsoCases: 2},
+	"full":   {Tools: 60, Mem: 50, Distractors: 300, ParaphraseFrac: 0.7, Waves: 2, RawPairsFrac: 0.35, IsoCases: 4},
 }
 
 // ProfileFor returns the Profile for a run_size, defaulting to small.

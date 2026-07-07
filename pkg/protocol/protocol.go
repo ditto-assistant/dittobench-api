@@ -300,6 +300,10 @@ type RunDetails struct {
 	// the tool suite ran under observed execution. Advisory calibration telemetry.
 	ObservedToolCases int `json:"observed_tool_cases,omitempty"`
 	CappedToolCases   int `json:"capped_tool_cases,omitempty"`
+	// IsolationCases is how many multi-graph isolation cases ran — a second
+	// persona seeded under a different user_id with a conflicting value, so a
+	// cross-graph memory leak scores wrong (§7 Phase C / C3). Advisory telemetry.
+	IsolationCases int `json:"isolation_cases,omitempty"`
 }
 
 // ScoreReport is the full result of scoring a run.
