@@ -6,15 +6,18 @@ import (
 	"testing"
 )
 
-// fakeLLM returns a canned reply (or error) and records the last system/user.
+// fakeLLM returns a canned reply (or error), records the last system/user, and
+// counts calls (so tests can assert the judge was or wasn't invoked).
 type fakeLLM struct {
 	reply      string
 	err        error
 	lastSystem string
 	lastUser   string
+	calls      int
 }
 
 func (f *fakeLLM) Complete(_ context.Context, _ string, system, user string) (string, error) {
+	f.calls++
 	f.lastSystem, f.lastUser = system, user
 	return f.reply, f.err
 }

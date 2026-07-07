@@ -563,8 +563,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 
 	for _, mc := range memCases {
 		resp, _ := runner.RunCase(ctx, harnessURL, mc.ID, mc.Question, tools)
-		correct := scorer.JudgeMemory(ctx, llmClient, scorerModel, mc.Question, mc.ExpectedAnswer, resp.FinalText, mc.QuestionType)
-		cs := scorer.ScoreMemoryCase(mc, resp, correct)
+		cs := scorer.GradeMemory(ctx, llmClient, scorerModel, mc, resp)
 		perCase = append(perCase, cs)
 		s.store.AppendPartial(runID, cs)
 	}

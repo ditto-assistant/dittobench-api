@@ -29,7 +29,7 @@ type LLM interface {
 
 const toolJudgeSystem = "You are a rigorous evaluator scoring an AI assistant's response after it used various tools.\nReturn ONLY valid JSON matching this schema:\n{\"helpfulness\":<1-5>,\"accuracy\":<1-5>,\"rationale\":\"<short>\"}\n\nScoring guide (integer 1-5):\n- helpfulness: Is the response helpful and complete given the user's request?\n  5 = fully answers the question with useful detail; 3 = adequate but unremarkable; 1 = unhelpful\n- accuracy: Does the response accurately use information from the tools it called?\n  5 = all claims well-supported by tool results; 3 = mostly accurate; 1 = fabricated or contradicts tools\n\nBe critical. Most competent responses score 3-4. Score 5 only when genuinely impressive."
 
-const lmeJudgeBase = "You are a rigorous evaluator for a long-term memory benchmark.\nYou will be given a question, the correct answer, and a model's response.\nDetermine if the model's response contains the correct answer.\n\nReturn ONLY valid JSON: {\"correct\":\"yes\"|\"no\",\"rationale\":\"<brief reason>\"}"
+const lmeJudgeBase = "You are a rigorous evaluator for a long-term memory benchmark.\nYou will be given a question, the correct answer, and a model's response.\n\nReturn ONLY valid JSON: {\"correct\":\"yes\"|\"no\",\"grounded\":\"yes\"|\"no\",\"rationale\":\"<brief reason>\"}\n\n- correct: does the model's response contain the correct answer?\n- grounded: is the answer drawn from the user's remembered history rather than guessed or fabricated? A confident answer that is wrong is NOT grounded; appropriately saying the information is unavailable IS grounded."
 
 // buildLMEJudgeSystem appends the question-type clause (same first-match order
 // as the backend / judge.rs lme_judge_system).
@@ -49,11 +49,22 @@ func buildLMEJudgeSystem(questionType string, isAbstention bool) string {
 	return lmeJudgeBase + clause
 }
 
-// JudgeMemory runs the LongMemEval QA judge. An empty response → false. A judge
-// error → false (matches the backend, where a failed judge contributes 0).
-func JudgeMemory(ctx context.Context, model LLM, modelID, question, correctAnswer, response, questionType string) bool {
+// MemoryVerdict is the graded memory-judge assessment: whether the response is
+// correct, and whether it is grounded in memory (vs. confabulated / a lucky
+// guess). Grounding lets a wrong-but-honest answer score partial credit and an
+// appropriate decline score full credit, while a confident fabrication scores
+// zero — the basis of the graded memory credit (A5, §5.1).
+type MemoryVerdict struct {
+	Correct  bool
+	Grounded bool
+}
+
+// JudgeMemoryGraded runs the LongMemEval QA judge returning both correctness and
+// grounding. Empty response → {false,false}; judge error → {false,false}
+// (fail-closed, matches the backend where a failed judge contributes 0).
+func JudgeMemoryGraded(ctx context.Context, model LLM, modelID, question, correctAnswer, response, questionType string) MemoryVerdict {
 	if strings.TrimSpace(response) == "" {
-		return false
+		return MemoryVerdict{}
 	}
 	isAbstention := strings.Contains(strings.ToLower(questionType), "abstention")
 	system := buildLMEJudgeSystem(questionType, isAbstention)
@@ -61,17 +72,25 @@ func JudgeMemory(ctx context.Context, model LLM, modelID, question, correctAnswe
 
 	text, err := model.Complete(ctx, modelID, system, user)
 	if err != nil {
-		return false
+		return MemoryVerdict{}
 	}
 	v := extractJSON(text)
 	if v == nil {
-		return false
+		return MemoryVerdict{}
 	}
-	c, ok := v["correct"].(string)
-	if !ok {
-		return false
-	}
-	return strings.EqualFold(strings.TrimSpace(c), "yes")
+	return MemoryVerdict{Correct: yesish(v["correct"]), Grounded: yesish(v["grounded"])}
+}
+
+// JudgeMemory is the binary correctness view of JudgeMemoryGraded (kept for the
+// callers/tests that only need yes/no).
+func JudgeMemory(ctx context.Context, model LLM, modelID, question, correctAnswer, response, questionType string) bool {
+	return JudgeMemoryGraded(ctx, model, modelID, question, correctAnswer, response, questionType).Correct
+}
+
+// yesish reports whether a judge JSON field equals "yes" (case-insensitive).
+func yesish(x any) bool {
+	s, ok := x.(string)
+	return ok && strings.EqualFold(strings.TrimSpace(s), "yes")
 }
 
 // JudgeToolQuality runs the tool-use response-quality judge. Returns a 0–1 mean

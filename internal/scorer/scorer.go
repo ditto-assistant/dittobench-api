@@ -13,8 +13,11 @@
 package scorer
 
 import (
+	"context"
 	"fmt"
+	"math"
 	"sort"
+	"strings"
 
 	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
 )
@@ -71,18 +74,25 @@ func ComposeTool(cs protocol.CaseScore, quality float64) protocol.CaseScore {
 	return cs
 }
 
-// ScoreMemoryCase builds a memory CaseScore from the LongMemEval yes/no judge.
-func ScoreMemoryCase(mc protocol.MemoryCase, resp protocol.RunResponse, correct bool) protocol.CaseScore {
-	score := 0.0
-	if correct {
-		score = 1.0
-	}
+// Memory grading weights (A5, §5.1): graded credit = 0.7*correctness +
+// 0.3*grounding, replacing v1's binary yes/no (which maximized variance and hid
+// partial competence, W8).
+const (
+	memCorrectnessWeight = 0.7
+	memGroundingWeight    = 0.3
+)
+
+// memoryCaseScore assembles a graded memory CaseScore from its correctness and
+// grounding components (each in [0,1]).
+func memoryCaseScore(mc protocol.MemoryCase, resp protocol.RunResponse, correctness, grounding float64) protocol.CaseScore {
 	cs := protocol.CaseScore{
 		CaseID:    mc.ID,
 		Category:  mc.QuestionType,
 		Kind:      protocol.KindMemory,
-		Score:     score,
-		Correct:   correct,
+		// Round to 6 dp so the exact endpoints are clean (0.7+0.3 is not exactly
+		// 1.0 in float64) without affecting scoring resolution.
+		Score:     clamp01(round6(memCorrectnessWeight*correctness + memGroundingWeight*grounding)),
+		Correct:   correctness >= 0.5,
 		LatencyMs: resp.LatencyMs,
 		Called:    calledNames(resp.ToolCalls),
 		Expected:  []string{}, // non-nil so the JSON is [] not null (memory has no expected tools)
@@ -92,6 +102,57 @@ func ScoreMemoryCase(mc protocol.MemoryCase, resp protocol.RunResponse, correct 
 	}
 	return cs
 }
+
+// ScoreMemoryCase builds a memory CaseScore from a binary correctness verdict
+// (correct ⇒ correctness=grounding=1). Retained for the legacy yes/no callers;
+// the graded path is GradeMemory.
+func ScoreMemoryCase(mc protocol.MemoryCase, resp protocol.RunResponse, correct bool) protocol.CaseScore {
+	c := 0.0
+	if correct {
+		c = 1.0
+	}
+	return memoryCaseScore(mc, resp, c, c)
+}
+
+// GradeMemory scores one memory case in [0,1] using deterministic-first grading:
+// a normalized containment/value check resolves correctness with NO judge call
+// on a hit (the judge-call reduction in A5); on a miss — or for abstention,
+// where the "answer" is a decline — the graded judge supplies both correctness
+// and grounding. score = 0.7*correctness + 0.3*grounding.
+func GradeMemory(ctx context.Context, judge LLM, modelID string, mc protocol.MemoryCase, resp protocol.RunResponse) protocol.CaseScore {
+	if strings.TrimSpace(resp.FinalText) == "" {
+		return memoryCaseScore(mc, resp, 0, 0)
+	}
+	isAbstention := strings.Contains(strings.ToLower(mc.QuestionType), "abstention")
+	if !isAbstention && deterministicMemoryHit(mc.ExpectedAnswer, resp.FinalText) {
+		cs := memoryCaseScore(mc, resp, 1, 1)
+		cs.Notes = append(cs.Notes, "deterministic answer match (no judge call)")
+		return cs
+	}
+	v := JudgeMemoryGraded(ctx, judge, modelID, mc.Question, mc.ExpectedAnswer, resp.FinalText, mc.QuestionType)
+	cs := memoryCaseScore(mc, resp, b2f(v.Correct), b2f(v.Grounded))
+	cs.Notes = append(cs.Notes, fmt.Sprintf("judged correct=%t grounded=%t", v.Correct, v.Grounded))
+	return cs
+}
+
+func b2f(b bool) float64 {
+	if b {
+		return 1.0
+	}
+	return 0.0
+}
+
+func clamp01(x float64) float64 {
+	if x < 0 {
+		return 0
+	}
+	if x > 1 {
+		return 1
+	}
+	return x
+}
+
+func round6(x float64) float64 { return math.Round(x*1e6) / 1e6 }
 
 // Aggregate folds per-case scores into a ScoreReport. The composite is the
 // canonical 0.6*tool_mean + 0.4*memory_mean (see below); per-category breakdown
@@ -259,6 +320,72 @@ func expectedNames(specs []protocol.ToolSpec) []string {
 	}
 	return out
 }
+
+// deterministicMemoryHit reports whether the expected answer is present in the
+// response by normalized containment (or, for a purely numeric answer, an exact
+// number-token match to avoid "5" matching inside "500"). Conclusive only in the
+// POSITIVE direction: a miss defers to the LLM judge, so a false negative is
+// harmless but a false positive (crediting a wrong answer) is avoided.
+func deterministicMemoryHit(expected, response string) bool {
+	e := normalizeAnswer(expected)
+	if e == "" {
+		return false
+	}
+	r := normalizeAnswer(response)
+	if isPureNumber(e) {
+		return containsNumberToken(r, e)
+	}
+	return strings.Contains(r, e)
+}
+
+// normalizeAnswer lowercases, trims surrounding punctuation/quotes, and collapses
+// internal whitespace so containment ignores incidental formatting.
+func normalizeAnswer(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	s = strings.Trim(s, `"'.,!?;:`)
+	return strings.Join(strings.Fields(s), " ")
+}
+
+// isPureNumber reports whether s is only digits with at most one interior
+// decimal/thousands separator (e.g. "42", "3.5", "1,000").
+func isPureNumber(s string) bool {
+	if s == "" {
+		return false
+	}
+	seenSep := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= '0' && c <= '9' {
+			continue
+		}
+		if (c == '.' || c == ',') && !seenSep && i > 0 && i < len(s)-1 {
+			seenSep = true
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// containsNumberToken reports whether num appears in text bounded by non-digits
+// (so "5" matches "have 5 cats" but not "500").
+func containsNumberToken(text, num string) bool {
+	for i := 0; ; {
+		j := strings.Index(text[i:], num)
+		if j < 0 {
+			return false
+		}
+		j += i
+		before := j == 0 || !isDigit(text[j-1])
+		after := j+len(num) >= len(text) || !isDigit(text[j+len(num)])
+		if before && after {
+			return true
+		}
+		i = j + 1
+	}
+}
+
+func isDigit(b byte) bool { return b >= '0' && b <= '9' }
 
 // median returns the median of latency values (0 for empty input).
 func median(vals []int64) int64 {
