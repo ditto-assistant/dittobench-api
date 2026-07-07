@@ -280,3 +280,26 @@ var legalMatters = []string{
 	"the Dunmore lease arbitration", "the Fenwick licensing deal",
 	"the Marsh v. Coleridge appeal", "the Thornbury estate dispute",
 }
+
+// financeRiskProfiles / financeBrokerages / financeHoldings feed the finance
+// (retail-investor) persona — a person tracking their portfolio with the
+// assistant. Risk tolerance is scalar-updatable (a rebalance after a market
+// event — a professional-register knowledge update); brokerage is scalar;
+// holdings are a list (tickers/asset classes — multi-session synthesis). Finance
+// is a domain where models measurably collapse (FinanceBench, ConvFinQA), so its
+// jargon is a strong memory stressor.
+var financeRiskProfiles = []string{
+	"conservative", "moderately conservative", "moderate", "balanced",
+	"growth-oriented", "aggressive", "income-focused", "capital-preservation",
+}
+
+var financeBrokerages = []string{
+	"Fidelity", "Vanguard", "Charles Schwab", "Interactive Brokers", "Robinhood",
+	"Etrade", "Merrill Edge", "TD Ameritrade", "Wealthfront", "Betterment",
+	"SoFi Invest", "Public",
+}
+
+var financeHoldings = []string{
+	"VTI", "VXUS", "BND", "QQQ", "SCHD", "VNQ", "GLD", "TLT", "AAPL", "MSFT",
+	"NVDA", "JEPI", "VYM", "VUG", "IWM", "BRKB",
+}

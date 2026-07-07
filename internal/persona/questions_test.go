@@ -89,6 +89,7 @@ func TestDomainCoverage(t *testing.T) {
 		"software": {"primary_language", "code_editor", "service"},
 		"medical":  {"diagnosis", "medication", "allergy"},
 		"legal":    {"practice_area", "bar_admission", "legal_matter"},
+		"finance":  {"risk_tolerance", "brokerage", "holding"},
 	}
 	// attr → its domain, for the exclusivity check.
 	attrDomain := map[string]string{}

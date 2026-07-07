@@ -65,6 +65,9 @@ var scalarAsk = map[string]string{
 	// legal domain
 	"practice_area": "What area of law do I practice?",
 	"bar_admission": "Which state's bar am I admitted to?",
+	// finance domain
+	"risk_tolerance": "What is my current risk tolerance?",
+	"brokerage":      "Which brokerage do I use?",
 }
 
 var prefAsk = map[string]string{
@@ -89,6 +92,7 @@ var listCountAsk = map[string]string{
 	"service":      "How many services do I maintain?",
 	"allergy":      "How many things am I allergic to?",
 	"legal_matter": "How many legal matters am I handling?",
+	"holding":      "How many holdings are in my portfolio?",
 }
 
 var listAllAsk = map[string]string{
@@ -99,6 +103,7 @@ var listAllAsk = map[string]string{
 	"service":      "List all the services I maintain.",
 	"allergy":      "What am I allergic to?",
 	"legal_matter": "List all the legal matters I've told you about.",
+	"holding":      "List all the holdings in my portfolio.",
 }
 
 // absentAttributes are plausible personal facts the persona generator NEVER
@@ -364,6 +369,13 @@ func factLabel(f Fact) string {
 		return "being admitted to the " + f.Value + " bar"
 	case "legal_matter":
 		return "taking on " + f.Value
+	// finance domain
+	case "risk_tolerance":
+		return "adopting a " + f.Value + " risk tolerance"
+	case "brokerage":
+		return "opening your " + f.Value + " account"
+	case "holding":
+		return "buying " + f.Value
 	default:
 		return ""
 	}

@@ -387,6 +387,30 @@ var domains = []domainSpec{
 			},
 		}},
 	},
+	{
+		name: "finance",
+		scalars: []scalarSpec{
+			{
+				attr: "risk_tolerance", label: "risk tolerance", pool: financeRiskProfiles, updatable: true,
+				stmt:       []string{"My risk tolerance is %s.", "I'd describe my investing style as %s.", "I'm a %s investor."},
+				ack:        []string{"Noted — a %s approach.", "Got it, a %s risk tolerance."},
+				updateStmt: []string{"After the last downturn I've shifted to %s.", "I've rebalanced to a %s stance."},
+				updateAck:  []string{"Understood — updating your risk tolerance to %s.", "Noted the shift to %s."},
+			},
+			{
+				attr: "brokerage", label: "brokerage", pool: financeBrokerages,
+				stmt: []string{"I hold my accounts at %s.", "My brokerage is %s.", "I invest through %s."},
+				ack:  []string{"Noted, your brokerage is %s.", "Got it — %s."},
+			},
+		},
+		lists: []listSpecCount{{
+			spec: listSpec{
+				attr: "holding", pool: financeHoldings,
+				stmt: []string{"I hold %s in my portfolio.", "I added %s to my portfolio.", "I bought some %s."},
+				ack:  []string{"Noted your position in %s.", "Got it — %s is in your portfolio."},
+			},
+		}},
+	},
 }
 
 // BuildPlan produces the Layer-1 plan for (seed, opts). It is a PURE function:
