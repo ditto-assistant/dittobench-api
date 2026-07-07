@@ -15,8 +15,8 @@ func TestDeriveQuestionsDeterministic(t *testing.T) {
 	}
 }
 
-// TestQuestionTypeCoverage checks every §5.1 question type is derivable from a
-// default plan — the per-type discrimination gate (§8 gate 3) needs each present.
+// TestQuestionTypeCoverage checks every question type is derivable from a
+// default plan — the per-type discrimination gate needs each present.
 func TestQuestionTypeCoverage(t *testing.T) {
 	p := BuildPlan(42, DefaultOpts())
 	qs := DeriveQuestions(p)

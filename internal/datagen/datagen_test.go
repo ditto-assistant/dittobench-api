@@ -6,8 +6,8 @@ import (
 	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
 )
 
-// TestDeterministicPerSeed: same seed yields byte-identical datasets. Since A1
-// (seed-derived time) the GeneratedAt envelope is the pinned dataset epoch, not
+// TestDeterministicPerSeed: same seed yields byte-identical datasets. With
+// seed-derived time the GeneratedAt envelope is the pinned dataset epoch, not
 // a wall clock, so it is part of the reproducible dataset too.
 func TestDeterministicPerSeed(t *testing.T) {
 	a := Generate(42, 30)
@@ -96,8 +96,8 @@ func TestCoversCategories(t *testing.T) {
 	}
 }
 
-// TestGenerateHasMultiHopAndArgCases: A6 added multi-hop trajectories and
-// exact-value argument ground truth; both must actually appear in a dataset.
+// TestGenerateHasMultiHopAndArgCases: multi-hop trajectories and exact-value
+// argument ground truth both must actually appear in a dataset.
 func TestGenerateHasMultiHopAndArgCases(t *testing.T) {
 	ds := Generate(7, 120)
 	multiHop, argScored := 0, 0

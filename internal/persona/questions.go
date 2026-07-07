@@ -6,7 +6,7 @@ import (
 	"strconv"
 )
 
-// Question types (BENCHMARK-V2.md §5.1). QTAbstention MUST contain "abstention"
+// Question types. QTAbstention MUST contain "abstention"
 // — the scorer/judge key their needle-absent clause on that substring.
 const (
 	QTSingleSession         = "single-session-recall"
@@ -19,7 +19,7 @@ const (
 	QTAbstention            = "abstention"
 )
 
-// Difficulty tiers (§4.3). Fixed per-run quotas over these make difficulty
+// Difficulty tiers. Fixed per-run quotas over these make difficulty
 // identical across seeds — a variance reducer and a calibration lever.
 const (
 	TierEasy   = "easy"
@@ -77,7 +77,7 @@ var prefAsk = map[string]string{
 }
 
 // prefApply is the preference-APPLICATION request: a task whose correct answer
-// must honor the seeded preference without the preference being restated (§5.1).
+// must honor the seeded preference without the preference being restated.
 var prefApply = map[string]string{
 	"favorite_cuisine": "I'm booking a restaurant for dinner tonight. What kind of place should I pick for me?",
 	"dietary":          "Suggest a main course for me to cook this evening.",

@@ -122,7 +122,7 @@ func ScorerModel() string {
 // ScorerModelB returns the OPTIONAL second judge model id (env SCORER_MODEL_B),
 // or "" when unset. When set, the scorer runs it alongside the primary judge on
 // an audit slice of cases so a judge-specific exploit (e.g. a prompt-injection
-// tuned to one model) is caught by the de-correlated second judge (A8, §6.1).
+// tuned to one model) is caught by the de-correlated second judge.
 func ScorerModelB() string {
 	return strings.TrimSpace(os.Getenv("SCORER_MODEL_B"))
 }

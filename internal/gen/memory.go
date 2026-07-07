@@ -84,7 +84,7 @@ func GenerateMemory(ctx context.Context, r *rand.Rand, n, distractors int, frac 
 	// Carve out an abstention quota: needle-absent questions whose evidence is
 	// deliberately withheld from the haystack (and the distractor pool), so the
 	// correct behavior is a grounded decline rather than an answer. This revives
-	// v1's dead judge abstention clause (W6). The count is a fixed function of n
+	// v1's dead judge abstention clause. The count is a fixed function of n
 	// (seed-independent); the recall suite is stratified over the remainder.
 	nAbs := abstentionQuota(n)
 	nRecall := n - nAbs
@@ -93,8 +93,8 @@ func GenerateMemory(ctx context.Context, r *rand.Rand, n, distractors int, frac 
 	// per-type quota (like the tool suite's stratifiedCategoryOrder). WHICH
 	// questions are drawn within a type varies by seed; HOW MANY of each type
 	// does not — removing the multinomial question-type-draw variance that v1's
-	// single uniform draw incurred (a variance lever for W1, and it guarantees
-	// every type is exercised for the per-type discrimination gate, §8 gate 3).
+	// single uniform draw incurred (a variance lever, and it guarantees
+	// every type is exercised for the per-type discrimination gate).
 	byType := map[string][]string{}
 	typeOrder := make([]string, 0)
 	for _, qid := range candidates {
@@ -388,7 +388,7 @@ func countResolvablePairs(a *seedAssets, mc manifestCase) int {
 // randomBaseDate draws a base date over a multi-year window ending at the pinned
 // dataset epoch. It is deliberately anchored to protocol.DatasetEpoch rather
 // than time.Now() so the haystack timestamps — and hence the whole plan-layer
-// dataset — are a pure function of the seed (reproducibility contract; W5).
+// dataset — are a pure function of the seed (reproducibility contract).
 func randomBaseDate(r *rand.Rand) time.Time {
 	back := time.Duration(r.Intn(baseWindowDays)) * 24 * time.Hour
 	return protocol.DatasetEpoch.Add(-back).Truncate(24 * time.Hour)

@@ -6,7 +6,7 @@ import (
 	"github.com/ditto-assistant/dittobench-api/internal/catalog"
 )
 
-// TestFullCatalogCoverage is the WP A7 property: every tool in the catalog is
+// TestFullCatalogCoverage checks the property: every tool in the catalog is
 // the correct answer (an expected tool) for at least one generated case. A large
 // n makes the stratified draw hit every category.
 func TestFullCatalogCoverage(t *testing.T) {

@@ -64,7 +64,7 @@ func TestObservedExecutionRoundTrip(t *testing.T) {
 	}
 }
 
-// Full result-usage (C2) flow across datagen → toolexec → refharness → scorer: a
+// Full result-usage flow across datagen → toolexec → refharness → scorer: a
 // generated result-usage case whose answer requires the fabricated needle value.
 // The reference harness executes the tool, gets the needle in the result,
 // incorporates it into its answer, and the scorer credits result-usage.

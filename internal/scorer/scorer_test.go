@@ -45,7 +45,7 @@ func TestMissedTool(t *testing.T) {
 
 func TestExtraCallPenalty(t *testing.T) {
 	cases := []protocol.ToolCase{tc("c1", "web_search", "search_web")}
-	// Correct tool + one extra unexpected call under the A6 trajectory formula:
+	// Correct tool + one extra unexpected call under the trajectory formula:
 	//   name-F1 = f1(prec=1/2, rec=1/1) = 0.6667
 	//   arg-F1  = 1.0 (no required args)
 	//   penalty = extras/expectedTotal = 1/1 = 1 → trajectory term = 0

@@ -23,13 +23,16 @@ func TestDeterministicMemoryHit(t *testing.T) {
 		{"5", "you have 500 dollars", false}, // number-token boundary
 		{"3.5", "about 3.5 miles", true},
 		{"", "anything at all", false},
-		{"no", "I know nothing about your plans", false},    // common word → defer to judge
+		{"no", "I know nothing about your plans", false},     // common word → defer to judge
 		{"may", "you may not have that information", false},  // common modal → defer
 		{"Ann", "your planner is annoyingly complex", false}, // not inside "annoyingly"
-		{"blue", "it was blue, actually", true},             // distinctive; trailing punct is a boundary
-		{"James Webb", "the james webb telescope", true},    // multi-word phrase
-		{"5", "about 3.5 miles", false},                     // decimal boundary: 5 != 3.5
+		{"blue", "it was blue, actually", true},              // distinctive; trailing punct is a boundary
+		{"James Webb", "the james webb telescope", true},     // multi-word phrase
+		{"5", "about 3.5 miles", false},                      // decimal boundary: 5 != 3.5
 		{"5", "you have 5 cats", true},
+		{"5", "temperature dropped to -5 today", false},    // negation: -5 is not 5
+		{"100", "you owe -100 dollars", false},             // negation: -100 is not 100
+		{"42", "see ticket order-42-x for details", false}, // number inside a hyphenated token
 	}
 	for _, c := range cases {
 		if got := deterministicMemoryHit(c.exp, c.resp); got != c.want {
@@ -120,6 +123,54 @@ func TestGradeMemoryReportsJudgeOutage(t *testing.T) {
 	}
 	if f.calls != 2 { // one retry
 		t.Fatalf("judge should retry once on error (2 calls), got %d", f.calls)
+	}
+}
+
+func TestGradeMemoryIsolationLeakScoresZero(t *testing.T) {
+	// A response that surfaces the OTHER user's conflicting value has leaked across
+	// graphs and must score 0 deterministically — even though it also contains the
+	// queried user's own correct answer ("blue"). The judge is not consulted.
+	f := &fakeLLM{reply: `{"correct":"yes","grounded":"yes"}`}
+	mc := protocol.MemoryCase{
+		ID: "iso-a-0001-color", QuestionType: "isolation",
+		Question: "what's my favorite color?", ExpectedAnswer: "blue", ForbiddenAnswer: "red",
+	}
+	cs, _ := GradeMemory(context.Background(), f, JudgeConfig{Model: "m"},
+		mc, protocol.RunResponse{FinalText: "Your favorite color is blue (your colleague's is red)."})
+	if cs.Score != 0 || cs.Correct {
+		t.Fatalf("cross-graph leak should score 0, got %+v", cs)
+	}
+	if f.calls != 0 {
+		t.Fatalf("deterministic leak check should not call the judge (calls=%d)", f.calls)
+	}
+}
+
+func TestGradeMemoryIsolationCleanAnswerScores(t *testing.T) {
+	// No forbidden value present: the isolation case falls through to the judge and
+	// a correct, grounded answer scores full marks.
+	f := &fakeLLM{reply: `{"correct":"yes","grounded":"yes"}`}
+	mc := protocol.MemoryCase{
+		ID: "iso-a-0001-color", QuestionType: "isolation",
+		Question: "what's my favorite color?", ExpectedAnswer: "blue", ForbiddenAnswer: "red",
+	}
+	cs, _ := GradeMemory(context.Background(), f, JudgeConfig{Model: "m"},
+		mc, protocol.RunResponse{FinalText: "Your favorite color is blue."})
+	if !approx(cs.Score, 1.0) || !cs.Correct {
+		t.Fatalf("clean isolation answer should score 1.0, got %+v", cs)
+	}
+	if f.calls == 0 {
+		t.Fatalf("isolation case with no leak should consult the judge")
+	}
+}
+
+func TestJudgeMemoryErrorEnvelopeIsOutage(t *testing.T) {
+	// A 200 response whose body is valid JSON but carries no verdict (a provider
+	// {"error":...} envelope) must surface as Errored, not a silent "incorrect" —
+	// otherwise a persistent content-level judge failure records 0s as valid.
+	f := &fakeLLM{reply: `{"error":{"message":"rate limited","code":429}}`}
+	v := JudgeMemoryGraded(context.Background(), f, "m", "q", "blue", "some answer", "multi-session")
+	if !v.Errored {
+		t.Fatalf("verdict-less JSON envelope should be Errored, got %+v", v)
 	}
 }
 

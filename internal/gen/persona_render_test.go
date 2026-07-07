@@ -33,7 +33,7 @@ func (d *dropLLM) Complete(_ context.Context, _ string, _ string, _ string) (str
 	return `{"prompt":"We chatted about something.","response":"Sounds good."}`, nil
 }
 
-// evidenceCarriesValue is the WP B2 reproducibility invariant (§8 gate 6, plan
+// evidenceCarriesValue is the reproducibility invariant (plan
 // level): for every fact, the pair the evidence map points at contains the
 // fact's canonical value verbatim — no matter whether the LLM rendering was
 // accepted or the template was used as fallback. If this holds, the answer token

@@ -68,12 +68,12 @@ func TestPreservesEntity(t *testing.T) {
 }
 
 // TestGenerateToolsErrLLMFallsBackCounted: a persistent generator error must not
-// silently collapse to verbatim (v1's W5). Every prompt stays the template AND
+// silently collapse to verbatim. Every prompt stays the template AND
 // every skip is counted as a retried fallback.
 func TestGenerateToolsErrLLMFallsBackCounted(t *testing.T) {
-	base, _ := GenerateTools(context.Background(), NewRNG(99), 20, 0, nil, "m")
+	base, _ := GenerateTools(context.Background(), NewRNG(99), 99, 20, 0, nil, "m")
 	e := &errLLM{}
-	out, stats := GenerateTools(context.Background(), NewRNG(99), 20, 1.0, e, "m")
+	out, stats := GenerateTools(context.Background(), NewRNG(99), 99, 20, 1.0, e, "m")
 
 	if len(base) != len(out) {
 		t.Fatalf("case count changed: %d vs %d", len(base), len(out))
@@ -94,7 +94,7 @@ func TestGenerateToolsErrLLMFallsBackCounted(t *testing.T) {
 // TestGenerateToolsRetrySucceeds: an error followed by a valid rewrite is
 // retried and, when the entity survives, applied — never lost to the transient.
 func TestGenerateToolsRetrySucceeds(t *testing.T) {
-	out, stats := GenerateTools(context.Background(), NewRNG(99), 20, 1.0, &flakyUpper{}, "m")
+	out, stats := GenerateTools(context.Background(), NewRNG(99), 99, 20, 1.0, &flakyUpper{}, "m")
 	if stats.Attempted != 20 || stats.Retried != 20 || stats.Applied != 20 || stats.Fallback != 0 {
 		t.Fatalf("expected all retried+applied, got %+v", stats)
 	}
@@ -102,7 +102,7 @@ func TestGenerateToolsRetrySucceeds(t *testing.T) {
 		t.Fatalf("stats invariant broken: %+v", stats)
 	}
 	// uppercase actually changed the prompts (paraphrase took effect)
-	base, _ := GenerateTools(context.Background(), NewRNG(99), 20, 0, nil, "m")
+	base, _ := GenerateTools(context.Background(), NewRNG(99), 99, 20, 0, nil, "m")
 	changed := 0
 	for i := range out {
 		if out[i].Prompt != base[i].Prompt {

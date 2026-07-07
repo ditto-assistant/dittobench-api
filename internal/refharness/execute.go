@@ -16,7 +16,7 @@ import (
 const execTimeout = 15 * time.Second
 
 // Execute runs a routed trajectory against the validator-served mock tool
-// endpoint (Phase C observed execution, BENCHMARK-V2 §7). For each call it POSTs
+// endpoint (Phase C observed execution). For each call it POSTs
 // a ToolExecRequest (so the validator OBSERVES the trajectory) and collects the
 // result; the last non-empty result is returned so the harness can incorporate
 // returned content into its answer (result-usage). endpoint=="" is a no-op (the

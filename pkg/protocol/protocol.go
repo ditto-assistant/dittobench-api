@@ -37,6 +37,13 @@ type MemoryCase struct {
 	QuestionType   string `json:"question_type"`
 	Question       string `json:"question"`
 	ExpectedAnswer string `json:"expected_answer"`
+	// ForbiddenAnswer is the conflicting value another user's memory graph holds
+	// for this attribute on an isolation case: the queried user's own answer is
+	// ExpectedAnswer, and a response that instead surfaces ForbiddenAnswer has
+	// leaked across graphs and is scored 0. Empty for ordinary cases. Like
+	// ExpectedAnswer it is validator-internal grading data and is never sent to
+	// the harness (only Question is).
+	ForbiddenAnswer string `json:"forbidden_answer,omitempty"`
 }
 
 // Dataset is a (fresh, seeded) set of tool-calling + memory cases.
@@ -73,7 +80,7 @@ type SubjectLink struct {
 // SeedRequest is the fresh haystack the validator POSTs to <harness>/seed before
 // running memory cases. UserID defaults to "miner" if empty.
 //
-// Wave (BENCHMARK-V2 §5.1 Tier C) is the 0-based index of a STAGED seeding wave:
+// Wave (Tier C) is the 0-based index of a STAGED seeding wave:
 // the validator may call /seed repeatedly, each call carrying the next chunk of
 // the haystack with an incremented Wave, and interleave /run questions between
 // waves so memory is built incrementally "as you converse". Repeated /seed is an
@@ -81,11 +88,14 @@ type SubjectLink struct {
 // Wave=0. The field is ADDITIVE-OPTIONAL — a harness that ignores it and simply
 // upserts each call still scores correctly.
 type SeedRequest struct {
-	UserID   string        `json:"user_id,omitempty"`
-	Wave     int           `json:"wave,omitempty"`
-	Pairs    []MemoryPair  `json:"pairs"`
-	Subjects []Subject     `json:"subjects"`
-	Links    []SubjectLink `json:"links"`
+	UserID string `json:"user_id,omitempty"`
+	Wave   int    `json:"wave,omitempty"`
+	// omitempty so a wave with no subjects/links serializes the key as absent
+	// rather than JSON null: a strict harness decoder (e.g. serde) rejects an
+	// explicit null for a sequence field but accepts an absent key as empty.
+	Pairs    []MemoryPair  `json:"pairs,omitempty"`
+	Subjects []Subject     `json:"subjects,omitempty"`
+	Links    []SubjectLink `json:"links,omitempty"`
 }
 
 // SeedResponse is what <harness>/seed returns: counts actually loaded.
@@ -104,20 +114,20 @@ type ToolDefinition struct {
 
 // RunRequest is what the validator POSTs to the harness /run endpoint per case.
 //
-// ToolEndpoint (BENCHMARK-V2 §7 Phase C) is an OPTIONAL validator-served mock
+// ToolEndpoint (Phase C) is an OPTIONAL validator-served mock
 // tool-execution URL. When present, a harness that supports observed execution
 // should EXECUTE its non-memory catalog tool calls by POSTing a ToolExecRequest
 // to this URL (instead of stubbing them locally) and use the returned
 // ToolExecResponse.Result. Doing so lets the validator (a) OBSERVE the real tool
-// trajectory rather than trusting the harness's self-reported tool_calls (kills
-// W3), and (b) score whether the answer incorporates the returned content
+// trajectory rather than trusting the harness's self-reported tool_calls, and
+// (b) score whether the answer incorporates the returned content
 // (result-usage). The field is ADDITIVE-OPTIONAL: a harness that ignores it and
 // stubs tools locally still scores, but selection-only and at a capped ceiling on
 // the categories the endpoint would have served (their self-reported calls are
 // untrusted). Memory tools are NOT served here — the harness answers those from
 // its own seeded memory.
 //
-// UserID (BENCHMARK-V2 §7 Phase C, multi-graph isolation) scopes the case to one
+// UserID (multi-graph isolation) scopes the case to one
 // seeded memory graph; it mirrors the user_id the haystack was seeded under. A
 // harness must answer only from that user's memory and never leak another user's
 // facts. Empty means the default single-user graph ("miner").
@@ -134,7 +144,7 @@ type RunRequest struct {
 // (RunRequest.ToolEndpoint) to actually EXECUTE one non-memory catalog tool
 // during a case. The validator returns a deterministic, seed-derived mock result
 // (ToolExecResponse) and records the call as the authoritative observed
-// trajectory for that case (BENCHMARK-V2 §7 Phase C). CaseID ties the call to the
+// trajectory for that case (Phase C). CaseID ties the call to the
 // running case; UserID echoes RunRequest.UserID; Hop is the 0-based position in
 // the harness's tool sequence (for order scoring).
 type ToolExecRequest struct {
@@ -189,18 +199,22 @@ type CaseScore struct {
 	Score     float64 `json:"score"`             // 0..1 composite for this case
 	ToolScore float64 `json:"tool_score"`        // 0..1 deterministic tool accuracy (tool cases)
 	Quality   float64 `json:"quality,omitempty"` // 0..1 LLM response-quality judge (tool cases)
-	// ResultUsage is 0..1 for a result-usage tool case (§7 Phase C / C2): whether
+	// ResultUsage is 0..1 for a result-usage tool case (Phase C): whether
 	// the final answer incorporated the distinctive value the executed tool
 	// returned. It replaces the LLM quality judge for those cases (deterministic).
-	ResultUsage float64  `json:"result_usage,omitempty"`
-	Correct     bool     `json:"correct,omitempty"` // memory judge verdict (memory cases)
-	LatencyMs   int64    `json:"latency_ms"`
-	Called      []string `json:"called"`
-	Expected    []string `json:"expected"`
-	Notes       []string `json:"notes,omitempty"`
+	ResultUsage float64 `json:"result_usage,omitempty"`
+	Correct     bool    `json:"correct,omitempty"` // memory judge verdict (memory cases)
+	LatencyMs   int64   `json:"latency_ms"`
+	// Observed is true when the harness routed this tool case's calls through the
+	// validator's mock endpoint, so Called is the authoritative observed
+	// trajectory (not self-report). Only observed cases feed the efficiency term.
+	Observed bool     `json:"observed,omitempty"`
+	Called   []string `json:"called"`
+	Expected []string `json:"expected"`
+	Notes    []string `json:"notes,omitempty"`
 	// Injection is true when a judge flagged the harness output as an attempt to
 	// manipulate the judge (prompt injection). Such a case is scored 0 and the
-	// run is flagged for moderation review (A8, §6.1).
+	// run is flagged for moderation review.
 	Injection bool `json:"injection,omitempty"`
 }
 
@@ -227,7 +241,7 @@ type CodeFingerprint struct {
 // ParaphraseStats counts the outcomes of the surface-realization (LLM
 // paraphrase) pass for one generation. It exists so a spike in template
 // fallbacks — an LLM outage or an over-strict verifier silently collapsing the
-// dataset back to verbatim templates (v1's W5) — is visible in the report
+// dataset back to verbatim templates — is visible in the report
 // rather than invisible. Purely advisory telemetry; never affects the score.
 type ParaphraseStats struct {
 	Attempted int `json:"attempted"` // paraphrase was attempted (frac roll hit, LLM present)
@@ -245,7 +259,7 @@ func (p *ParaphraseStats) Add(o ParaphraseStats) {
 }
 
 // LexicalGapStats reports the query↔needle content-word overlap of the memory
-// suite — the NoLiMa literal-match signal (BENCHMARK-V2 review §8.1). A question
+// suite — the NoLiMa literal-match signal. A question
 // that shares wording with its stored fact can be answered by lexical shortcut,
 // overstating memory ability; the generator rewords questions to reduce overlap
 // and this makes the residual visible. Purely advisory telemetry; never scored.
@@ -256,34 +270,34 @@ type LexicalGapStats struct {
 	MeanAfter  float64 `json:"mean_after"`  // ... after rewrite (or original where not rewritten)
 }
 
-// RunDetails is the opaque, additive telemetry blob for a run (BENCHMARK-V2 §7).
+// RunDetails is the opaque, additive telemetry blob for a run.
 // It is NOT part of the platform's DB/signature contract, so new fields may be
-// added freely (later WPs add bench_version, judge-audit stats, token totals).
+// added freely (later work adds bench_version, judge-audit stats, token totals).
 // Serialized under ScoreReport.details.
 type RunDetails struct {
 	// BenchVersion is the scoring benchmark version (see protocol.BenchVersion).
 	// The weight fold only compares entries of the max bench_version present, so a
-	// bump makes new scores non-comparable to old until a re-score (§9).
+	// bump makes new scores non-comparable to old until a re-score.
 	BenchVersion int `json:"bench_version"`
 	// DatasetSHA256 is the hex SHA-256 of the fully-rendered dataset (tool cases +
 	// memory waves + memory cases). It pins the exact artifact a dispute re-scores
-	// (BENCHMARK-V2 §4.2): the recorded hash must match a re-hash of the persisted
+	// re-scores: the recorded hash must match a re-hash of the persisted
 	// artifact. With no LLM surface variation it is also reproducible from
 	// (seed, bench_version).
 	DatasetSHA256 string           `json:"dataset_sha256,omitempty"`
 	Paraphrase    *ParaphraseStats `json:"paraphrase,omitempty"`
 	// InjectionAttempts counts cases a judge flagged as judge-manipulation
 	// attempts (each scored 0). A non-zero value is moderation-relevant evidence,
-	// the same policy channel as plagiarism (A8, §6.1).
+	// the same policy channel as plagiarism.
 	InjectionAttempts int `json:"injection_attempts,omitempty"`
 	// Tokens is the total OpenRouter tokens (generator + judge) the run spent —
-	// budget telemetry (kept out of the composite; §5.3).
+	// budget telemetry (kept out of the composite).
 	Tokens int64 `json:"tokens,omitempty"`
 	// SeedingWaves is how many staged /seed waves the memory haystack was split
 	// into (Tier C; 1 = single seed). RawPairsCases is how many memory cases were
 	// Tier B (raw-pairs seeding: their evidence was seeded WITHOUT prepared
-	// subjects, so the harness had to build its own subject index — §5.1). Both
-	// are advisory calibration telemetry (BENCHMARK-V2 §7 additive details).
+	// subjects, so the harness had to build its own subject index). Both
+	// are advisory calibration telemetry.
 	SeedingWaves  int `json:"seeding_waves,omitempty"`
 	RawPairsCases int `json:"raw_pairs_cases,omitempty"`
 	// ToolMean / MemoryMean echo the per-suite means for convenience alongside the
@@ -291,19 +305,52 @@ type RunDetails struct {
 	ToolMean   float64 `json:"tool_mean"`
 	MemoryMean float64 `json:"memory_mean"`
 	// LexicalGap is the query↔needle overlap telemetry for the memory suite (the
-	// NoLiMa literal-match signal, §8.1). Advisory only.
+	// NoLiMa literal-match signal). Advisory only.
 	LexicalGap *LexicalGapStats `json:"lexical_gap,omitempty"`
 	// ObservedToolCases is how many tool cases were scored on the validator-
 	// observed trajectory (the harness routed its calls through tool_endpoint);
 	// CappedToolCases is how many observable cases were capped because the harness
-	// did NOT (self-report untrusted, §7 Phase C). Together they show how much of
+	// did NOT (self-report untrusted). Together they show how much of
 	// the tool suite ran under observed execution. Advisory calibration telemetry.
 	ObservedToolCases int `json:"observed_tool_cases,omitempty"`
 	CappedToolCases   int `json:"capped_tool_cases,omitempty"`
 	// IsolationCases is how many multi-graph isolation cases ran — a second
 	// persona seeded under a different user_id with a conflicting value, so a
-	// cross-graph memory leak scores wrong (§7 Phase C / C3). Advisory telemetry.
+	// cross-graph memory leak scores wrong. Advisory telemetry.
 	IsolationCases int `json:"isolation_cases,omitempty"`
+	// ToolEfficiency is the run's observed tool-efficiency factor (0..1) folded
+	// into the composite as a bounded multiplier: 1.0 when harnesses reached
+	// correct answers within their expected tool budget, dropping toward the floor
+	// as observed trajectories overshot. 1.0 (no effect) when no tool case ran
+	// under observed execution. Advisory — the composite already reflects it.
+	ToolEfficiency float64 `json:"tool_efficiency,omitempty"`
+	// Models records the LLM model ids that produced this run — the datagen
+	// generator, the judge(s), and (when the operator forces it) the miner's
+	// harness chat model. Advisory transparency metadata for the public
+	// leaderboard: it makes a composite reproducible/comparable (a score is only
+	// meaningful alongside the models that produced the dataset + graded it).
+	Models *ModelInfo `json:"models,omitempty"`
+	// PerCategory echoes ScoreReport.PerCategory into the details blob so the
+	// per-category breakdown (per tool / per memory-question-type mean) survives
+	// the platform wire — which carries details but not the top-level
+	// per_category — and can drive a transparent leaderboard. Advisory only.
+	PerCategory []CategoryStat `json:"per_category,omitempty"`
+}
+
+// ModelInfo is the set of LLM model ids a run was produced with (RunDetails.models).
+// All fields are advisory transparency metadata — never scored or signed.
+type ModelInfo struct {
+	// Generator is the datagen model (paraphrase + haystack surface realization).
+	Generator string `json:"generator,omitempty"`
+	// Judge is the primary scoring/judge model.
+	Judge string `json:"judge,omitempty"`
+	// JudgeAudit is the optional second judge model used for the audit ensemble
+	// (empty when SCORER_MODEL_B is unset).
+	JudgeAudit string `json:"judge_audit,omitempty"`
+	// Harness is the miner harness's chat model when the operator forces it via
+	// DITTOBENCH_HARNESS_MODEL; empty when the harness used its own default (the
+	// server does not otherwise observe the miner's model choice).
+	Harness string `json:"harness,omitempty"`
 }
 
 // ScoreReport is the full result of scoring a run.

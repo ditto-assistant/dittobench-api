@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// TestAbstentionNeedleAbsent is the WP A4 core property: abstention cases are
+// TestAbstentionNeedleAbsent checks the core property: abstention cases are
 // present at the fixed quota, and NONE of their evidence pairs appear in the
 // seeded haystack (nor as distractors) — so the only correct behavior is a
 // grounded decline.

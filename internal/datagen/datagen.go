@@ -19,7 +19,7 @@ type category struct {
 	name string
 	tool string // single expected tool; empty means "no tool" (unless tools is set)
 	// tools, when non-empty, is a multi-hop expected sequence (overrides tool);
-	// MaxToolCalls becomes len(tools) and order is scored (A6 §5.2(4)).
+	// MaxToolCalls becomes len(tools) and order is scored.
 	tools []string
 	// argKey, when set on a single-tool category whose filler is an exact token
 	// (a URL, a theme), pins RequiredArgs[argKey]=filler so the argument value is
@@ -206,8 +206,8 @@ var categories = []category{
 			"%s",
 		},
 	},
-	// Full-catalog coverage (A7): single-hop categories so every remaining
-	// catalog tool is the correct answer for some case (W4: 10/18 were dead).
+	// Full-catalog coverage: single-hop categories so every remaining
+	// catalog tool is the correct answer for some case (10/18 were dead in v1).
 	{
 		name: "memory_fetch", tool: "fetch_memories", argKey: "ids",
 		templates: []string{
@@ -256,7 +256,7 @@ var categories = []category{
 			"Adjust which tools you use — %s.",
 		},
 	},
-	// Multi-hop trajectories (A6): the correct answer is a tool SEQUENCE, scored
+	// Multi-hop trajectories: the correct answer is a tool SEQUENCE, scored
 	// with order credit. These exercise the previously-dormant multi-call path.
 	{
 		name: "multi_web_read", tools: []string{"search_web", "read_links"},
@@ -290,7 +290,7 @@ var categories = []category{
 			"Create a picture of %s and tweak the colors.",
 		},
 	},
-	// Result-usage (Phase C / C2, §5.2 capability 13): the answer requires a value
+	// Result-usage (Phase C, capability 13): the answer requires a value
 	// that exists ONLY in the tool's returned content — a fabricated per-seed
 	// needle (toolexec) — so the case cannot be answered by self-report or base-
 	// model knowledge; the harness must actually execute the tool and USE the
@@ -322,7 +322,7 @@ const resultUsageSuffix = "_result_usage"
 
 // IsResultUsage reports whether a case category is a result-usage category — the
 // pipeline scores these on trajectory + answer-incorporates-needle rather than
-// the LLM quality judge (C2).
+// the LLM quality judge.
 func IsResultUsage(category string) bool { return strings.HasSuffix(category, resultUsageSuffix) }
 
 // fillerFor returns a random entity string appropriate for a category.
@@ -426,7 +426,9 @@ func stratifiedCategoryOrder(r *rand.Rand, n int) []int {
 
 // GenerateCases emits n raw tool cases from an existing RNG. Exported so the
 // anti-cheat generator (internal/gen) can reuse the same templated ground-truth
-// and then LLM-paraphrase the prompts. seed is only used for stable case IDs.
+// and then LLM-paraphrase the prompts. seed drives both the stable case IDs and
+// each result-usage prompt's fabricated needle subject (via toolexec.NeedleFor),
+// which must match the needle the mock endpoint serves.
 func GenerateCases(r *rand.Rand, seed int64, n int) []protocol.ToolCase {
 	cases, _ := GenerateCasesWithFillers(r, seed, n)
 	return cases

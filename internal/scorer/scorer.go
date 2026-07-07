@@ -1,12 +1,12 @@
 // Package scorer turns harness RunResponses into a DittoBench ScoreReport.
 //
-// Tool accuracy per case is deterministic trajectory + argument scoring (A6,
-// see trajectory.go): 0.4·name-F1 + 0.4·arg-F1 + 0.2·(order × extra-call
+// Tool accuracy per case is deterministic trajectory + argument scoring (see
+// trajectory.go): 0.4·name-F1 + 0.4·arg-F1 + 0.2·(order × extra-call
 // discipline). Cases with no expected tool score 1.0 iff the harness called
 // nothing, else 0.0. The per-case tool composite is 0.5·this + 0.5·quality
 // judge (ComposeTool).
 //
-// Memory credit is graded (A5): 0.7·correctness + 0.3·grounding, with a
+// Memory credit is graded: 0.7·correctness + 0.3·grounding, with a
 // deterministic containment check resolving correctness before the LLM judge.
 package scorer
 
@@ -74,14 +74,14 @@ func ComposeTool(cs protocol.CaseScore, quality float64) protocol.CaseScore {
 
 // ResultUsageTrajectoryWeight / ResultUsageAnswerWeight split a result-usage tool
 // case's score between calling the right tool(s) and actually USING the returned
-// content. The answer half dominates: the whole point (capability 13, §5.2) is
+// content. The answer half dominates: the whole point (capability 13) is
 // that the answer incorporates a value obtainable only by executing the tool.
 const (
 	resultUsageTrajectoryWeight = 0.4
 	resultUsageAnswerWeight     = 0.6
 )
 
-// ComposeResultUsage finishes a result-usage tool case (C2, §7). Instead of the
+// ComposeResultUsage finishes a result-usage tool case (Phase C). Instead of the
 // LLM quality judge, it scores deterministically: 0.4·trajectory (did it call the
 // right tool) + 0.6·(answer carries the served needle value). Because the needle
 // is a fabricated per-seed value that exists only in the tool's returned content,
@@ -131,7 +131,7 @@ func stripSeparators(s string) string {
 
 // UnobservedCeiling caps the composite of an OBSERVABLE tool case (every expected
 // tool is validator-served) that the harness did NOT execute through the mock
-// tool_endpoint (Phase C, §7). Its self-reported trajectory is untrusted (W3):
+// tool_endpoint (Phase C). Its self-reported trajectory is untrusted:
 // we cannot verify the tools actually ran, so the case is scored selection-only
 // and cannot reach full marks. Set at 0.5 so a right-tool self-report still earns
 // meaningful-but-capped credit, and a harness is materially rewarded for
@@ -153,8 +153,63 @@ func ScoreToolCaseObserved(c protocol.ToolCase, resp protocol.RunResponse, ok bo
 	auth := resp
 	auth.ToolCalls = observed
 	cs := ScoreToolCase(c, auth, ok)
+	cs.Observed = true
 	cs.Notes = append(cs.Notes, "trajectory observed via tool_endpoint (authoritative)")
 	return cs
+}
+
+// Tool-efficiency term. Among tool cases the validator OBSERVED executing (so the
+// call count is authoritative, not self-reported), a harness that reached a
+// correct answer within its expected tool budget scores full efficiency; one that
+// overshot the budget is penalized on a bounded, dead-zone curve. The factor
+// multiplies the composite (never the per-suite means), so it can only separate
+// otherwise-comparable harnesses — accuracy stays dominant. Only cases scoring at
+// or above effGateScore count, so efficiency differentiates competent responses
+// rather than rewarding a lean-but-wrong one.
+const (
+	effFreeOvershoot = 1    // extra calls beyond expected that incur no penalty
+	effFullOvershoot = 5    // overshoot at/above which the penalty saturates
+	effMaxPenalty    = 0.15 // deepest the factor can drop (matches the composite floor)
+	effGateScore     = 0.5  // only cases scoring >= this contribute
+)
+
+// overshootEfficiency maps how far an observed trajectory exceeded the expected
+// tool count to a factor in [1-effMaxPenalty, 1].
+func overshootEfficiency(expected, actual int) float64 {
+	over := actual - expected
+	if over <= effFreeOvershoot {
+		return 1.0
+	}
+	frac := float64(over-effFreeOvershoot) / float64(effFullOvershoot-effFreeOvershoot)
+	if frac > 1 {
+		frac = 1
+	}
+	return 1 - frac*effMaxPenalty
+}
+
+// ToolEfficiencyFactor is the run's observed tool-efficiency multiplier for the
+// composite: the mean per-case efficiency over observed, competently-answered
+// tool cases, or 1.0 (no effect) when none ran under observed execution — e.g. a
+// remote harness that never routed through the mock endpoint, where the call
+// count is unverifiable and so is not scored.
+func ToolEfficiencyFactor(perCase []protocol.CaseScore) float64 {
+	var sum float64
+	var n int
+	for _, cs := range perCase {
+		if cs.Kind != protocol.KindTool || !cs.Observed {
+			continue
+		}
+		expected := len(cs.Expected)
+		if expected < 1 || cs.Score < effGateScore {
+			continue
+		}
+		sum += overshootEfficiency(expected, len(cs.Called))
+		n++
+	}
+	if n == 0 {
+		return 1.0
+	}
+	return sum / float64(n)
 }
 
 // CapUnobserved applies UnobservedCeiling to a fully-composed tool CaseScore when
@@ -169,9 +224,9 @@ func CapUnobserved(cs protocol.CaseScore) protocol.CaseScore {
 	return cs
 }
 
-// Memory grading weights (A5, §5.1): graded credit = 0.7*correctness +
+// Memory grading weights: graded credit = 0.7*correctness +
 // 0.3*grounding, replacing v1's binary yes/no (which maximized variance and hid
-// partial competence, W8).
+// partial competence).
 const (
 	memCorrectnessWeight = 0.7
 	memGroundingWeight   = 0.3
@@ -216,7 +271,7 @@ const defaultAuditEvery = 5
 // JudgeConfig holds the judge model ids and the audit policy for a run. ModelB
 // is optional (""); when set, an audit slice of cases is cross-checked by both
 // judges so a judge-specific manipulation is caught by the de-correlated second
-// judge (A8, §6.1). Judging is temperature-0 deterministic, so literal k=3
+// judge. Judging is temperature-0 deterministic, so literal k=3
 // self-consistency would be a no-op — a second *model* is the meaningful
 // de-correlation here.
 type JudgeConfig struct {
@@ -239,7 +294,7 @@ func (jc JudgeConfig) audits(id string) bool {
 
 // JudgeOutcome reports whether a case actually invoked the judge LLM and whether
 // that call failed — so the run loop can distinguish a persistent judge outage
-// (fail the run) from legitimate low scores (§11.3, §6.1).
+// (fail the run) from legitimate low scores.
 type JudgeOutcome struct {
 	Attempted bool
 	Errored   bool
@@ -247,7 +302,7 @@ type JudgeOutcome struct {
 
 // GradeMemory scores one memory case in [0,1] using deterministic-first grading:
 // a normalized containment/value check resolves correctness with NO judge call
-// on a hit (the judge-call reduction in A5); on a miss — or for abstention,
+// on a hit (the judge-call reduction); on a miss — or for abstention,
 // where the "answer" is a decline — the graded judge supplies correctness and
 // grounding. A flagged injection scores the case 0. On the audit slice a second
 // judge model cross-checks the injection signal. score = 0.7*corr + 0.3*ground.
@@ -258,11 +313,21 @@ func GradeMemory(ctx context.Context, judge LLM, cfg JudgeConfig, mc protocol.Me
 	}
 	qt := strings.ToLower(mc.QuestionType)
 	isAbstention := strings.Contains(qt, "abstention")
-	// Isolation cases (C3, §7): don't let a positive containment short-circuit the
+	// Isolation cases: don't let a positive containment short-circuit the
 	// judge. A cross-graph leak that dumps BOTH users' values can incidentally
 	// contain the right token, so correctness+grounding must be judged rather than
 	// credited on raw containment. Force the graded judge (like abstention).
 	alwaysJudge := isAbstention || strings.Contains(qt, "isolation")
+	// Isolation leak (deterministic, authoritative): a response that surfaces the
+	// value another user's graph holds for this attribute has crossed graphs —
+	// score 0 even if it also contains the queried user's own answer. This catches
+	// the "dump both users' values" evasion that a containment-based positive
+	// check credits, and it does not depend on the judge noticing the leak.
+	if mc.ForbiddenAnswer != "" && deterministicMemoryHit(mc.ForbiddenAnswer, resp.FinalText) {
+		cs := memoryCaseScore(mc, resp, 0, 0)
+		cs.Notes = append(cs.Notes, "cross-graph leak: response surfaced another user's value (scored 0)")
+		return cs, JudgeOutcome{}
+	}
 	if !alwaysJudge && deterministicMemoryHit(mc.ExpectedAnswer, resp.FinalText) {
 		cs := memoryCaseScore(mc, resp, 1, 1)
 		cs.Notes = append(cs.Notes, "deterministic answer match (no judge call)")
@@ -370,7 +435,7 @@ func Aggregate(runID string, perCase []protocol.CaseScore) protocol.ScoreReport 
 	}
 	// DittoBench v2 composite (bench_version 2): 0.5*tool_mean + 0.5*memory_mean
 	// when both kinds are present; falls back to the single present mean for
-	// tool-only or memory-only runs. Rebalanced from v1's 0.6/0.4 (§5.3, §10.1):
+	// tool-only or memory-only runs. Rebalanced from v1's 0.6/0.4:
 	// memory is the core product value, memory-coupled tool cases already push
 	// memory competence into tool_mean, and the raw-pairs tier (Tier B) makes
 	// memory_mean the harder axis. Latency/cost stay OUT of the composite.
@@ -383,6 +448,10 @@ func Aggregate(runID string, perCase []protocol.CaseScore) protocol.ScoreReport 
 	case memN > 0:
 		composite = memMean
 	}
+	// Fold in observed tool-efficiency as a bounded multiplier (1.0 when no case
+	// ran under observed execution). Applied to the composite only — tool_mean,
+	// memory_mean, and per_category stay pure accuracy.
+	composite = round6(composite * ToolEfficiencyFactor(perCase))
 
 	perCat := make([]protocol.CategoryStat, 0, len(catOrder))
 	for _, cat := range catOrder {
@@ -434,7 +503,7 @@ func scoreCase(c protocol.ToolCase, resp protocol.RunResponse, ok bool) protocol
 		return cs
 	}
 
-	// Deterministic trajectory + argument scoring (A6): name-F1, arg-F1, and a
+	// Deterministic trajectory + argument scoring: name-F1, arg-F1, and a
 	// trajectory term (order credit × extra-call discipline).
 	score, notes := deterministicToolScore(c, resp.ToolCalls)
 	cs.ToolScore = score
@@ -569,9 +638,14 @@ func containsNumberToken(text, num string) bool {
 
 func isDigit(b byte) bool { return b >= '0' && b <= '9' }
 
-// numAttached reports whether b would make an adjacent digit run part of a larger
-// number (another digit, or a decimal/thousands separator).
-func numAttached(b byte) bool { return isDigit(b) || b == '.' || b == ',' }
+// numAttached reports whether b would make an adjacent digit run part of a
+// DIFFERENT number: another digit, a decimal/thousands separator, or a leading
+// sign. Counting '-'/'+' as attached stops the expected "5" from matching the
+// negation "-5" (a genuinely wrong answer) and stops a number embedded in a
+// hyphenated token ("order-42") from being credited.
+func numAttached(b byte) bool {
+	return isDigit(b) || b == '.' || b == ',' || b == '-' || b == '+'
+}
 
 // median returns the median of latency values (0 for empty input).
 func median(vals []int64) int64 {

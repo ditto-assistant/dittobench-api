@@ -1,7 +1,7 @@
-// Command benchcal is the offline DittoBench calibration harness (A9).
+// Command benchcal is the offline DittoBench calibration harness.
 //
 // It measures between-seed variance of the DETERMINISTIC tool suite — the clean,
-// judge-independent difficulty signal (§6.2, W1) — by generating N datasets
+// judge-independent difficulty signal — by generating N datasets
 // (rotating seed) and scoring each against the deterministic reference routing
 // policy (internal/refharness) in-process. No Docker, no OpenRouter key: the
 // only thing that varies between runs is the dataset, so the spread of tool_mean
@@ -36,11 +36,11 @@ import (
 
 // refMemoryCompetence is a FIXED (seed-independent) reference harness profile:
 // how well a mid-tier harness answers each v2 memory question type. Because the
-// suite stratifies the type mix by a fixed per-run quota (B3), applying a fixed
+// suite stratifies the type mix by a fixed per-run quota, applying a fixed
 // per-type score makes the structural memory_mean identical across seeds — i.e.
-// v2 removed v1's question-type-draw variance (W1). The residual real σ comes
+// v2 removed v1's question-type-draw variance. The residual real σ comes
 // from the LLM judge + harness stochasticity, which this hermetic pass cannot
-// see; it is measured by the hosted 30-seed run (§8 gate 1).
+// see; it is measured by the hosted 30-seed run.
 var refMemoryCompetence = map[string]float64{
 	"single-session-recall":  0.90,
 	"multi-session":          0.60,
@@ -163,7 +163,7 @@ func calibrate(runs, n, nMem int) Report {
 		Composite:        stat(composites),
 		PerCategory:      perCat,
 		NoiseFloorStddev: stat(floor).Stddev,
-		Note:             "Hermetic structural variance: tool σ = deterministic routing difficulty; memory σ ≈ 0 shows v2 stratification removed question-type-mix variance. Real champion-region composite σ (judge + harness noise) needs the hosted 30-seed run (§8 gate 1); the KOTH margin/score_tol retune (B8) assumes the design target σ ≤ 0.01 and must be reconfirmed there.",
+		Note:             "Hermetic structural variance: tool σ = deterministic routing difficulty; memory σ ≈ 0 shows v2 stratification removed question-type-mix variance. Real champion-region composite σ (judge + harness noise) needs the hosted 30-seed run; the KOTH margin/score_tol retune assumes the design target σ ≤ 0.01 and must be reconfirmed there.",
 	}
 }
 
@@ -175,7 +175,7 @@ func main() {
 	judgeAuditSeeds := flag.Int("judge-audit", 0, "run the judge-adjacency audit over N persona seeds (needs OPENROUTER_API_KEY) instead of the variance calibration")
 	flag.Parse()
 
-	// Judge-adjacency audit mode (§8.2): grade correct / near-miss / off-topic
+	// Judge-adjacency audit mode: grade correct / near-miss / off-topic
 	// responses with the real judge and check accept + reject rates.
 	if *judgeAuditSeeds > 0 {
 		rep, err := judgeAudit(*judgeAuditSeeds)

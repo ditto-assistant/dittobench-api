@@ -6,8 +6,8 @@ import (
 	"testing"
 )
 
-// TestBuildPlanDeterministic is the WP B1 golden test: same (seed, opts) ⇒
-// byte-identical plan. This is the reproducibility contract (§4.2, §11.3) — if
+// TestBuildPlanDeterministic is the golden test: same (seed, opts) ⇒
+// byte-identical plan. This is the reproducibility contract — if
 // any wall-clock, crypto-rand, or map-iteration nondeterminism creeps into the
 // plan layer, this fails.
 func TestBuildPlanDeterministic(t *testing.T) {
@@ -36,7 +36,7 @@ func TestBuildPlanDistinctSeeds(t *testing.T) {
 }
 
 // TestPlanStructure checks the plan contains the material every question type
-// (WP B3) needs: an update chain, a reversal, list facts, preferences, and
+// needs: an update chain, a reversal, list facts, preferences, and
 // near-miss distractors — and that no fact carries an empty canonical value.
 func TestPlanStructure(t *testing.T) {
 	p := BuildPlan(42, DefaultOpts())
@@ -148,7 +148,7 @@ func TestSessionsCoverFacts(t *testing.T) {
 }
 
 // TestFactValuePreservedInBeat ensures the template surface already carries the
-// canonical value verbatim — the invariant WP B2's LLM verification enforces.
+// canonical value verbatim — the invariant the LLM surface verification enforces.
 func TestFactValuePreservedInBeat(t *testing.T) {
 	p := BuildPlan(123, DefaultOpts())
 	beat := map[string]Beat{}

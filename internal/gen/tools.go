@@ -24,9 +24,13 @@ const paraphraseSystem = "You rewrite a single user message to a chat assistant 
 // (the case's concrete entity must survive — see preservesEntity); a rewrite
 // that errors or drops the entity falls back to the templated prompt and is
 // counted, so a paraphrase collapse is visible in ParaphraseStats rather than a
-// silent verbatim skip (v1's W5).
-func GenerateTools(ctx context.Context, r *rand.Rand, n int, frac float64, llm LLM, model string) ([]protocol.ToolCase, protocol.ParaphraseStats) {
-	cases, fillers := datagen.GenerateCasesWithFillers(r, r.Int63(), n)
+// silent verbatim skip.
+func GenerateTools(ctx context.Context, r *rand.Rand, seed int64, n int, frac float64, llm LLM, model string) ([]protocol.ToolCase, protocol.ParaphraseStats) {
+	// Pass the run's master seed (not a fresh draw): the case IDs and each
+	// result-usage prompt's needle subject derive from it, and the mock endpoint
+	// serves/scores the needle from the SAME seed (BuildFixture), so the entity a
+	// prompt asks about is exactly the one the tool returns.
+	cases, fillers := datagen.GenerateCasesWithFillers(r, seed, n)
 	var stats protocol.ParaphraseStats
 	if llm == nil || frac <= 0 {
 		return cases, stats

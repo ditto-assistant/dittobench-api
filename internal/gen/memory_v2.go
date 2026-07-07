@@ -19,7 +19,7 @@ type StagedCase struct {
 	Case         protocol.MemoryCase
 	RunAfterWave int
 	// UserID is the memory graph the case must be answered under (multi-graph
-	// isolation, C3 §7). Empty means the primary graph (PrimaryUser); isolation
+	// isolation). Empty means the primary graph (PrimaryUser); isolation
 	// cases set it explicitly so the pipeline scopes RunRequest.UserID per case.
 	UserID string
 }
@@ -32,14 +32,14 @@ type MemorySuite struct {
 	Stats        protocol.ParaphraseStats
 	TierBCases   int
 	SeedingWaves int
-	// LexicalGap is the query↔needle overlap telemetry (NoLiMa, §8.1): how much
+	// LexicalGap is the query↔needle overlap telemetry (NoLiMa): how much
 	// content wording the emitted questions share with their evidence, before and
 	// after the low-overlap rewrite.
 	LexicalGap protocol.LexicalGapStats
 }
 
-// GenerateMemorySuite is the DittoBench v2 memory generator (BENCHMARK-V2.md
-// §4–5). It builds a procedural persona universe (seed-only plan → LLM-realized
+// GenerateMemorySuite is the DittoBench v2 memory generator. It builds a
+// procedural persona universe (seed-only plan → LLM-realized
 // haystack → questions derived from ground truth), stratify-samples to the case
 // quota, and lays the result out across seeding tiers:
 //
@@ -47,7 +47,7 @@ type MemorySuite struct {
 //     links the pairs, so retrieval is tested in isolation.
 //   - Tier B (raw-pairs seeding): for a rawPairsFrac slice of questions, the
 //     evidence pairs are seeded WITHOUT prepared subjects — the harness must
-//     build its own subject index (the memory-construction test, §5.1).
+//     build its own subject index (the memory-construction test).
 //   - Tier C (staged ingestion): the haystack is split into nWaves waves by
 //     attribute cluster; the pipeline seeds a wave, runs the cases it unlocks,
 //     then seeds the next — memory built incrementally. nWaves=1 → single seed.
@@ -70,7 +70,7 @@ func GenerateMemorySuite(ctx context.Context, r *rand.Rand, seed int64, n int, f
 
 	questions := persona.DeriveQuestions(plan)
 
-	// Guarantee an abstention share (W6), stratify the remainder by type.
+	// Guarantee an abstention share, stratify the remainder by type.
 	var absPool, mainPool []persona.Question
 	for _, q := range questions {
 		if q.Abstain {
@@ -91,7 +91,7 @@ func GenerateMemorySuite(ctx context.Context, r *rand.Rand, seed int64, n int, f
 		}
 	}
 
-	// Tier-B selection (§5.1): a rawPairsFrac slice of the non-abstention
+	// Tier-B selection: a rawPairsFrac slice of the non-abstention
 	// questions is chosen; the evidence of each is seeded WITHOUT a prepared
 	// subject, so a subjects-first retriever cannot route to it — the harness
 	// must have built its own index. Pass 1 marks every fact claimed by a
@@ -149,7 +149,7 @@ func GenerateMemorySuite(ctx context.Context, r *rand.Rand, seed int64, n int, f
 	}
 
 	// realizeQuestion emits the final question text. An evidence-bearing question
-	// gets a NoLiMa low-overlap rewrite (query side, §8.1) — reword to share fewer
+	// gets a NoLiMa low-overlap rewrite (query side) — reword to share fewer
 	// content words with its stored fact, keeping the answer key; abstention /
 	// evidence-free questions get a plain meaning-preserving paraphrase. Records
 	// paraphrase telemetry AND, for measured questions, the overlap before/after so

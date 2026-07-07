@@ -81,7 +81,7 @@ The validator sends one `RunRequest` per case; the harness returns a
   ],
   "prompt_tokens": 320,
   "output_tokens": 64,
-  "latency_ms": 42
+  "latency_ms": 42          // ignored — the validator measures latency itself
 }
 ```
 
@@ -169,12 +169,21 @@ After running every case, the validator produces a `ScoreReport`.
 
 ## Scoring rules
 
+Per tool case:
+
 - `matched` = Σ over expected tools of `min(expected_count, observed_count)`.
 - `base` = `matched / total_expected`.
 - `penalty` = `0.1` per unexpected/extra call (skipped if `allow_extra_tools`).
 - `tool_score` = `clamp(base - penalty, 0, 1)`.
 - No-expected-tool cases score `1.0` iff the harness called nothing, else `0.0`.
-- `composite` = mean `tool_score`; `median_ms` = median per-case latency.
 
-> Practice scope is tool-calling + speed only. Token cost and memory recall are
-> scored by the on-chain validator, not here.
+`composite` is the mean `tool_score`. When a harness executes its calls through
+`tool_endpoint`, the validator scores the **observed** trajectory (not
+self-report) and folds a tool-efficiency factor (`≤1`) into the composite that
+penalizes overshooting the expected call budget on correctly-answered cases.
+`median_ms` is the median per-case latency, **measured by the validator** (the
+`/run` round trip); a self-reported `latency_ms` is ignored.
+
+> This local scope is tool-calling accuracy + efficiency; latency is measured and
+> reported but advisory. Memory recall and the memory/tool composite are scored by
+> the full `run_size` pipeline (and the on-chain validator), not here.

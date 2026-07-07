@@ -20,7 +20,7 @@ func typeMix(t *testing.T, seed int64, n int) map[string]int {
 	return mix
 }
 
-// TestMemoryTypeMixSeedIndependent is the WP A3 property: the per-question-type
+// TestMemoryTypeMixSeedIndependent checks the property: the per-question-type
 // case mix is identical across seeds at a given run size (only WHICH questions
 // are drawn varies). This removes the multinomial type-draw variance of v1.
 func TestMemoryTypeMixSeedIndependent(t *testing.T) {

@@ -65,6 +65,23 @@ func TestArgValueBoundaryNotSubstring(t *testing.T) {
 	}
 }
 
+func TestArgValueNumericBoundary(t *testing.T) {
+	c := protocol.ToolCase{
+		ID: "c", MaxToolCalls: 1,
+		ExpectedTools: []protocol.ToolSpec{{Name: "set_limit", RequiredArgs: map[string]string{"count": "5"}}},
+	}
+	good := detScore(c, call("set_limit", `{"count":5}`))
+	// "5.5" and "-5" both contain the digit "5" but are different numbers.
+	badDecimal := detScore(c, call("set_limit", `{"count":5.5}`))
+	badNegative := detScore(c, call("set_limit", `{"count":-5}`))
+	if !near(good, 1.0) {
+		t.Fatalf("exact numeric arg should be 1.0, got %v", good)
+	}
+	if badDecimal >= good || badNegative >= good {
+		t.Fatalf("5.5/-5 must not satisfy required 5: good=%v decimal=%v negative=%v", good, badDecimal, badNegative)
+	}
+}
+
 func TestForbiddenArgPenalized(t *testing.T) {
 	c := protocol.ToolCase{
 		ID: "c", MaxToolCalls: 1,

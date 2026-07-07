@@ -10,7 +10,7 @@ import (
 	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
 )
 
-// Judge-adjacency audit (BENCHMARK-V2 review §8.2). LoCoMo's judge accepted
+// Judge-adjacency audit. LoCoMo's judge accepted
 // 62.81% of intentionally wrong-but-topically-adjacent answers, so a benchmark
 // whose key is sound can still be corrupted by a lenient judge. This audit feeds
 // the REAL judge three response classes per derived question and checks it:
@@ -26,15 +26,15 @@ import (
 
 // JudgeAuditReport is the audit outcome.
 type JudgeAuditReport struct {
-	Model            string  `json:"model"`
-	Cases            int     `json:"cases"`
-	AcceptRate       float64 `json:"accept_rate"`         // correct answers judged correct (sensitivity)
-	AdjacentReject   float64 `json:"adjacent_reject_rate"` // wrong-adjacent judged wrong (the LoCoMo failure)
-	OffTopicReject   float64 `json:"offtopic_reject_rate"`
-	JudgeCalls       int     `json:"judge_calls"` // responses that reached the LLM judge (deterministic miss)
-	AcceptThreshold  float64 `json:"accept_threshold"`
-	RejectThreshold  float64 `json:"reject_threshold"`
-	Pass             bool    `json:"pass"`
+	Model           string  `json:"model"`
+	Cases           int     `json:"cases"`
+	AcceptRate      float64 `json:"accept_rate"`          // correct answers judged correct (sensitivity)
+	AdjacentReject  float64 `json:"adjacent_reject_rate"` // wrong-adjacent judged wrong (the LoCoMo failure)
+	OffTopicReject  float64 `json:"offtopic_reject_rate"`
+	JudgeCalls      int     `json:"judge_calls"` // responses that reached the LLM judge (deterministic miss)
+	AcceptThreshold float64 `json:"accept_threshold"`
+	RejectThreshold float64 `json:"reject_threshold"`
+	Pass            bool    `json:"pass"`
 }
 
 const offTopicResp = "I don't think that's something we ever went over; let's move on to something else."

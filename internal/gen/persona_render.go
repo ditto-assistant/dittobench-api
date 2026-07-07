@@ -11,15 +11,15 @@ import (
 	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
 )
 
-// Package note (WP B2 — surface realization, BENCHMARK-V2.md §4.1 Layer 2):
+// Package note (surface realization, Layer 2):
 // the persona plan (internal/persona) is pure ground truth; this file renders
 // its session beats into natural user/assistant MemoryPairs with the pinned
 // generator LLM, VERIFYING that each fact's canonical value survives realization
 // before accepting it. On LLM error or failed verification it keeps the beat's
-// deterministic template surface — never a silent drop (fixes v1's W5). Because
+// deterministic template surface — never a silent drop. Because
 // the scoring-relevant content (the canonical value) is always present whether
 // the LLM rendering or the template is used, the dataset stays reproducible from
-// (seed, bench_version) at the plan level even when exact wording varies (§4.2).
+// (seed, bench_version) at the plan level even when exact wording varies.
 
 // beatSpacingMinutes is the fixed intra-session spacing between consecutive
 // beats' timestamps (deterministic ordering within a session).
@@ -31,7 +31,7 @@ const personaTimeSlackDays = 7
 
 // RenderHaystack realizes a persona plan into a haystack of MemoryPairs (one per
 // beat) and returns the fact→pair evidence map so the question-derivation layer
-// (B3) can locate — or, for abstention, withhold — a fact's evidence. A fraction
+// can locate — or, for abstention, withhold — a fact's evidence. A fraction
 // `frac` of beats are LLM-realized (fact beats verified against their canonical
 // value; noise beats have no value to preserve); the rest keep their template
 // surface. Timestamps derive from each session's seed-set DayOffset anchored
@@ -93,7 +93,7 @@ func RenderHaystack(ctx context.Context, r *rand.Rand, plan *persona.Plan, frac 
 }
 
 // realizeBeat LLM-rewrites one beat's user/assistant turn, preserving all facts.
-// It reuses the A2 pair-paraphrase machinery (retry-once, JSON extraction,
+// It reuses the pair-paraphrase machinery (retry-once, JSON extraction,
 // number/date preservation) and ADDS the persona-plan canonical-value check: the
 // fact's exact value token must survive verbatim (case-insensitive) or the
 // rewrite is rejected and the template kept. canonicalValue "" (noise beats)
@@ -113,7 +113,7 @@ func realizeBeat(ctx context.Context, llm LLM, model, user, asst, canonicalValue
 // (case-insensitive containment). An empty value is trivially preserved. This is
 // the plan-level fact check that makes the reproducibility contract hold: the
 // answer token a memory case is graded on is guaranteed present in the seeded
-// pair regardless of surface wording (§4.2).
+// pair regardless of surface wording.
 func preservesValue(rewritten, canonicalValue string) bool {
 	v := strings.TrimSpace(canonicalValue)
 	if v == "" {

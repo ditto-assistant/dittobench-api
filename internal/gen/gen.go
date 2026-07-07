@@ -56,11 +56,11 @@ type Profile struct {
 	Distractors    int     // (legacy LongMemEval knob; unused by the v2 persona engine)
 	ParaphraseFrac float64 // fraction of prompts/pairs to LLM-paraphrase [0,1]
 	// Waves is the number of staged Tier-C seeding waves (1 = single seed).
-	// RawPairsFrac is the fraction of memory questions seeded pairs-only (Tier B,
-	// §5.1). small stays a single Tier-A wave so the smoke path is cheap + simple.
+	// RawPairsFrac is the fraction of memory questions seeded pairs-only (Tier B).
+	// small stays a single Tier-A wave so the smoke path is cheap + simple.
 	Waves        int
 	RawPairsFrac float64
-	// IsoCases is the number of multi-graph isolation cases (C3 §7): a second
+	// IsoCases is the number of multi-graph isolation cases: a second
 	// persona is seeded under a different user_id and these cases query one user
 	// while the other holds a conflicting value. 0 keeps the small/smoke path
 	// single-user and cheap.

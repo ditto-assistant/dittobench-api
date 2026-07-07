@@ -10,7 +10,7 @@ import (
 	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
 )
 
-// User graph identifiers for multi-graph isolation (Phase C / C3, §7). The
+// User graph identifiers for multi-graph isolation (Phase C). The
 // primary persona is seeded under PrimaryUser (the historical default "miner");
 // a second persona is seeded under SecondaryUser. Isolation cases then query one
 // user while the OTHER user's graph holds a conflicting value for the same
@@ -41,7 +41,7 @@ func isolationOpts() persona.Opts {
 	return persona.Opts{Sessions: 4, Projects: 3, Trips: 2, Pets: 1, UpdateChains: 1, Reversals: 1, DecoyPeople: 3, DomainItems: 3, LongChain: 0}
 }
 
-// GenerateIsolation builds the multi-graph isolation layer (C3). It is a pure
+// GenerateIsolation builds the multi-graph isolation layer. It is a pure
 // function of (seed, primaryN, nWaves, isoCases): it rebuilds the primary plan
 // from the seed (BuildPlan is pure) to align isolation cases with the primary
 // seeding waves, draws a distinct secondary persona, and emits up to isoCases
@@ -100,11 +100,12 @@ func GenerateIsolation(ctx context.Context, r *rand.Rand, seed int64, primaryN, 
 			}
 			cases = append(cases, StagedCase{
 				Case: protocol.MemoryCase{
-					ID:             fmt.Sprintf("iso-a-%04d-%s", i, a),
-					QuestionID:     "iso-a-" + a,
-					QuestionType:   "isolation",
-					Question:       q.Text,
-					ExpectedAnswer: q.Answer,
+					ID:              fmt.Sprintf("iso-a-%04d-%s", i, a),
+					QuestionID:      "iso-a-" + a,
+					QuestionType:    "isolation",
+					Question:        q.Text,
+					ExpectedAnswer:  q.Answer,
+					ForbiddenAnswer: sCur[a], // the value B's graph holds — leaking it is wrong
 				},
 				RunAfterWave: caseUnlockWave(q, pFW),
 				UserID:       PrimaryUser,
@@ -116,11 +117,12 @@ func GenerateIsolation(ctx context.Context, r *rand.Rand, seed int64, primaryN, 
 			}
 			cases = append(cases, StagedCase{
 				Case: protocol.MemoryCase{
-					ID:             fmt.Sprintf("iso-b-%04d-%s", i, a),
-					QuestionID:     "iso-b-" + a,
-					QuestionType:   "isolation",
-					Question:       q.Text,
-					ExpectedAnswer: q.Answer,
+					ID:              fmt.Sprintf("iso-b-%04d-%s", i, a),
+					QuestionID:      "iso-b-" + a,
+					QuestionType:    "isolation",
+					Question:        q.Text,
+					ExpectedAnswer:  q.Answer,
+					ForbiddenAnswer: pCur[a], // the value A's graph holds — leaking it is wrong
 				},
 				RunAfterWave: 0, // B is seeded once, up front
 				UserID:       SecondaryUser,

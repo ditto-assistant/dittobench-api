@@ -6,7 +6,7 @@ import (
 	"sort"
 )
 
-// FactKind classifies a fact for question derivation (WP B3).
+// FactKind classifies a fact for question derivation.
 type FactKind string
 
 const (
@@ -24,7 +24,7 @@ const (
 	KindOpinion FactKind = "opinion"
 	// KindDistractor is a near-miss decoy about another entity, drawn from the
 	// SAME pools as a target fact (same attribute, different entity/value). It is
-	// never a correct answer; it exists to pressure retrieval (§4.1).
+	// never a correct answer; it exists to pressure retrieval.
 	KindDistractor FactKind = "distractor"
 )
 
@@ -39,7 +39,7 @@ const (
 // Fact is a typed atom of the persona universe: (entity, attribute, value) with
 // a creation session and timeline position. Value is the CANONICAL answer token
 // — a memory answer is checked for normalized containment of Value verbatim, so
-// it must survive surface realization unchanged (verified in WP B2). Display is
+// it must survive surface realization unchanged (verified in Layer 2). Display is
 // the natural phrase used when the fact is spoken in a beat.
 type Fact struct {
 	ID        string
@@ -61,12 +61,12 @@ type Fact struct {
 	// UserText / AsstText are the Layer-1 TEMPLATE rendering of the beat that
 	// introduces this fact — deterministic, always carrying Value verbatim. They
 	// are copied into the fact's session Beat and are the fallback surface if LLM
-	// realization (WP B2) fails verification.
+	// realization fails verification.
 	UserText string
 	AsstText string
 }
 
-// Beat is one turn-pair script in a session. A fact beat renders (WP B2) into a
+// Beat is one turn-pair script in a session. A fact beat renders into a
 // user/assistant MemoryPair that asserts Fact; a noise beat renders into
 // on-topic chit-chat with no recoverable fact.
 type Beat struct {
@@ -74,7 +74,7 @@ type Beat struct {
 	FactID string // set for BeatFact
 	Topic  string // set for BeatNoise
 	// UserText / AsstText are the Layer-1 TEMPLATE rendering — deterministic,
-	// always present, and the fallback if LLM surface realization (B2) fails
+	// always present, and the fallback if LLM surface realization fails
 	// verification. They already carry Fact.Value verbatim.
 	UserText string
 	AsstText string
@@ -112,7 +112,7 @@ func (p *Plan) FactByID(id string) (Fact, bool) {
 
 // Opts are the deterministic (NON-entropy) size knobs for a plan. They are part
 // of the plan's identity alongside the seed: same (seed, Opts) ⇒ identical
-// plan. WP B3 derives Opts from the run profile; DefaultOpts is used by tests
+// plan. Opts are derived from the run profile; DefaultOpts is used by tests
 // and as the medium baseline.
 type Opts struct {
 	Sessions     int // number of conversation sessions
@@ -299,8 +299,8 @@ var prefSpecs = []prefSpec{
 // domainSpec bundles the professional-domain fact families layered onto a
 // persona (software / medical / legal). Exactly one domain is chosen per seed
 // (deterministically) and its scalars + list are emitted alongside the universal
-// personal facts, so every run carries a specialist register (BENCHMARK-V2 §4.1,
-// motivated by BEIR's cross-domain retrieval collapse and LongMemEval-V2's
+// personal facts, so every run carries a specialist register (motivated by
+// BEIR's cross-domain retrieval collapse and LongMemEval-V2's
 // professional reframe). Adding a family here flows through DeriveQuestions with
 // no change to its loops — it reads currentScalarFacts / listAttributesPresent
 // and looks phrasing up by attribute (scalarAsk / listCountAsk / factLabel).
@@ -424,7 +424,7 @@ var domains = []domainSpec{
 // BuildPlan produces the Layer-1 plan for (seed, opts). It is a PURE function:
 // the only entropy source is a math/rand stream seeded from seed; there is no
 // wall clock, no crypto-rand, and every iteration is over an ordered slice (no
-// Go map range), so the same inputs yield a byte-identical plan (§4.2, §11.3).
+// Go map range), so the same inputs yield a byte-identical plan.
 func BuildPlan(seed int64, opts Opts) *Plan {
 	opts = opts.normalized()
 	r := rand.New(rand.NewSource(seed))

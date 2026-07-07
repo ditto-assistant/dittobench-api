@@ -19,16 +19,17 @@ identical, so you can't overfit or build a lookup table against the practice set
 
 ## Scope
 
-The hosted practice API covers **tool-calling correctness + speed + memory
-recall** (the full DittoBench dimensions), using a self-contained slim
-LongMemEval bundle baked into the service. Crate **building** is the on-chain
+The hosted practice API covers **tool-calling correctness + memory recall + tool
+efficiency**, using a self-contained slim LongMemEval bundle baked into the
+service. Crate **building** is the on-chain
 validator's job (the hosted service has no Docker daemon) — to practice, expose
 a reachable harness and submit its URL.
 
 | Dimension              | Off-chain practice (this repo) | On-chain validator |
 | ---------------------- | ------------------------------ | ------------------ |
 | Tool-calling accuracy  | ✅                             | ✅                 |
-| Wall-clock / latency   | ✅                             | ✅                 |
+| Tool efficiency        | ✅ (observed cases)            | ✅                 |
+| Latency (measured)     | ✅ (reported)                  | ✅                 |
 | Memory / embeddings    | ✅ (`run_size`)                | ✅                 |
 | Fresh anti-cheat data  | ✅                             | ✅                 |
 | Crate Docker build     | ❌ (use `harness_url`)         | ✅                 |
@@ -228,10 +229,27 @@ curl localhost:8000/v1/runs/<run_id>
 
 ## Scoring
 
-Per case: `matched / total_expected`, minus `0.1` per unexpected extra call
-(unless the case allows extras), clamped to `[0, 1]`. No-expected-tool cases
-score `1.0` only if the harness called nothing. The composite is the mean tool
-score; latency is reported as the median across cases.
+**Tool cases** (both modes): per case, `matched / total_expected` minus `0.1`
+per unexpected extra call (unless the case allows extras), clamped to `[0, 1]`;
+a no-expected-tool case scores `1.0` only if the harness called nothing. In the
+full `run_size` pipeline each tool case also earns an LLM response-quality half
+(`0.5·accuracy + 0.5·quality`).
+
+**Memory cases** (`run_size` only): graded credit `0.7·correctness +
+0.3·grounding`, resolved by a deterministic answer match where possible and an
+LLM judge otherwise.
+
+**Composite**: the mean tool score in direct mode; in the full pipeline
+`0.5·tool_mean + 0.5·memory_mean`, then multiplied by an observed tool-efficiency
+factor (`≤1`) that gently penalizes harnesses whose observed tool trajectories
+overshoot the expected call budget on cases they answered correctly. Efficiency
+applies only to cases the validator watched execute through the tool endpoint; a
+remote harness that never routes through it is scored on accuracy alone.
+
+**Latency** is measured by the validator (the `/run` round trip, never
+self-reported) and reported as `median_ms`. It is advisory telemetry — accuracy
+and efficiency drive the score, not wall-clock, which on a remote harness mostly
+reflects network and hardware.
 
 ## Anti-overfit note
 

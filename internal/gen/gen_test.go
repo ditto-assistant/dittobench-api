@@ -56,7 +56,7 @@ func TestFreshSeedUnique(t *testing.T) {
 
 func TestGenerateToolsNilLLM(t *testing.T) {
 	r := NewRNG(7)
-	cases, _ := GenerateTools(context.Background(), r, 10, 0.5, nil, "model")
+	cases, _ := GenerateTools(context.Background(), r, 7, 10, 0.5, nil, "model")
 	if len(cases) != 10 {
 		t.Fatalf("expected 10 cases, got %d", len(cases))
 	}
@@ -70,9 +70,9 @@ func TestGenerateToolsNilLLM(t *testing.T) {
 func TestGenerateToolsParaphrasePreservesGroundTruth(t *testing.T) {
 	// frac=1 → every prompt rewritten; ground truth (expected_tools/behavior)
 	// must be unchanged vs the nil-LLM baseline.
-	base, _ := GenerateTools(context.Background(), NewRNG(99), 12, 0, nil, "m")
+	base, _ := GenerateTools(context.Background(), NewRNG(99), 99, 12, 0, nil, "m")
 	llm := &upperLLM{}
-	para, _ := GenerateTools(context.Background(), NewRNG(99), 12, 1.0, llm, "m")
+	para, _ := GenerateTools(context.Background(), NewRNG(99), 99, 12, 1.0, llm, "m")
 
 	if len(base) != len(para) {
 		t.Fatalf("length mismatch")

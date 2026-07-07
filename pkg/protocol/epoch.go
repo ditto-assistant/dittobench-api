@@ -3,7 +3,7 @@ package protocol
 import "time"
 
 // BenchVersion is the scoring benchmark version stamped into every run's
-// details. The §9 policy — bump it with EVERY scoring-affecting change so old and
+// details. The policy — bump it with EVERY scoring-affecting change so old and
 // new ledger scores are never silently compared, and re-score the ledger on a
 // bump — exists to protect a LIVE ledger's comparability. It only matters once
 // miners are actually scoring against a version.
@@ -22,19 +22,19 @@ import "time"
 //     procedural persona/fact-graph generator (internal/persona +
 //     gen.GenerateMemoryV2), difficulty tiers, near-miss distractors, seeding
 //     tiers, dataset hashing, the 0.5/0.5 composite rebalance.
-//   - Phase C — observed execution (§7): the validator serves a mock
+//   - Phase C — observed execution: the validator serves a mock
 //     tool-execution endpoint (RunRequest.ToolEndpoint) and scores a tool case on
-//     the OBSERVED trajectory rather than self-report (retires W3); result-usage
-//     scoring (C2) and multi-graph isolation (C3).
+//     the OBSERVED trajectory rather than self-report; result-usage
+//     scoring and multi-graph isolation.
 //
 // All three ship together as version 2 while v2 is pre-launch.
 const BenchVersion = 2
 
 // DatasetEpoch is the pinned reference "as-of" instant for all generated
 // datasets. Benchmark generation must be a pure function of the run seed and
-// bench_version (the reproducibility contract in ditto-subnet
-// docs/BENCHMARK-V2.md: same (seed, bench_version) => byte-identical plan-layer
-// dataset). Wall-clock time (time.Now) is therefore banned from the generation
+// bench_version (the reproducibility contract: same (seed, bench_version) =>
+// byte-identical plan-layer dataset). Wall-clock time (time.Now) is therefore
+// banned from the generation
 // path; haystack base dates are drawn *backward* from this fixed epoch instead,
 // and the GeneratedAt envelope fields carry it verbatim so two runs of the same
 // seed diff clean.

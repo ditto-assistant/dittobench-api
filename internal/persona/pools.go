@@ -1,13 +1,13 @@
-// Package persona is the DittoBench v2 plan layer (BENCHMARK-V2.md §4.1). It
+// Package persona is the DittoBench v2 plan layer. It
 // generates a fresh, procedural "persona universe" — a fact graph plus the
 // session scripts that introduce those facts — as a PURE function of a single
 // int64 seed. No wall clock, no crypto-rand, no map-iteration order: same seed
-// ⇒ byte-identical plan (the reproducibility contract, §4.2 / §11.3).
+// ⇒ byte-identical plan (the reproducibility contract).
 //
 // The plan is Layer 1 of the two-layer engine: the deterministic ground truth.
-// Layer 2 (surface realization, WP B2) renders each beat into a natural
+// Layer 2 (surface realization) renders each beat into a natural
 // user/assistant pair with an LLM, verified against the plan's canonical
-// values; question derivation and difficulty tiers (WP B3) read the plan to
+// values; question derivation and difficulty tiers read the plan to
 // build the memory suite. This package intentionally has NO LLM dependency —
 // it is the thing everything else is checked against.
 //
@@ -20,9 +20,9 @@
 //	firstNames × lastNames × cities(residence) × occupations × companies ×
 //	carModels × cities(hometown) × firstNames(partner) × universities
 //	= 48 × 40 × 40 × 40 × 32 × 28 × 40 × 48 × 28
-//	≈ 3.0 × 10¹⁵  distinct skeletons.
+//	≈ 1.5 × 10¹⁴  distinct skeletons.
 //
-// That is six orders of magnitude past the §B1 ≥10⁹ target BEFORE counting the
+// That is five orders of magnitude past the ≥10⁹ target BEFORE counting the
 // list attributes (projects/trips/pets, each a multi-draw subset), the
 // preference and opinion facts, the update/reversal choices, the near-miss
 // distractor draws, or the seed-derived timeline — every one of which
@@ -31,7 +31,7 @@ package persona
 
 // The pools are the combinatorial vocabulary of the persona universe. They are
 // deliberately large and disjoint enough that same-attribute/different-value
-// near-miss distractors (§4.1) are easy to draw. Values are clean canonical
+// near-miss distractors are easy to draw. Values are clean canonical
 // tokens: a memory answer is checked by normalized containment against the
 // value verbatim (scorer.deterministicMemoryHit), so each entry is a single,
 // unambiguous phrase with no trailing punctuation.
@@ -170,7 +170,7 @@ var hobbies = []string{
 // first-person noun phrases so they slot cleanly into the noiseTemplates below
 // and read as coherent, topic-continuous filler — not the semantically-disjoint
 // padding that inflates lexical-retrieval scores (a well-attested memory-
-// benchmark validity critique; BENCHMARK-V2 §4.1).
+// benchmark validity critique).
 var noiseTopics = []string{
 	"the weather this week", "a film I watched last night", "my weekend plans",
 	"a book I've been reading", "the traffic on my commute", "a new coffee place downtown",
@@ -193,7 +193,7 @@ var noiseTemplates = []struct{ user, asst string }{
 	{"Small thing, but %s has been a bit of a saga.", "Ha — %s does sound like a saga."},
 }
 
-// --- Professional-domain pools (BENCHMARK-V2 §4.1, domain register) ---
+// --- Professional-domain pools (domain register) ---
 //
 // Every persona is assigned ONE professional domain (software / medical / legal)
 // whose fact families layer onto the universal personal facts. The register

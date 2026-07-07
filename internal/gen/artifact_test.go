@@ -2,30 +2,53 @@ package gen
 
 import (
 	"context"
+	"sort"
 	"testing"
 
+	"github.com/ditto-assistant/dittobench-api/internal/toolexec"
 	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
 )
 
-// artifactFor assembles the DatasetArtifact the pipeline hashes, from a
-// deterministic (nil-LLM) generation of the same (seed, n).
+// artifactFor assembles the full DatasetArtifact the pipeline hashes, from a
+// deterministic (nil-LLM) generation of the same (seed, n): tool cases, their
+// mock-tool fixtures, the memory waves and cases, and the multi-graph isolation
+// layer. It mirrors runSizeJob's assembly so the reproducibility test exercises
+// every generator whose output the digest depends on — not memory cases alone.
 func artifactFor(seed int64, n int) DatasetArtifact {
-	suite := GenerateMemorySuite(context.Background(), NewRNG(11), seed, n, 0, 2, 0.3, nil, "")
-	flat := make([]protocol.MemoryCase, 0, len(suite.Cases))
+	ctx := context.Background()
+	r := NewRNG(seed)
+	toolCases, _ := GenerateTools(ctx, r, seed, n, 0, nil, "")
+	suite := GenerateMemorySuite(ctx, r, seed, n, 0, 2, 0.3, nil, "")
+	iso := GenerateIsolation(ctx, r, seed, n, 2, 4)
+	suite.Cases = append(suite.Cases, iso.Cases...)
+
+	flat := make([]ArtifactCase, 0, len(suite.Cases))
 	for _, sc := range suite.Cases {
-		flat = append(flat, sc.Case)
+		flat = append(flat, ArtifactCase{MemoryCase: sc.Case, UserID: sc.UserID, RunAfterWave: sc.RunAfterWave})
+	}
+	fixtures := make([]FixtureDigest, 0, len(toolCases))
+	for _, c := range toolCases {
+		f := toolexec.BuildFixture(seed, c)
+		fixtures = append(fixtures, FixtureDigest{CaseID: c.ID, Needle: f.NeedleText()})
+	}
+	sort.Slice(fixtures, func(i, j int) bool { return fixtures[i].CaseID < fixtures[j].CaseID })
+	memWaves := suite.Waves
+	if len(iso.SecondaryWave.Pairs) > 0 {
+		memWaves = append(append([]protocol.SeedRequest{}, suite.Waves...), iso.SecondaryWave)
 	}
 	return DatasetArtifact{
 		Seed:         seed,
 		BenchVersion: protocol.BenchVersion,
 		GeneratedAt:  protocol.DatasetEpochRFC3339,
-		MemoryWaves:  suite.Waves,
+		ToolCases:    toolCases,
+		MemoryWaves:  memWaves,
 		MemoryCases:  flat,
+		ToolFixtures: fixtures,
 	}
 }
 
 // TestDatasetHashStable checks a hash is stable across repeated hashing of the
-// same artifact bytes (the trivial dispute-replay direction of gate 6).
+// same artifact bytes (the trivial dispute-replay direction).
 func TestDatasetHashStable(t *testing.T) {
 	a := artifactFor(1234, 20)
 	h1, b1, err := a.SHA256Hex()
@@ -44,7 +67,7 @@ func TestDatasetHashStable(t *testing.T) {
 	}
 }
 
-// TestDatasetHashReproducibleFromSeed is gate 6 (deterministic-render side):
+// TestDatasetHashReproducibleFromSeed is the deterministic-render side:
 // same (seed, bench_version) with no LLM surface variation ⇒ identical
 // dataset ⇒ identical dataset_sha256.
 func TestDatasetHashReproducibleFromSeed(t *testing.T) {

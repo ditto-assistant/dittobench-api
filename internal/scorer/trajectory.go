@@ -9,7 +9,7 @@ import (
 	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
 )
 
-// Deterministic tool-trajectory scoring (A6, §5.2). Ported from the backend's
+// Deterministic tool-trajectory scoring. Ported from the backend's
 // pkg/dittobench/scorers/toolcall.go (name-F1 / arg-F1 / trajectory), extended
 // with explicit order credit for multi-hop expected sequences. The composite
 // weights name-F1, arg-F1, and the trajectory term (order × extra-call
@@ -198,8 +198,14 @@ func argValueEqual(got any, want string) bool {
 		gotStr = string(b)
 	}
 	gotStr = strings.ToLower(strings.TrimSpace(gotStr))
-	// Whole-token/phrase containment (not raw substring) so a short enum value
-	// like "low" is not satisfied by "yellow"/"below".
+	// A numeric expected value matches only as a whole number token, so "5" is
+	// not credited by an observed "5.5", "-5", or "15" (same boundary rule the
+	// memory grader uses). A non-numeric value uses whole-token/phrase
+	// containment (not raw substring) so a short enum like "low" is not satisfied
+	// by "yellow"/"below".
+	if isPureNumber(want) {
+		return containsNumberToken(gotStr, want)
+	}
 	return gotStr == want || containsBoundedPhrase(gotStr, want)
 }
 

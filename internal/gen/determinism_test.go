@@ -19,12 +19,12 @@ func marshal(t *testing.T, v any) string {
 	return string(b)
 }
 
-// TestMemoryPlanByteIdenticalPerSeed is the WP A1 golden test: with wall-clock
+// TestMemoryPlanByteIdenticalPerSeed is the golden test: with wall-clock
 // time removed (protocol.DatasetEpoch) and map iteration sorted, the plan layer
 // (the /seed haystack + the memory cases) is a pure function of the seed. Two
 // GenerateMemory runs at the same seed must be byte-identical. nil LLM keeps
 // this to the plan layer (no surface-realization LLM) per the reproducibility
-// contract in docs/BENCHMARK-V2.md §4.2.
+// contract.
 func TestMemoryPlanByteIdenticalPerSeed(t *testing.T) {
 	const seed = 20260706
 	seedA, casesA, _, err := GenerateMemory(context.Background(), NewRNG(seed), 8, 25, 0, nil, "m", "", "")

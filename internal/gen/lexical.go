@@ -2,7 +2,7 @@ package gen
 
 import "strings"
 
-// Lexical-overlap measurement for the query↔needle gap (BENCHMARK-V2 review §8.1).
+// Lexical-overlap measurement for the query↔needle gap.
 //
 // NoLiMa (arXiv:2502.05167) shows that when a benchmark question shares content
 // words with the stored fact ("What is my favorite COLOR?" ↔ "my favorite COLOR

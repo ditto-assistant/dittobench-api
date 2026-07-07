@@ -8,7 +8,7 @@ import (
 // questionGapSystem instructs the generator to reword a benchmark question so it
 // shares as few words as possible with a memory snippet, WITHOUT answering it and
 // WITHOUT changing what is asked. This is the query side of the NoLiMa
-// literal-match mitigation (review §8.1): the answer key is unchanged, but a
+// literal-match mitigation: the answer key is unchanged, but a
 // retriever can no longer key on wording shared between the question and the
 // stored fact.
 const questionGapSystem = "You rewrite a single benchmark question so it shares as FEW words as possible with a given MEMORY SNIPPET, while preserving its exact meaning and what it asks for. " +

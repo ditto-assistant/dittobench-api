@@ -494,14 +494,14 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	s.store.SetStage(runID, store.StatusGenerating, 0, total)
 	rng := gen.NewRNG(seed)
 	genModel := llm.GeneratorModel()
-	toolCases, toolPara := gen.GenerateTools(ctx, rng, prof.Tools, prof.ParaphraseFrac, llmClient, genModel)
+	toolCases, toolPara := gen.GenerateTools(ctx, rng, seed, prof.Tools, prof.ParaphraseFrac, llmClient, genModel)
 	// v2 memory engine (bench_version 2): a fresh procedural persona universe
-	// per seed replaces the static LongMemEval fixture (BENCHMARK-V2 §4–5). The
+	// per seed replaces the static LongMemEval fixture. The
 	// plan is a pure function of the master `seed`; realization + selection share
 	// the run rng. The suite lays cases out across seeding tiers (A prepared, B
 	// raw-pairs) and staged Tier-C waves.
 	memSuite := gen.GenerateMemorySuite(ctx, rng, seed, prof.Mem, prof.ParaphraseFrac, prof.Waves, prof.RawPairsFrac, llmClient, genModel)
-	// Multi-graph isolation (C3, §7): seed a second persona under a different
+	// Multi-graph isolation: seed a second persona under a different
 	// user_id and add cross-user isolation cases. The secondary graph is template-
 	// rendered (no generator tokens). Cases carry the user_id they must be answered
 	// under; they merge into the primary staged-case stream.
@@ -519,16 +519,20 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		para.Attempted, para.Applied, para.Retried, para.Fallback)
 	total = prof.Tools + len(memSuite.Cases) // actual case count for progress
 
-	// Dataset hashing + optional artifact persistence (BENCHMARK-V2 §4.2, B5):
+	// Dataset hashing + optional artifact persistence:
 	// hash the fully-rendered dataset so a dispute can be pinned to exact bytes;
 	// when DITTOBENCH_ARTIFACT_DIR is set, persist the artifact keyed by run_id
 	// (the local-file form of the "upload rendered dataset" persistence; a
 	// platform bucket is the drop-in replacement for os.WriteFile here).
-	memCasesFlat := make([]protocol.MemoryCase, 0, len(memSuite.Cases))
+	memCasesFlat := make([]gen.ArtifactCase, 0, len(memSuite.Cases))
 	for _, sc := range memSuite.Cases {
-		memCasesFlat = append(memCasesFlat, sc.Case)
+		memCasesFlat = append(memCasesFlat, gen.ArtifactCase{
+			MemoryCase:   sc.Case,
+			UserID:       sc.UserID,
+			RunAfterWave: sc.RunAfterWave,
+		})
 	}
-	// Phase C (§7): derive each tool case's deterministic mock-tool environment up
+	// Phase C: derive each tool case's deterministic mock-tool environment up
 	// front so its served content (the coined needle) is pinned in the hashed
 	// dataset artifact. The Fixtures back the mock endpoint stood up below.
 	toolFixtures := make([]toolexec.Fixture, len(toolCases))
@@ -613,10 +617,10 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		}
 	}
 
-	// Phase C observed execution (§7): stand up the validator's mock tool
+	// Phase C observed execution: stand up the validator's mock tool
 	// endpoint. It serves deterministic, seed-derived results for external-world
 	// tools AND records the real trajectory, so tool cases are scored on what the
-	// validator observed rather than the harness's self-report (retires W3).
+	// validator observed rather than the harness's self-report.
 	// Registered for every case (tool + memory) so a harness may route any
 	// non-memory call through it during any case.
 	toolSrv := toolexec.NewServer()
@@ -645,7 +649,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		cs := scorer.ScoreToolCaseObserved(c, resp, runErr == nil, observed)
 		injected := false
 		if datagen.IsResultUsage(c.Category) {
-			// Result-usage (C2): deterministic — trajectory + whether the answer
+			// Result-usage: deterministic — trajectory + whether the answer
 			// carried the served needle value. No LLM quality judge (the needle is a
 			// fabricated value only the executed tool could reveal).
 			cs = scorer.ComposeResultUsage(cs, resp.FinalText, toolFixtures[i].NeedleValue())
@@ -669,7 +673,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		s.store.AppendPartial(runID, cs)
 	}
 
-	// 5. memory cases — staged Tier-C ingestion (BENCHMARK-V2 §5.1): seed a wave,
+	// 5. memory cases — staged Tier-C ingestion: seed a wave,
 	//    then run the cases it unlocks (all their evidence is now seeded), then
 	//    the next wave. A single-wave run degrades to seed-then-run-all.
 	casesByWave := make([][]gen.StagedCase, memSuite.SeedingWaves)
@@ -684,7 +688,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		casesByWave[w] = append(casesByWave[w], sc)
 	}
 	// Seed the secondary isolation graph up front (a distinct user_id), so cross-
-	// user isolation cases can run in any wave (C3, §7).
+	// user isolation cases can run in any wave.
 	if len(iso.SecondaryWave.Pairs) > 0 {
 		s.store.SetStage(runID, store.StatusSeeding, len(perCase), total)
 		if _, err := runner.Seed(ctx, harnessURL, iso.SecondaryWave); err != nil {
@@ -717,7 +721,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		}
 	}
 
-	// Run-level LLM-availability gate (§11.3): a persistent judge outage would
+	// Run-level LLM-availability gate: a persistent judge outage would
 	// otherwise record a deflated but validly-signed score (every judged case
 	// scored 0). If a majority of the judge calls that were actually attempted
 	// failed (after their per-call retry), fail the RUN as infrastructure error
@@ -752,6 +756,14 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		ObservedToolCases: observedTool,
 		CappedToolCases:   cappedTool,
 		IsolationCases:    len(iso.Cases),
+		ToolEfficiency:    scorer.ToolEfficiencyFactor(perCase),
+		Models: &protocol.ModelInfo{
+			Generator:  genModel,
+			Judge:      judgeCfg.Model,
+			JudgeAudit: judgeCfg.ModelB,
+			Harness:    strings.TrimSpace(os.Getenv("DITTOBENCH_HARNESS_MODEL")),
+		},
+		PerCategory: report.PerCategory,
 	}
 	if memSuite.LexicalGap.Questions > 0 {
 		lg := memSuite.LexicalGap
@@ -765,7 +777,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		runID, protocol.BenchVersion, report.Composite, report.ToolMean, report.MemoryMean, observedTool, cappedTool, llmClient.Spent())
 }
 
-// startToolServer stands up the Phase C mock tool-execution endpoint (§7) on an
+// startToolServer stands up the Phase C mock tool-execution endpoint on an
 // ephemeral host port, serving h at POST /tool. It returns the URL the harness
 // should use (reachable from where the harness runs) and a stop func. The URL is
 // empty when the harness cannot reach our loopback port — a remote hosted
