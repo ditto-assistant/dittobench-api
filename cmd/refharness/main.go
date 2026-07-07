@@ -69,9 +69,19 @@ func handleRun(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad run body"})
 		return
 	}
+	calls := refharness.Route(req.UserInput, req.Tools)
+	finalText := "ok"
+	// Phase C observed execution (§7): when the validator advertises a mock tool
+	// endpoint, actually EXECUTE the routed tools through it (so the validator
+	// observes the trajectory) and incorporate the returned content into the
+	// answer. A pure function of (prompt, tools, seeded endpoint) — still
+	// deterministic, so the calibrator's difficulty signal is preserved.
+	if result, err := refharness.Execute(r.Context(), req.ToolEndpoint, req.CaseID, req.UserID, calls); err == nil && result != "" {
+		finalText = result
+	}
 	resp := protocol.RunResponse{
-		FinalText: "ok",
-		ToolCalls: refharness.Route(req.UserInput, req.Tools),
+		FinalText: finalText,
+		ToolCalls: calls,
 		LatencyMs: fixedLatencyMs,
 	}
 	writeJSON(w, http.StatusOK, resp)

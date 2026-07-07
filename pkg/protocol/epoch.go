@@ -13,7 +13,15 @@ import "time"
 // gen.GenerateMemoryV2), with difficulty tiers, near-miss distractors, seeding
 // tiers, dataset hashing, and the 0.5/0.5 composite rebalance. Every one of
 // those changes scoring, so they all ride this single bump.
-const BenchVersion = 3
+//
+// Phase C (version 4) — observed execution (§7): the validator serves a mock
+// tool-execution endpoint (RunRequest.ToolEndpoint) and scores a tool case on
+// the trajectory it OBSERVES the harness execute through that endpoint rather
+// than the harness's self-reported tool_calls (retires W3). An observable case
+// (every expected tool validator-served) whose harness does not execute through
+// the endpoint is capped (scorer.UnobservedCeiling) — a scoring change, hence the
+// bump. C2 (result-usage) and C3 (multi-graph isolation) ride this same version.
+const BenchVersion = 4
 
 // DatasetEpoch is the pinned reference "as-of" instant for all generated
 // datasets. Benchmark generation must be a pure function of the run seed and

@@ -21,6 +21,20 @@ type DatasetArtifact struct {
 	ToolCases    []protocol.ToolCase    `json:"tool_cases"`
 	MemoryWaves  []protocol.SeedRequest `json:"memory_waves"`
 	MemoryCases  []protocol.MemoryCase  `json:"memory_cases"`
+	// ToolFixtures pins the Phase C mock-tool content the validator served per
+	// case (§7). The content is a pure function of (seed, case), but recording the
+	// coined "needle" facts makes the served world explicit in the dispute
+	// artifact so a re-score sees identical tool results. Sorted by CaseID (no Go
+	// map) so the JSON stays byte-stable. Omitted before Phase C.
+	ToolFixtures []FixtureDigest `json:"tool_fixtures,omitempty"`
+}
+
+// FixtureDigest is the hashable snapshot of one case's mock-tool environment: the
+// case id and the coined needle its content tools embed (empty for cases whose
+// served tools return only a confirmation).
+type FixtureDigest struct {
+	CaseID string `json:"case_id"`
+	Needle string `json:"needle,omitempty"`
 }
 
 // Marshal returns the canonical JSON bytes of the artifact.

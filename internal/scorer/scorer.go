@@ -72,6 +72,46 @@ func ComposeTool(cs protocol.CaseScore, quality float64) protocol.CaseScore {
 	return cs
 }
 
+// UnobservedCeiling caps the composite of an OBSERVABLE tool case (every expected
+// tool is validator-served) that the harness did NOT execute through the mock
+// tool_endpoint (Phase C, §7). Its self-reported trajectory is untrusted (W3):
+// we cannot verify the tools actually ran, so the case is scored selection-only
+// and cannot reach full marks. Set at 0.5 so a right-tool self-report still earns
+// meaningful-but-capped credit, and a harness is materially rewarded for
+// executing through the endpoint (where the full, verified score is reachable).
+const UnobservedCeiling = 0.5
+
+// ScoreToolCaseObserved computes the deterministic tool-accuracy half of a case
+// under Phase C observed execution. When observed is non-empty (the harness
+// routed its calls through the validator's mock endpoint) it REPLACES the
+// harness's self-reported tool_calls as the authoritative trajectory — the
+// validator grades what it actually saw execute, not what the harness claims.
+// When observed is nil it degrades to the pre-Phase-C self-report path
+// (ScoreToolCase); the caller applies CapUnobserved for an observable case so an
+// unverifiable self-report cannot score full marks.
+func ScoreToolCaseObserved(c protocol.ToolCase, resp protocol.RunResponse, ok bool, observed []protocol.ObservedToolCall) protocol.CaseScore {
+	if len(observed) == 0 {
+		return ScoreToolCase(c, resp, ok)
+	}
+	auth := resp
+	auth.ToolCalls = observed
+	cs := ScoreToolCase(c, auth, ok)
+	cs.Notes = append(cs.Notes, "trajectory observed via tool_endpoint (authoritative)")
+	return cs
+}
+
+// CapUnobserved applies UnobservedCeiling to a fully-composed tool CaseScore when
+// the case was observable but the harness did not execute through the endpoint.
+// Call it AFTER ComposeTool (the ceiling is on the final composite, not just the
+// deterministic half). No-op when the score is already at or below the ceiling.
+func CapUnobserved(cs protocol.CaseScore) protocol.CaseScore {
+	if cs.Score > UnobservedCeiling {
+		cs.Score = UnobservedCeiling
+		cs.Notes = append(cs.Notes, "capped: observable case not executed via tool_endpoint (self-report untrusted)")
+	}
+	return cs
+}
+
 // Memory grading weights (A5, §5.1): graded credit = 0.7*correctness +
 // 0.3*grounding, replacing v1's binary yes/no (which maximized variance and hid
 // partial competence, W8).

@@ -289,6 +289,13 @@ type RunDetails struct {
 	// LexicalGap is the query↔needle overlap telemetry for the memory suite (the
 	// NoLiMa literal-match signal, §8.1). Advisory only.
 	LexicalGap *LexicalGapStats `json:"lexical_gap,omitempty"`
+	// ObservedToolCases is how many tool cases were scored on the validator-
+	// observed trajectory (the harness routed its calls through tool_endpoint);
+	// CappedToolCases is how many observable cases were capped because the harness
+	// did NOT (self-report untrusted, §7 Phase C). Together they show how much of
+	// the tool suite ran under observed execution. Advisory calibration telemetry.
+	ObservedToolCases int `json:"observed_tool_cases,omitempty"`
+	CappedToolCases   int `json:"capped_tool_cases,omitempty"`
 }
 
 // ScoreReport is the full result of scoring a run.
