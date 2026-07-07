@@ -469,6 +469,54 @@ product surface.
 
 ---
 
+## 8.7 [SHIPPED] Phase C — observed execution (bench_version 4)
+
+Phase B closed the *dataset* gaps; the residual scoring risk was **self-reported
+tool calls** (v1's W3): the validator trusted the harness's `tool_calls` and had
+no way to see what actually executed, and no way to reward *using* a tool's
+result. Phase C (design §7, WPs C1–C3) retires that residual. All three WPs are
+implemented on `nick/benchmark-v2` and unit-tested; a keyed `run_size` E2E is the
+remaining validation (as with Phase B).
+
+1. **Observed execution (C1).** The validator now serves its own mock
+   tool-execution endpoint (`internal/toolexec`, advertised as
+   `RunRequest.tool_endpoint`). A harness routes its non-memory tool calls
+   through it; the validator returns deterministic, seed-derived content **and
+   records the real trajectory**, which is scored as authoritative — a wrong
+   observed call can no longer be hidden behind a right self-report. A harness
+   that ignores the endpoint is scored selection-only at a **capped ceiling
+   (0.5)** on the servable categories. Memory tools are deliberately *not* served
+   (that would leak the answer). This is the direct answer to the self-report
+   half of W3 that the Phase-B review flagged as unmitigated.
+
+2. **Result-usage (C2).** New tool cases whose answer requires a value that
+   exists **only** in the tool's returned content — a fabricated per-seed
+   "needle" (e.g. *"the Veltrix index reached 3,418 points"*). The question and
+   the served fact are coherent by construction (both derive from the same
+   `NeedleFor(seed, caseID)`), and the case is scored deterministically
+   (`0.4·trajectory + 0.6·answer-carries-needle`, no LLM judge). Because the
+   value is unguessable without executing, self-report and base-model knowledge
+   both score 0 on the answer half — capability 13 (§3), realized. Validated by a
+   datagen→toolexec→refharness→scorer E2E: execute+use scores 1.0, a guess scores
+   0.
+
+3. **Multi-graph isolation (C3).** A second persona is seeded under a different
+   `user_id`; isolation cases query one user while the other graph holds a
+   *conflicting* value for the same attribute (both A→B and B→A directions). A
+   harness that respects the `user_id` scoping answers correctly; one that leaks
+   across graphs returns the other user's value and misses. Isolation cases force
+   the graded judge (a cross-graph "dump everything" answer can't short-circuit
+   on containment). The secondary graph is template-rendered — zero added
+   generator token cost.
+
+Telemetry (advisory, in `details`): `observed_tool_cases`, `capped_tool_cases`,
+`result_usage` (per case), `isolation_cases`. **Remaining follow-ups**:
+starter-kit parity (teach the reference Rust harness to execute through
+`tool_endpoint` and honor `user_id`), and the keyed `run_size` E2E against a real
+retrieval harness.
+
+---
+
 ## 9. Sources
 
 **Primary / verified:** LongMemEval (arXiv:2410.10813, ICLR 2025) · LoCoMo

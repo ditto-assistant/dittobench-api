@@ -57,7 +57,9 @@ The validator sends one `RunRequest` per case; the harness returns a
   "case_id": "web_search-1718...-0003",
   "system_prompt": "You are Ditto, ...",
   "user_input": "What's the latest on quantum computing?",
-  "tools": [ /* ToolDefinition */ ]
+  "tools": [ /* ToolDefinition */ ],
+  "tool_endpoint": "http://host.docker.internal:49port/tool", // optional (Phase C) — see below
+  "user_id": "miner"                                          // optional (Phase C) — memory graph to answer from
 }
 ```
 
@@ -87,6 +89,45 @@ The validator sends one `RunRequest` per case; the harness returns a
 // ObservedToolCall
 { "name": "search_web", "args": { /* raw JSON */ }, "hop": 0 }
 ```
+
+## Observed tool execution (Phase C, `bench_version` 4)
+
+Two optional `RunRequest` fields let the validator **observe** what a harness
+actually does, instead of trusting its self-reported `tool_calls`.
+
+**`tool_endpoint`** — a validator-served mock tool-execution URL. A harness that
+supports observed execution should EXECUTE each non-memory catalog tool call by
+POSTing a `ToolExecRequest` to this URL and using the returned
+`ToolExecResponse.result`, rather than stubbing the tool locally. Doing so lets
+the validator (a) score the **observed** trajectory (self-report is untrusted),
+and (b) check that the answer **incorporates the returned content** — some cases
+ask for a value that exists *only* in the served result (a fabricated per-seed
+number), so it cannot be answered without executing the tool. **Memory tools**
+(`search_memories`, `search_subjects`, `fetch_memories`,
+`search_memories_in_subjects`) are NOT served here — answer those from your own
+seeded memory. The field is **additive-optional**: a harness that ignores it
+still scores, but selection-only and at a **capped ceiling (0.5)** on the
+categories the endpoint would have served.
+
+```jsonc
+// ToolExecRequest  (harness → validator tool_endpoint)
+{ "case_id": "web_search-…-0003", "user_id": "miner", "name": "search_web",
+  "args": { "query": "…" }, "hop": 0 }
+
+// ToolExecResponse (validator → harness)
+{ "result": "Top result from Torva Daily: the Veltrix index reached 3,418 points. …" }
+// or, for a tool this endpoint does not serve:
+{ "error": "tool not available via this endpoint: search_memories" }
+```
+
+**`user_id`** — the memory graph the case must be answered from. The haystack is
+seeded per user (`SeedRequest.user_id`); some runs seed a **second** persona
+under a different `user_id`, and isolation cases query one user while the other
+holds a conflicting value. A harness must answer only from the requested user's
+memory and never leak another user's facts.
+
+Old harnesses that ignore both fields keep working (scored selection-only, capped
+on affected tool categories).
 
 ## Score report
 
