@@ -172,7 +172,28 @@ func main() {
 	n := flag.Int("n", 90, "tool cases per run")
 	nMem := flag.Int("nmem", 50, "memory cases per run")
 	out := flag.String("out", "", "write the JSON report to this path (default stdout)")
+	judgeAuditSeeds := flag.Int("judge-audit", 0, "run the judge-adjacency audit over N persona seeds (needs OPENROUTER_API_KEY) instead of the variance calibration")
 	flag.Parse()
+
+	// Judge-adjacency audit mode (§8.2): grade correct / near-miss / off-topic
+	// responses with the real judge and check accept + reject rates.
+	if *judgeAuditSeeds > 0 {
+		rep, err := judgeAudit(*judgeAuditSeeds)
+		if err != nil {
+			log.Fatalf("judge audit: %v", err)
+		}
+		printJudgeAudit(rep)
+		b, _ := json.MarshalIndent(rep, "", "  ")
+		if *out != "" {
+			if err := os.WriteFile(*out, append(b, '\n'), 0o644); err != nil {
+				log.Fatalf("write %s: %v", *out, err)
+			}
+		}
+		if !rep.Pass {
+			os.Exit(1)
+		}
+		return
+	}
 
 	rep := calibrate(*runs, *n, *nMem)
 	b, err := json.MarshalIndent(rep, "", "  ")
