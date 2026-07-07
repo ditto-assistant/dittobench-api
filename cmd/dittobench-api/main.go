@@ -583,12 +583,20 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 			injections++
 		}
 	}
-	report.Details = &protocol.RunDetails{Paraphrase: &para, InjectionAttempts: injections}
+	report.Details = &protocol.RunDetails{
+		BenchVersion:      protocol.BenchVersion,
+		Paraphrase:        &para,
+		InjectionAttempts: injections,
+		Tokens:            llmClient.Spent(),
+		ToolMean:          report.ToolMean,
+		MemoryMean:        report.MemoryMean,
+	}
 	if injections > 0 {
 		log.Printf("run %s: %d judge-injection attempt(s) flagged", runID, injections)
 	}
 	s.store.Finish(runID, report)
-	log.Printf("run %s done: composite=%.3f tool_mean=%.3f memory_mean=%.3f", runID, report.Composite, report.ToolMean, report.MemoryMean)
+	log.Printf("run %s done: bench_version=%d composite=%.3f tool_mean=%.3f memory_mean=%.3f tokens=%d",
+		runID, protocol.BenchVersion, report.Composite, report.ToolMean, report.MemoryMean, llmClient.Spent())
 }
 
 // evaluate generates the dataset, runs the harness over it, scores it, and

@@ -82,7 +82,12 @@ func NewWithKey(key string) *Client {
 }
 
 // Spent reports the total tokens this client has consumed so far (for logging).
-func (c *Client) Spent() int64 { return c.spent.Load() }
+func (c *Client) Spent() int64 {
+	if c == nil {
+		return 0
+	}
+	return c.spent.Load()
+}
 
 // envInt reads a non-negative int env var, falling back to def when unset or
 // unparsable. A parsed 0 is honored (disables the cap).

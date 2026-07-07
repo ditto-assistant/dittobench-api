@@ -191,11 +191,22 @@ func (p *ParaphraseStats) Add(o ParaphraseStats) {
 // added freely (later WPs add bench_version, judge-audit stats, token totals).
 // Serialized under ScoreReport.details.
 type RunDetails struct {
-	Paraphrase *ParaphraseStats `json:"paraphrase,omitempty"`
+	// BenchVersion is the scoring benchmark version (see protocol.BenchVersion).
+	// The weight fold only compares entries of the max bench_version present, so a
+	// bump makes new scores non-comparable to old until a re-score (§9).
+	BenchVersion int              `json:"bench_version"`
+	Paraphrase   *ParaphraseStats `json:"paraphrase,omitempty"`
 	// InjectionAttempts counts cases a judge flagged as judge-manipulation
 	// attempts (each scored 0). A non-zero value is moderation-relevant evidence,
 	// the same policy channel as plagiarism (A8, §6.1).
 	InjectionAttempts int `json:"injection_attempts,omitempty"`
+	// Tokens is the total OpenRouter tokens (generator + judge) the run spent —
+	// budget telemetry (kept out of the composite; §5.3).
+	Tokens int64 `json:"tokens,omitempty"`
+	// ToolMean / MemoryMean echo the per-suite means for convenience alongside the
+	// per-category breakdown in ScoreReport.per_category.
+	ToolMean   float64 `json:"tool_mean"`
+	MemoryMean float64 `json:"memory_mean"`
 }
 
 // ScoreReport is the full result of scoring a run.

@@ -2,6 +2,13 @@ package protocol
 
 import "time"
 
+// BenchVersion is the scoring benchmark version stamped into every run's
+// details. Bump it with EVERY scoring-affecting change so old and new ledger
+// scores are never silently compared (BENCHMARK-V2.md §9). Phase A (the v1
+// hardening: seed-derived time, graded memory, trajectory/arg scoring, judge
+// hardening) ships as version 2; v1 was version 1.
+const BenchVersion = 2
+
 // DatasetEpoch is the pinned reference "as-of" instant for all generated
 // datasets. Benchmark generation must be a pure function of the run seed and
 // bench_version (the reproducibility contract in ditto-subnet
