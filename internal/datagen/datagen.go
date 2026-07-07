@@ -15,8 +15,15 @@ import (
 
 // category describes one kind of tool-calling case and how to render it.
 type category struct {
-	name      string
-	tool      string // expected tool name; empty means "no tool"
+	name string
+	tool string // single expected tool; empty means "no tool" (unless tools is set)
+	// tools, when non-empty, is a multi-hop expected sequence (overrides tool);
+	// MaxToolCalls becomes len(tools) and order is scored (A6 §5.2(4)).
+	tools []string
+	// argKey, when set on a single-tool category whose filler is an exact token
+	// (a URL, a theme), pins RequiredArgs[argKey]=filler so the argument value is
+	// deterministically scored — right tool + wrong arg no longer gets full credit.
+	argKey    string
 	templates []string
 }
 
@@ -99,7 +106,7 @@ var categories = []category{
 		},
 	},
 	{
-		name: "link_read", tool: "read_links",
+		name: "link_read", tool: "read_links", argKey: "url",
 		templates: []string{
 			"Read %s and summarize it.",
 			"What does this page say: %s",
@@ -131,7 +138,7 @@ var categories = []category{
 		},
 	},
 	{
-		name: "settings", tool: "set_theme",
+		name: "settings", tool: "set_theme", argKey: "theme",
 		templates: []string{
 			"Switch to %s mode.",
 			"Set my theme to %s.",
@@ -188,6 +195,40 @@ var categories = []category{
 			"%s",
 		},
 	},
+	// Multi-hop trajectories (A6): the correct answer is a tool SEQUENCE, scored
+	// with order credit. These exercise the previously-dormant multi-call path.
+	{
+		name: "multi_web_read", tools: []string{"search_web", "read_links"},
+		templates: []string{
+			"Look up %s online and open the top result.",
+			"Find a page about %s and read it for me.",
+			"Search for %s and summarize the first source.",
+		},
+	},
+	{
+		name: "multi_subject_scope", tools: []string{"search_subjects", "search_memories_in_subjects"},
+		templates: []string{
+			"Find my notes related to %s and pull the details.",
+			"Which subject covers %s — then recall the specifics.",
+			"Look through my topics on %s and fetch what I saved.",
+		},
+	},
+	{
+		name: "multi_job_status", tools: []string{"execute_agent_job", "get_agent_job_status"},
+		templates: []string{
+			"Kick off a job to %s and tell me its status.",
+			"Start %s in the background, then check how it's going.",
+			"Run %s and report the job status.",
+		},
+	},
+	{
+		name: "multi_image_edit", tools: []string{"create_image", "edit_image"},
+		templates: []string{
+			"Make an image of %s, then brighten it.",
+			"Generate %s and then add more detail.",
+			"Create a picture of %s and tweak the colors.",
+		},
+	},
 }
 
 // fillerFor returns a random entity string appropriate for a category.
@@ -215,6 +256,14 @@ func fillerFor(r *rand.Rand, cat string) string {
 		return agentTasks[r.Intn(len(agentTasks))]
 	case "agent_read_not_run":
 		return "" // templates have no placeholder
+	case "multi_web_read":
+		return topics[r.Intn(len(topics))]
+	case "multi_subject_scope":
+		return subjects[r.Intn(len(subjects))]
+	case "multi_job_status":
+		return agentTasks[r.Intn(len(agentTasks))]
+	case "multi_image_edit":
+		return imagePrompts[r.Intn(len(imagePrompts))]
 	case "no_tool":
 		return chitchat[r.Intn(len(chitchat))]
 	case "abstention":
@@ -295,12 +344,19 @@ func GenerateCasesWithFillers(r *rand.Rand, seed int64, n int) ([]protocol.ToolC
 		tmpl := cat.templates[r.Intn(len(cat.templates))]
 		filler := fillerFor(r, cat.name)
 		prompt := tmpl
+
+		// Expected tool sequence: multi-hop tools, else the single tool, else none.
+		seq := cat.tools
+		if len(seq) == 0 && cat.tool != "" {
+			seq = []string{cat.tool}
+		}
+
 		usedFiller := ""
 		if strings.Contains(tmpl, "%s") {
 			prompt = fmt.Sprintf(tmpl, filler)
-			// Only a real tool case has an entity worth preserving; no_tool /
-			// abstention fillers ARE the whole (freely rephrasable) message.
-			if cat.tool != "" {
+			// A real tool case has an entity worth preserving through paraphrase;
+			// no_tool / abstention fillers ARE the whole (freely rephrasable) message.
+			if len(seq) > 0 {
 				usedFiller = filler
 			}
 		}
@@ -309,14 +365,11 @@ func GenerateCasesWithFillers(r *rand.Rand, seed int64, n int) ([]protocol.ToolC
 			ID:              fmt.Sprintf("%s-%d-%04d", cat.name, seed, i),
 			Category:        cat.name,
 			Prompt:          prompt,
-			MaxToolCalls:    1,
 			AllowExtraTools: false,
 		}
 
-		if cat.tool != "" {
-			tc.ExpectedTools = []protocol.ToolSpec{{Name: cat.tool}}
-			tc.ExpectedBehavior = fmt.Sprintf("call %s exactly once", cat.tool)
-		} else {
+		switch {
+		case len(seq) == 0:
 			tc.ExpectedTools = nil
 			tc.MaxToolCalls = 0
 			if cat.name == "abstention" {
@@ -324,6 +377,23 @@ func GenerateCasesWithFillers(r *rand.Rand, seed int64, n int) ([]protocol.ToolC
 			} else {
 				tc.ExpectedBehavior = "respond conversationally without calling any tool"
 			}
+		case len(seq) == 1:
+			ts := protocol.ToolSpec{Name: seq[0]}
+			// Exact-value arg ground truth when the filler is a stable token.
+			if cat.argKey != "" && usedFiller != "" {
+				ts.RequiredArgs = map[string]string{cat.argKey: filler}
+			}
+			tc.ExpectedTools = []protocol.ToolSpec{ts}
+			tc.MaxToolCalls = 1
+			tc.ExpectedBehavior = fmt.Sprintf("call %s exactly once", seq[0])
+		default:
+			tools := make([]protocol.ToolSpec, len(seq))
+			for j, tn := range seq {
+				tools[j] = protocol.ToolSpec{Name: tn}
+			}
+			tc.ExpectedTools = tools
+			tc.MaxToolCalls = len(seq)
+			tc.ExpectedBehavior = "call " + strings.Join(seq, " then ") + " in that order"
 		}
 
 		cases = append(cases, tc)

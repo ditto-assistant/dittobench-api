@@ -1,15 +1,13 @@
 // Package scorer turns harness RunResponses into a DittoBench ScoreReport.
 //
-// Practice scope: TOOL-CALLING correctness + SPEED only. (Memory store /
-// embedding recall is evaluated on-chain, not here.)
+// Tool accuracy per case is deterministic trajectory + argument scoring (A6,
+// see trajectory.go): 0.4·name-F1 + 0.4·arg-F1 + 0.2·(order × extra-call
+// discipline). Cases with no expected tool score 1.0 iff the harness called
+// nothing, else 0.0. The per-case tool composite is 0.5·this + 0.5·quality
+// judge (ComposeTool).
 //
-// Tool accuracy per case:
-//   - matched = sum over expected tools of min(expected_count, observed_count)
-//   - base    = matched / total_expected
-//   - penalty = 0.1 per unexpected/extra call (skipped if AllowExtraTools)
-//   - score   = clamp(base - penalty, 0, 1)
-//   - cases with no expected tool score 1.0 iff the harness called nothing,
-//     else 0.0 (a single unexpected call zeroes a no-tool case).
+// Memory credit is graded (A5): 0.7·correctness + 0.3·grounding, with a
+// deterministic containment check resolving correctness before the LLM judge.
 package scorer
 
 import (
@@ -240,13 +238,8 @@ func scoreCase(c protocol.ToolCase, resp protocol.RunResponse, ok bool) protocol
 		return cs
 	}
 
-	// Count observed calls by name.
-	observed := map[string]int{}
-	for _, tc := range resp.ToolCalls {
-		observed[tc.Name]++
-	}
-
-	// No-expected-tool cases: perfect only if nothing was called.
+	// No-expected-tool cases (chit-chat / abstention): perfect only if nothing
+	// was called. A single unexpected call zeroes the case.
 	if len(c.ExpectedTools) == 0 {
 		if len(resp.ToolCalls) == 0 {
 			cs.ToolScore = 1.0
@@ -257,51 +250,11 @@ func scoreCase(c protocol.ToolCase, resp protocol.RunResponse, ok bool) protocol
 		return cs
 	}
 
-	// Count expected calls by name.
-	expected := map[string]int{}
-	for _, ts := range c.ExpectedTools {
-		expected[ts.Name]++
-	}
-
-	totalExpected := 0
-	matched := 0
-	for name, want := range expected {
-		totalExpected += want
-		got := observed[name]
-		if got < want {
-			matched += got
-		} else {
-			matched += want
-		}
-	}
-
-	base := 0.0
-	if totalExpected > 0 {
-		base = float64(matched) / float64(totalExpected)
-	}
-
-	// Count extra/unexpected calls (anything beyond what's expected).
-	extra := 0
-	for name, got := range observed {
-		want := expected[name]
-		if got > want {
-			extra += got - want
-		}
-	}
-
-	score := base
-	if extra > 0 && !c.AllowExtraTools {
-		score -= 0.1 * float64(extra)
-		cs.Notes = append(cs.Notes, fmt.Sprintf("%d extra/unexpected tool call(s) (-%.1f)", extra, 0.1*float64(extra)))
-	}
-
-	if score < 0 {
-		score = 0
-	}
-	if score > 1 {
-		score = 1
-	}
+	// Deterministic trajectory + argument scoring (A6): name-F1, arg-F1, and a
+	// trajectory term (order credit × extra-call discipline).
+	score, notes := deterministicToolScore(c, resp.ToolCalls)
 	cs.ToolScore = score
+	cs.Notes = append(cs.Notes, notes...)
 	return cs
 }
 

@@ -62,7 +62,7 @@ func TestClampAndShape(t *testing.T) {
 		t.Fatalf("n=500 should clamp to 200, got %d", got)
 	}
 
-	ds := Generate(99, 40)
+	ds := Generate(99, 60)
 	for _, c := range ds.ToolCases {
 		if c.ID == "" || c.Category == "" || c.Prompt == "" {
 			t.Fatalf("malformed case: %+v", c)
@@ -71,9 +71,15 @@ func TestClampAndShape(t *testing.T) {
 		if (c.Category == "no_tool" || c.Category == "abstention") && len(c.ExpectedTools) != 0 {
 			t.Fatalf("category %s should expect no tools: %+v", c.Category, c)
 		}
-		// tool categories must expect exactly one tool
-		if c.Category != "no_tool" && c.Category != "abstention" && len(c.ExpectedTools) != 1 {
-			t.Fatalf("category %s should expect one tool: %+v", c.Category, c)
+		// tool categories expect >=1 tool, and MaxToolCalls tracks the sequence
+		// length (1 for single-hop, >1 for multi-hop trajectories).
+		if c.Category != "no_tool" && c.Category != "abstention" {
+			if len(c.ExpectedTools) < 1 {
+				t.Fatalf("category %s should expect a tool: %+v", c.Category, c)
+			}
+			if c.MaxToolCalls != len(c.ExpectedTools) {
+				t.Fatalf("category %s: MaxToolCalls %d != len(ExpectedTools) %d", c.Category, c.MaxToolCalls, len(c.ExpectedTools))
+			}
 		}
 	}
 }
@@ -90,12 +96,35 @@ func TestCoversCategories(t *testing.T) {
 	}
 }
 
+// TestGenerateHasMultiHopAndArgCases: A6 added multi-hop trajectories and
+// exact-value argument ground truth; both must actually appear in a dataset.
+func TestGenerateHasMultiHopAndArgCases(t *testing.T) {
+	ds := Generate(7, 120)
+	multiHop, argScored := 0, 0
+	for _, c := range ds.ToolCases {
+		if len(c.ExpectedTools) > 1 {
+			multiHop++
+		}
+		for _, ts := range c.ExpectedTools {
+			if len(ts.RequiredArgs) > 0 {
+				argScored++
+			}
+		}
+	}
+	if multiHop == 0 {
+		t.Fatal("expected some multi-hop (sequence) tool cases")
+	}
+	if argScored == 0 {
+		t.Fatal("expected some cases with required-arg ground truth")
+	}
+}
+
 // TestStratifiedBalance pins the stratification invariant: with a fixed mix, the
 // per-category counts of any dataset differ by at most one (floor/ceil of n/C),
 // regardless of seed. This is what removes the multinomial category-draw variance.
 func TestStratifiedBalance(t *testing.T) {
 	for _, seed := range []int64{1, 2, 999, 123456} {
-		ds := Generate(seed, 56) // 56 = 4*14 → perfectly balanced
+		ds := Generate(seed, len(categories)*4) // multiple of C → perfectly balanced
 		counts := map[string]int{}
 		for _, c := range ds.ToolCases {
 			counts[c.Category]++
