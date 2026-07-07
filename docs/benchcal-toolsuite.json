@@ -1,12 +1,27 @@
 {
   "runs": 30,
   "n_tools": 90,
-  "harness": "refharness (deterministic keyword router)",
+  "n_mem": 50,
+  "harness": "refharness (tools) + fixed reference-competence policy (memory)",
   "tool_mean": {
     "mean": 0.4624,
     "stddev": 0.0334,
     "min": 0.3978,
     "max": 0.5356,
+    "n": 30
+  },
+  "memory_mean": {
+    "mean": 0.5894,
+    "stddev": 0.005,
+    "min": 0.5814,
+    "max": 0.5998,
+    "n": 30
+  },
+  "composite": {
+    "mean": 0.5259,
+    "stddev": 0.0168,
+    "min": 0.4947,
+    "max": 0.5608,
     "n": 30
   },
   "per_category": {
@@ -180,5 +195,5 @@
     }
   },
   "noise_floor_stddev": 0,
-  "note": "Deterministic tool-suite difficulty variance only; memory/composite σ needs the live judge (cmd/calibrate --run-size full)."
+  "note": "Hermetic structural variance: tool σ = deterministic routing difficulty; memory σ ≈ 0 shows v2 stratification removed question-type-mix variance. Real champion-region composite σ (judge + harness noise) needs the hosted 30-seed run (§8 gate 1); the KOTH margin/score_tol retune (B8) assumes the design target σ ≤ 0.01 and must be reconfirmed there."
 }
