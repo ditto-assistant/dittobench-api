@@ -70,8 +70,9 @@ func TestAggregate(t *testing.T) {
 }
 
 func TestAggregateCompositeWeighting(t *testing.T) {
-	// tool_mean=1.0, memory_mean=0.0 → 0.6*1.0 + 0.4*0.0 = 0.6 (NOT the old
-	// equal-per-case 0.5), pinning the canonical 0.6/0.4 weighting.
+	// tool_mean=1.0, memory_mean=0.0 → 0.5*1.0 + 0.5*0.0 = 0.5, pinning the v2
+	// (bench_version 2) 0.5/0.5 rebalance: memory is the core product value and
+	// the raw-pairs tier makes memory_mean the harder axis.
 	r := Aggregate("run", []protocol.CaseScore{
 		{CaseID: "t1", Category: "web_search", Kind: protocol.KindTool, Score: 1.0},
 		{CaseID: "m1", Category: "multi-session", Kind: protocol.KindMemory, Score: 0.0},
@@ -79,8 +80,8 @@ func TestAggregateCompositeWeighting(t *testing.T) {
 	if r.ToolMean != 1.0 || r.MemoryMean != 0.0 {
 		t.Fatalf("means: tool=%v mem=%v", r.ToolMean, r.MemoryMean)
 	}
-	if r.Composite != 0.6 {
-		t.Fatalf("composite expected 0.6 (0.6*1 + 0.4*0), got %v", r.Composite)
+	if r.Composite != 0.5 {
+		t.Fatalf("composite expected 0.5 (0.5*1 + 0.5*0), got %v", r.Composite)
 	}
 }
 

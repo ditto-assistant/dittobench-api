@@ -56,7 +56,7 @@ func TestFreshSeedUnique(t *testing.T) {
 
 func TestGenerateToolsNilLLM(t *testing.T) {
 	r := NewRNG(7)
-	cases := GenerateTools(context.Background(), r, 10, 0.5, nil, "model")
+	cases, _ := GenerateTools(context.Background(), r, 7, 10, 0.5, nil, "model")
 	if len(cases) != 10 {
 		t.Fatalf("expected 10 cases, got %d", len(cases))
 	}
@@ -70,9 +70,9 @@ func TestGenerateToolsNilLLM(t *testing.T) {
 func TestGenerateToolsParaphrasePreservesGroundTruth(t *testing.T) {
 	// frac=1 → every prompt rewritten; ground truth (expected_tools/behavior)
 	// must be unchanged vs the nil-LLM baseline.
-	base := GenerateTools(context.Background(), NewRNG(99), 12, 0, nil, "m")
+	base, _ := GenerateTools(context.Background(), NewRNG(99), 99, 12, 0, nil, "m")
 	llm := &upperLLM{}
-	para := GenerateTools(context.Background(), NewRNG(99), 12, 1.0, llm, "m")
+	para, _ := GenerateTools(context.Background(), NewRNG(99), 99, 12, 1.0, llm, "m")
 
 	if len(base) != len(para) {
 		t.Fatalf("length mismatch")
@@ -123,7 +123,7 @@ func TestSanitizeParaphrase(t *testing.T) {
 func TestGenerateMemory(t *testing.T) {
 	// Empty seedDir/oracle => embedded bundle.
 	r := NewRNG(12345)
-	seedReq, cases, err := GenerateMemory(context.Background(), r, 5, 20, 0, nil, "m", "", "")
+	seedReq, cases, _, err := GenerateMemory(context.Background(), r, 5, 20, 0, nil, "m", "", "")
 	if err != nil {
 		t.Fatalf("GenerateMemory: %v", err)
 	}
@@ -150,7 +150,7 @@ func TestGenerateMemory(t *testing.T) {
 }
 
 func TestGenerateMemoryMissingAssets(t *testing.T) {
-	_, _, err := GenerateMemory(context.Background(), NewRNG(1), 5, 10, 0, nil, "m", "/no/such/seeddir", "/no/such/oracle.json")
+	_, _, _, err := GenerateMemory(context.Background(), NewRNG(1), 5, 10, 0, nil, "m", "/no/such/seeddir", "/no/such/oracle.json")
 	if err == nil {
 		t.Fatal("expected a clear error for missing assets, got nil")
 	}

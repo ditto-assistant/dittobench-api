@@ -1,5 +1,6 @@
 # Binaries
 /dittobench-api
+/refharness
 *.exe
 *.out
 
@@ -20,3 +21,4 @@ coverage.out
 
 # Scratch
 .tmp/
+.tool-versions

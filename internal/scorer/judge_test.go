@@ -6,15 +6,18 @@ import (
 	"testing"
 )
 
-// fakeLLM returns a canned reply (or error) and records the last system/user.
+// fakeLLM returns a canned reply (or error), records the last system/user, and
+// counts calls (so tests can assert the judge was or wasn't invoked).
 type fakeLLM struct {
 	reply      string
 	err        error
 	lastSystem string
 	lastUser   string
+	calls      int
 }
 
 func (f *fakeLLM) Complete(_ context.Context, _ string, system, user string) (string, error) {
+	f.calls++
 	f.lastSystem, f.lastUser = system, user
 	return f.reply, f.err
 }
@@ -54,7 +57,7 @@ func TestDim(t *testing.T) {
 }
 
 func TestBuildLMEJudgeSystemClauses(t *testing.T) {
-	if !strings.Contains(buildLMEJudgeSystem("temporal-reasoning", false), "off-by-one") {
+	if !strings.Contains(buildLMEJudgeSystem("temporal-reasoning", false), "elapsed-duration") {
 		t.Fatal("temporal clause missing")
 	}
 	if !strings.Contains(buildLMEJudgeSystem("knowledge-update", false), "outdated and updated") {
@@ -66,9 +69,9 @@ func TestBuildLMEJudgeSystemClauses(t *testing.T) {
 	if !strings.Contains(buildLMEJudgeSystem("multi-session", true), "ABSTENTION") {
 		t.Fatal("abstention clause missing")
 	}
-	// plain type, not abstention → no clause appended
-	if got := buildLMEJudgeSystem("multi-session", false); got != lmeJudgeBase {
-		t.Fatalf("plain type should be base prompt, got extra clause")
+	// plain type, not abstention → base prompt + the untrusted-data guard.
+	if got := buildLMEJudgeSystem("multi-session", false); got != lmeJudgeBase+untrustedGuard {
+		t.Fatalf("plain type should be base prompt + guard, got %q", got)
 	}
 }
 
@@ -89,6 +92,23 @@ func TestJudgeMemory(t *testing.T) {
 	// judge error → false
 	if JudgeMemory(ctx, &fakeLLM{err: context.Canceled}, "m", "q", "a", "resp", "multi-session") {
 		t.Fatal("judge error should be false")
+	}
+}
+
+func TestJudgeMemoryAbstentionRouting(t *testing.T) {
+	ctx := context.Background()
+	// A clean decline, judged under the abstention clause, is correct.
+	f := &fakeLLM{reply: `{"correct":"yes"}`}
+	if !JudgeMemory(ctx, f, "m", "what is my passport number?", "(no info)", "I don't have that information.", "abstention") {
+		t.Fatal("clean decline should be judged correct")
+	}
+	if !strings.Contains(f.lastSystem, "ABSTENTION") {
+		t.Fatalf("abstention question_type must route to the abstention clause; system=%q", f.lastSystem)
+	}
+	// A fabricated answer is judged incorrect.
+	f2 := &fakeLLM{reply: `{"correct":"no"}`}
+	if JudgeMemory(ctx, f2, "m", "what is my passport number?", "(no info)", "It's X1234567.", "abstention") {
+		t.Fatal("fabricated answer should be judged incorrect")
 	}
 }
 
@@ -115,7 +135,11 @@ func TestJudgeToolQuality(t *testing.T) {
 func TestToolJudgeFormatsToolsNone(t *testing.T) {
 	f := &fakeLLM{reply: `{"helpfulness":3,"accuracy":3}`}
 	JudgeToolQuality(context.Background(), f, "m", "p", nil, "b", "resp")
-	if !strings.Contains(f.lastUser, "TOOLS CALLED: none") {
-		t.Fatalf("no tools should render 'none', got user=%q", f.lastUser)
+	if !strings.Contains(f.lastUser, "TOOLS CALLED (self-reported)") || !strings.Contains(f.lastUser, "none") {
+		t.Fatalf("no tools should render a fenced 'none', got user=%q", f.lastUser)
+	}
+	// Untrusted harness output must be fenced, not inlined as bare instructions.
+	if !strings.Contains(f.lastUser, "UNTRUSTED ASSISTANT RESPONSE") {
+		t.Fatalf("assistant response should be fenced as untrusted, got %q", f.lastUser)
 	}
 }

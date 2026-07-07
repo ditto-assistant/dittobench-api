@@ -45,11 +45,16 @@ func TestMissedTool(t *testing.T) {
 
 func TestExtraCallPenalty(t *testing.T) {
 	cases := []protocol.ToolCase{tc("c1", "web_search", "search_web")}
-	// correct tool + one extra unexpected call → 1.0 - 0.1 = 0.9
+	// Correct tool + one extra unexpected call under the trajectory formula:
+	//   name-F1 = f1(prec=1/2, rec=1/1) = 0.6667
+	//   arg-F1  = 1.0 (no required args)
+	//   penalty = extras/expectedTotal = 1/1 = 1 → trajectory term = 0
+	//   score   = 0.4*0.6667 + 0.4*1 + 0.2*0 = 0.6667
+	// (harsher and call-count-scaling, replacing v1's flat -0.1.)
 	resps := map[string]protocol.RunResponse{"c1": resp(100, "search_web", "create_image")}
 	r := Score("run", cases, resps)
-	if got := r.PerCase[0].ToolScore; got != 0.9 {
-		t.Fatalf("expected 0.9 after one extra penalty, got %v", got)
+	if got := r.PerCase[0].ToolScore; got < 0.66 || got > 0.667 {
+		t.Fatalf("expected ~0.6667 after one extra call, got %v", got)
 	}
 }
 

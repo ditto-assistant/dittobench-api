@@ -7,20 +7,20 @@ import (
 
 func TestIsDisallowedIP(t *testing.T) {
 	cases := map[string]bool{
-		"8.8.8.8":         false, // public
-		"1.1.1.1":         false,
-		"203.0.113.5":     false, // TEST-NET-3 is technically reserved but routable-looking; treated public here
-		"127.0.0.1":       true,  // loopback
-		"10.0.0.1":        true,  // RFC1918
-		"192.168.1.1":     true,
-		"172.16.5.4":      true,
-		"169.254.169.254": true, // cloud metadata (link-local)
-		"100.64.1.1":      true, // CGNAT
-		"0.0.0.0":         true, // unspecified
-		"224.0.0.1":       true, // multicast
-		"::1":             true, // ipv6 loopback
-		"fd00::1":         true, // ipv6 ULA (private)
-		"fe80::1":         true, // ipv6 link-local
+		"8.8.8.8":              false, // public
+		"1.1.1.1":              false,
+		"203.0.113.5":          false, // TEST-NET-3 is technically reserved but routable-looking; treated public here
+		"127.0.0.1":            true,  // loopback
+		"10.0.0.1":             true,  // RFC1918
+		"192.168.1.1":          true,
+		"172.16.5.4":           true,
+		"169.254.169.254":      true,  // cloud metadata (link-local)
+		"100.64.1.1":           true,  // CGNAT
+		"0.0.0.0":              true,  // unspecified
+		"224.0.0.1":            true,  // multicast
+		"::1":                  true,  // ipv6 loopback
+		"fd00::1":              true,  // ipv6 ULA (private)
+		"fe80::1":              true,  // ipv6 link-local
 		"2606:4700:4700::1111": false, // public ipv6
 	}
 	for ipStr, want := range cases {

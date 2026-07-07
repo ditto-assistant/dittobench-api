@@ -12,10 +12,14 @@
 //     the image + a Cloud Run Job to run it. Cloud Run has no local Docker
 //     daemon, so the LocalDocker backend cannot run there; see README.
 //
-// Isolation here is "good-faith practice" grade: resource caps + auto-remove +
-// no-new-privileges + a private bridge network. It is NOT a hostile-tenant
-// jail; the on-chain validator hardens further (seccomp, gVisor/Kata, egress
-// allowlist). Practice submissions are the miner's own code.
+// Isolation: resource caps (memory/cpu/pids) + auto-remove + no-new-privileges,
+// plus opt-in hardening for untrusted (on-chain) submissions — `--cap-drop ALL`
+// (Harden) and an egress allowlist via a restricted network + forward proxy
+// (EgressNetwork/EgressProxy; see docs/sandbox-egress-hardening.md). With the
+// egress config unset it stays "good-faith practice" grade (full-egress bridge),
+// which is fine for the miner's own practice submissions; the on-chain validator
+// turns the egress + cap-drop hardening on and provisions the proxy + host
+// firewall. Deeper isolation (seccomp/gVisor/Kata) is tracked in that doc.
 package sandbox
 
 import (
@@ -24,8 +28,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/ditto-assistant/dittobench-api/internal/astfp"
+	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
 )
 
 // Sandbox builds a submission into a runnable image and runs it as an
@@ -35,7 +43,7 @@ type Sandbox interface {
 	Available(ctx context.Context) error
 	// Build clones src (a git URL at ref) and builds it into an image,
 	// returning the image reference and the tail of the build log.
-	Build(ctx context.Context, src Source) (image string, buildLog string, err error)
+	Build(ctx context.Context, src Source) (image string, buildLog string, fingerprint *protocol.CodeFingerprint, err error)
 	// Run starts image as a detached container exposing the harness port and
 	// returns a handle. Caller must Stop the handle.
 	Run(ctx context.Context, image string, env map[string]string) (*Handle, error)
@@ -82,6 +90,21 @@ type LocalDocker struct {
 	// AllowPrivate relaxes the SSRF guard on TarballURL fetches (local dev only,
 	// e.g. a minio/localhost presigned URL). Mirrors the submit-handler flag.
 	AllowPrivate bool
+	// PidsLimit caps the container process/thread count (docker --pids-limit) —
+	// a fork-bomb bound. Always applied; defaults to 512.
+	PidsLimit int
+	// Harden, when true, drops all Linux capabilities (--cap-drop ALL). An
+	// untrusted userland HTTP harness needs none. Env DITTOBENCH_SANDBOX_HARDEN.
+	Harden bool
+	// EgressNetwork, when set, attaches the container to this user-defined docker
+	// network — the egress-restricted sandbox network (allowlisting proxy + host
+	// firewall) — instead of the default full-egress bridge. Empty = today's
+	// behavior. Env DITTOBENCH_SANDBOX_EGRESS_NETWORK. See docs/sandbox-egress-hardening.md.
+	EgressNetwork string
+	// EgressProxy, when set, is injected as HTTPS_PROXY/HTTP_PROXY so the harness's
+	// outbound calls are forced through the allowlisting forward proxy (loopback +
+	// the host gateway bypass it via NO_PROXY). Env DITTOBENCH_SANDBOX_EGRESS_PROXY.
+	EgressProxy string
 }
 
 // NewLocalDocker returns a LocalDocker with sensible defaults.
@@ -93,6 +116,10 @@ func NewLocalDocker() *LocalDocker {
 		BuildTimeout:    25 * time.Minute,
 		GitHubTokenFile: os.Getenv("GITHUB_TOKEN_FILE"),
 		AllowPrivate:    envBool("DITTOBENCH_ALLOW_PRIVATE_HARNESS"),
+		PidsLimit:       envIntDefault("DITTOBENCH_SANDBOX_PIDS_LIMIT", 512),
+		Harden:          envBool("DITTOBENCH_SANDBOX_HARDEN"),
+		EgressNetwork:   strings.TrimSpace(os.Getenv("DITTOBENCH_SANDBOX_EGRESS_NETWORK")),
+		EgressProxy:     strings.TrimSpace(os.Getenv("DITTOBENCH_SANDBOX_EGRESS_PROXY")),
 	}
 }
 
@@ -104,6 +131,17 @@ func envBool(name string) bool {
 	default:
 		return false
 	}
+}
+
+// envIntDefault reads a positive int env var, falling back to def on unset or
+// invalid/non-positive input.
+func envIntDefault(name string, def int) int {
+	if v := strings.TrimSpace(os.Getenv(name)); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return def
 }
 
 // Available checks that the docker CLI and daemon are reachable.
@@ -123,9 +161,9 @@ func (d *LocalDocker) Available(ctx context.Context) error {
 // build-context fetch is unauthenticated and 404s on private repos. A mounted
 // gh_token BuildKit secret then lets the in-image cargo build fetch the private
 // ditto-harness crate over HTTPS.
-func (d *LocalDocker) Build(ctx context.Context, src Source) (string, string, error) {
+func (d *LocalDocker) Build(ctx context.Context, src Source) (string, string, *protocol.CodeFingerprint, error) {
 	if src.GitURL == "" && src.TarballURL == "" {
-		return "", "", fmt.Errorf("sandbox: one of git_url or tarball_url is required")
+		return "", "", nil, fmt.Errorf("sandbox: one of git_url or tarball_url is required")
 	}
 	ctx, cancel := context.WithTimeout(ctx, d.BuildTimeout)
 	defer cancel()
@@ -134,7 +172,7 @@ func (d *LocalDocker) Build(ctx context.Context, src Source) (string, string, er
 	//    cloning a git repo or by extracting a presigned tarball.
 	workdir, err := os.MkdirTemp("", "dittobench-sub-")
 	if err != nil {
-		return "", "", fmt.Errorf("mktemp: %w", err)
+		return "", "", nil, fmt.Errorf("mktemp: %w", err)
 	}
 	defer os.RemoveAll(workdir)
 
@@ -144,13 +182,13 @@ func (d *LocalDocker) Build(ctx context.Context, src Source) (string, string, er
 	if src.TarballURL != "" {
 		cdir, err := d.fetchTarball(ctx, src, workdir)
 		if err != nil {
-			return "", "", err
+			return "", "", nil, err
 		}
 		contextDir = cdir
 	} else {
 		cloneURL, err := d.authedCloneURL(src.GitURL)
 		if err != nil {
-			return "", "", err
+			return "", "", nil, err
 		}
 		cloneArgs := []string{"clone", "--depth", "1"}
 		if src.GitRef != "" {
@@ -159,9 +197,16 @@ func (d *LocalDocker) Build(ctx context.Context, src Source) (string, string, er
 		cloneArgs = append(cloneArgs, cloneURL, workdir)
 		if out, err := exec.CommandContext(ctx, "git", cloneArgs...).CombinedOutput(); err != nil {
 			// Redact a token that may appear in the URL within git's error output.
-			return "", "", fmt.Errorf("git clone failed: %s: %w", redact(strings.TrimSpace(string(out))), err)
+			return "", "", nil, fmt.Errorf("git clone failed: %s: %w", redact(strings.TrimSpace(string(out))), err)
 		}
 	}
+
+	// 1b. Structural fingerprint of the materialized crate, for the platform's
+	//     anti-copy gate. Computed here (the only place the tree is unpacked and a
+	//     Rust parser is available) while contextDir still exists — the deferred
+	//     RemoveAll wipes it on return. Best-effort: nil on any problem, never
+	//     failing the build over a moderation signal.
+	fingerprint := astfp.FromDir(ctx, contextDir)
 
 	// 2. Build the local context.
 	image := "dittobench-sub:" + safeTag(src)
@@ -177,9 +222,9 @@ func (d *LocalDocker) Build(ctx context.Context, src Source) (string, string, er
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
 	if err := cmd.Run(); err != nil {
-		return "", tail(buf.String(), 4000), fmt.Errorf("docker build failed: %w", err)
+		return "", tail(buf.String(), 4000), nil, fmt.Errorf("docker build failed: %w", err)
 	}
-	return image, tail(buf.String(), 2000), nil
+	return image, tail(buf.String(), 2000), fingerprint, nil
 }
 
 // authedCloneURL injects the gh token into an https github URL so private
@@ -214,30 +259,66 @@ func redact(s string) string {
 	return s
 }
 
+// pidsLimit returns the configured --pids-limit, defaulting to 512 so a
+// zero-value LocalDocker (e.g. constructed directly in a test) is still bounded
+// rather than unlimited (docker treats --pids-limit 0 as unlimited).
+func (d *LocalDocker) pidsLimit() int {
+	if d.PidsLimit > 0 {
+		return d.PidsLimit
+	}
+	return 512
+}
+
+// runArgs builds the `docker run` argument vector. Extracted from Run so the
+// isolation/egress flags can be unit-tested without a live docker daemon.
+func (d *LocalDocker) runArgs(image string, env map[string]string) []string {
+	args := []string{
+		"run", "-d", "--rm",
+		"--memory", d.MemoryLimit,
+		"--cpus", d.CPULimit,
+		"--pids-limit", strconv.Itoa(d.pidsLimit()),
+		"--security-opt", "no-new-privileges",
+	}
+	if d.Harden {
+		// An untrusted userland HTTP harness needs no Linux capabilities.
+		args = append(args, "--cap-drop", "ALL")
+	}
+	if d.EgressNetwork != "" {
+		// The egress-restricted sandbox network (allowlisting proxy + host
+		// firewall) instead of the default full-egress bridge. See
+		// docs/sandbox-egress-hardening.md.
+		args = append(args, "--network", d.EgressNetwork)
+	}
+	// Let the harness reach host services (e.g. the Ollama embeddings server) at
+	// the documented host.docker.internal name. On Linux Docker this needs an
+	// explicit host-gateway mapping — unlike Docker Desktop, which injects it
+	// automatically — so the miner's OLLAMA_BASE_URL default resolves.
+	args = append(args,
+		"--add-host", "host.docker.internal:host-gateway",
+		"--publish", "127.0.0.1:0:"+d.HarnessPort, // random host port, loopback only
+	)
+	for k, v := range env {
+		args = append(args, "-e", k+"="+v)
+	}
+	if d.EgressProxy != "" {
+		// Force the harness's outbound calls through the allowlisting proxy; the
+		// host gateway (Ollama) + loopback bypass it via NO_PROXY.
+		args = append(args,
+			"-e", "HTTPS_PROXY="+d.EgressProxy,
+			"-e", "HTTP_PROXY="+d.EgressProxy,
+			"-e", "NO_PROXY=host.docker.internal,localhost,127.0.0.1",
+		)
+	}
+	return append(args, image)
+}
+
 // Run starts the image detached with resource caps and a random host port, then
 // resolves the mapped host port.
 func (d *LocalDocker) Run(ctx context.Context, image string, env map[string]string) (*Handle, error) {
 	runCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	args := []string{
-		"run", "-d", "--rm",
-		"--memory", d.MemoryLimit,
-		"--cpus", d.CPULimit,
-		"--security-opt", "no-new-privileges",
-		// Let the harness reach host services (e.g. the Ollama embeddings server)
-		// at the documented host.docker.internal name. On Linux Docker this needs
-		// an explicit host-gateway mapping — unlike Docker Desktop, which injects
-		// it automatically — so the miner's OLLAMA_BASE_URL default resolves.
-		"--add-host", "host.docker.internal:host-gateway",
-		"--publish", "127.0.0.1:0:" + d.HarnessPort, // random host port, loopback only
-	}
-	for k, v := range env {
-		args = append(args, "-e", k+"="+v)
-	}
-	args = append(args, image)
-
-	out, err := exec.CommandContext(runCtx, "docker", args...).CombinedOutput()
+	out, err := exec.CommandContext(runCtx, "docker", d.runArgs(image, env)...).CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("docker run failed: %s: %w", strings.TrimSpace(string(out)), err)
 	}

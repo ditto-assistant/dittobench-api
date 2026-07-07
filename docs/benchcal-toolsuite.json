@@ -1,0 +1,199 @@
+{
+  "runs": 30,
+  "n_tools": 90,
+  "n_mem": 50,
+  "harness": "refharness (tools) + fixed reference-competence policy (memory)",
+  "tool_mean": {
+    "mean": 0.4624,
+    "stddev": 0.0334,
+    "min": 0.3978,
+    "max": 0.5356,
+    "n": 30
+  },
+  "memory_mean": {
+    "mean": 0.5894,
+    "stddev": 0.005,
+    "min": 0.5814,
+    "max": 0.5998,
+    "n": 30
+  },
+  "composite": {
+    "mean": 0.5259,
+    "stddev": 0.0168,
+    "min": 0.4947,
+    "max": 0.5608,
+    "n": 30
+  },
+  "per_category": {
+    "abstention": {
+      "mean": 0.8083,
+      "stddev": 0.1789,
+      "min": 0.5,
+      "max": 1,
+      "n": 30
+    },
+    "agent_job": {
+      "mean": 0.95,
+      "stddev": 0.119,
+      "min": 0.5,
+      "max": 1,
+      "n": 30
+    },
+    "agent_read_not_run": {
+      "mean": 0.2583,
+      "stddev": 0.209,
+      "min": 0,
+      "max": 0.75,
+      "n": 30
+    },
+    "agent_run_not_read": {
+      "mean": 0,
+      "stddev": 0,
+      "min": 0,
+      "max": 0,
+      "n": 30
+    },
+    "agent_workflow": {
+      "mean": 0.435,
+      "stddev": 0.1361,
+      "min": 0.15,
+      "max": 0.6,
+      "n": 30
+    },
+    "artifacts_create": {
+      "mean": 0.625,
+      "stddev": 0.2213,
+      "min": 0.25,
+      "max": 1,
+      "n": 30
+    },
+    "feedback": {
+      "mean": 0.7667,
+      "stddev": 0.1818,
+      "min": 0.5,
+      "max": 1,
+      "n": 30
+    },
+    "image_create": {
+      "mean": 0.6583,
+      "stddev": 0.2281,
+      "min": 0.25,
+      "max": 1,
+      "n": 30
+    },
+    "link_read": {
+      "mean": 0.175,
+      "stddev": 0.1401,
+      "min": 0,
+      "max": 0.45,
+      "n": 30
+    },
+    "memory_fetch": {
+      "mean": 0,
+      "stddev": 0,
+      "min": 0,
+      "max": 0,
+      "n": 30
+    },
+    "memory_lookup": {
+      "mean": 0,
+      "stddev": 0,
+      "min": 0,
+      "max": 0,
+      "n": 30
+    },
+    "memory_subject": {
+      "mean": 1,
+      "stddev": 0,
+      "min": 1,
+      "max": 1,
+      "n": 30
+    },
+    "multi_image_edit": {
+      "mean": 0.6667,
+      "stddev": 0,
+      "min": 0.6667,
+      "max": 0.6667,
+      "n": 30
+    },
+    "multi_job_status": {
+      "mean": 0.6667,
+      "stddev": 0,
+      "min": 0.6667,
+      "max": 0.6667,
+      "n": 30
+    },
+    "multi_subject_scope": {
+      "mean": 0.3556,
+      "stddev": 0.2037,
+      "min": 0,
+      "max": 0.6667,
+      "n": 30
+    },
+    "multi_web_read": {
+      "mean": 0.4444,
+      "stddev": 0.2069,
+      "min": 0,
+      "max": 0.6667,
+      "n": 30
+    },
+    "no_tool": {
+      "mean": 0.85,
+      "stddev": 0.2,
+      "min": 0.25,
+      "max": 1,
+      "n": 30
+    },
+    "route_memory_not_web": {
+      "mean": 0,
+      "stddev": 0,
+      "min": 0,
+      "max": 0,
+      "n": 30
+    },
+    "route_web_not_memory": {
+      "mean": 0.3167,
+      "stddev": 0.2577,
+      "min": 0,
+      "max": 1,
+      "n": 30
+    },
+    "set_effort": {
+      "mean": 0.4133,
+      "stddev": 0.1454,
+      "min": 0.2,
+      "max": 0.6,
+      "n": 30
+    },
+    "set_model": {
+      "mean": 0.6,
+      "stddev": 0,
+      "min": 0.6,
+      "max": 0.6,
+      "n": 30
+    },
+    "set_tool_prefs": {
+      "mean": 0.6,
+      "stddev": 0.2177,
+      "min": 0.3333,
+      "max": 1,
+      "n": 30
+    },
+    "settings": {
+      "mean": 0.41,
+      "stddev": 0.1446,
+      "min": 0,
+      "max": 0.6,
+      "n": 30
+    },
+    "web_search": {
+      "mean": 0.1917,
+      "stddev": 0.1789,
+      "min": 0,
+      "max": 0.75,
+      "n": 30
+    }
+  },
+  "noise_floor_stddev": 0,
+  "note": "Hermetic structural variance: tool σ = deterministic routing difficulty; memory σ ≈ 0 shows v2 stratification removed question-type-mix variance. Real champion-region composite σ (judge + harness noise) needs the hosted 30-seed run (§8 gate 1); the KOTH margin/score_tol retune (B8) assumes the design target σ ≤ 0.01 and must be reconfirmed there."
+}

@@ -9,11 +9,14 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"log"
 	"math/rand"
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -30,6 +33,7 @@ import (
 	"github.com/ditto-assistant/dittobench-api/internal/sandbox"
 	"github.com/ditto-assistant/dittobench-api/internal/scorer"
 	"github.com/ditto-assistant/dittobench-api/internal/store"
+	"github.com/ditto-assistant/dittobench-api/internal/toolexec"
 	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
 )
 
@@ -311,7 +315,10 @@ func (s *server) submitDirect(w http.ResponseWriter, r *http.Request, req submit
 	runID := uuid.NewString()
 	s.store.Create(runID, "direct", store.StatusRunning, seed, n)
 
-	report, err := s.evaluate(ctx, runID, req.HarnessURL, seed, n)
+	// Direct harness_url path: no crate is built here, so there is no source tree
+	// to fingerprint (nil ⇒ the platform gate falls back to its lexical + size
+	// signals).
+	report, err := s.evaluate(ctx, runID, req.HarnessURL, seed, n, nil)
 	if err != nil {
 		s.store.Fail(runID, err.Error())
 		writeError(w, http.StatusBadGateway, "harness run failed: "+err.Error())
@@ -366,7 +373,7 @@ func (s *server) runSandboxJob(ctx context.Context, runID string, req submitRequ
 	}()
 
 	s.store.SetStatus(runID, store.StatusBuilding)
-	image, buildLog, err := s.sandbox.Build(ctx, sourceFromReq(req))
+	image, buildLog, fingerprint, err := s.sandbox.Build(ctx, sourceFromReq(req))
 	if err != nil {
 		s.store.Fail(runID, "build failed: "+err.Error())
 		log.Printf("sandbox job %s build failed: %v\n%s", runID, err, buildLog)
@@ -386,7 +393,7 @@ func (s *server) runSandboxJob(ctx context.Context, runID string, req submitRequ
 	}
 
 	s.store.SetStatus(runID, store.StatusRunning)
-	if _, err := s.evaluate(ctx, runID, handle.BaseURL, seed, n); err != nil {
+	if _, err := s.evaluate(ctx, runID, handle.BaseURL, seed, n, fingerprint); err != nil {
 		s.store.Fail(runID, "evaluation failed: "+err.Error())
 		return
 	}
@@ -470,29 +477,96 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	// 1. building — build the crate in the Docker sandbox. Skipped on the local
 	//    harness_url path (the miner is already running their harness).
 	var image string
+	var structuralFP *protocol.CodeFingerprint
 	if req.GitURL != "" || req.TarballURL != "" {
 		s.store.SetStage(runID, store.StatusBuilding, 0, total)
-		img, buildLog, err := s.sandbox.Build(ctx, sourceFromReq(req))
+		img, buildLog, fp, err := s.sandbox.Build(ctx, sourceFromReq(req))
 		if err != nil {
 			s.store.Fail(runID, "build failed: "+err.Error())
 			log.Printf("run %s build failed: %v\n%s", runID, err, buildLog)
 			return
 		}
 		image = img
+		structuralFP = fp
 	}
 
 	// 2. generating — fresh, anti-cheat dataset (tools + memory haystack).
 	s.store.SetStage(runID, store.StatusGenerating, 0, total)
 	rng := gen.NewRNG(seed)
 	genModel := llm.GeneratorModel()
-	toolCases := gen.GenerateTools(ctx, rng, prof.Tools, prof.ParaphraseFrac, llmClient, genModel)
-	seedReq, memCases, err := gen.GenerateMemory(ctx, rng, prof.Mem, prof.Distractors, prof.ParaphraseFrac, llmClient, genModel, gen.SeedDir(), gen.OraclePath())
-	if err != nil {
-		s.store.Fail(runID, "dataset generation failed: "+err.Error())
-		return
+	toolCases, toolPara := gen.GenerateTools(ctx, rng, seed, prof.Tools, prof.ParaphraseFrac, llmClient, genModel)
+	// v2 memory engine (bench_version 2): a fresh procedural persona universe
+	// per seed replaces the static LongMemEval fixture. The
+	// plan is a pure function of the master `seed`; realization + selection share
+	// the run rng. The suite lays cases out across seeding tiers (A prepared, B
+	// raw-pairs) and staged Tier-C waves.
+	memSuite := gen.GenerateMemorySuite(ctx, rng, seed, prof.Mem, prof.ParaphraseFrac, prof.Waves, prof.RawPairsFrac, llmClient, genModel)
+	// Multi-graph isolation: seed a second persona under a different
+	// user_id and add cross-user isolation cases. The secondary graph is template-
+	// rendered (no generator tokens). Cases carry the user_id they must be answered
+	// under; they merge into the primary staged-case stream.
+	iso := gen.GenerateIsolation(ctx, rng, seed, prof.Mem, prof.Waves, prof.IsoCases)
+	memSuite.Cases = append(memSuite.Cases, iso.Cases...)
+	para := toolPara
+	para.Add(memSuite.Stats)
+	totalPairs, totalSubjects := 0, 0
+	for _, w := range memSuite.Waves {
+		totalPairs += len(w.Pairs)
+		totalSubjects += len(w.Subjects)
 	}
-	log.Printf("run %s generated: %d tool cases, %d memory cases, %d haystack pairs (%d subjects)",
-		runID, len(toolCases), len(memCases), len(seedReq.Pairs), len(seedReq.Subjects))
+	log.Printf("run %s generated: %d tool cases, %d memory cases, %d haystack pairs (%d subjects) across %d wave(s), %d Tier-B cases; paraphrase attempted=%d applied=%d retried=%d fallback=%d",
+		runID, len(toolCases), len(memSuite.Cases), totalPairs, totalSubjects, memSuite.SeedingWaves, memSuite.TierBCases,
+		para.Attempted, para.Applied, para.Retried, para.Fallback)
+	total = prof.Tools + len(memSuite.Cases) // actual case count for progress
+
+	// Dataset hashing + optional artifact persistence:
+	// hash the fully-rendered dataset so a dispute can be pinned to exact bytes;
+	// when DITTOBENCH_ARTIFACT_DIR is set, persist the artifact keyed by run_id
+	// (the local-file form of the "upload rendered dataset" persistence; a
+	// platform bucket is the drop-in replacement for os.WriteFile here).
+	memCasesFlat := make([]gen.ArtifactCase, 0, len(memSuite.Cases))
+	for _, sc := range memSuite.Cases {
+		memCasesFlat = append(memCasesFlat, gen.ArtifactCase{
+			MemoryCase:   sc.Case,
+			UserID:       sc.UserID,
+			RunAfterWave: sc.RunAfterWave,
+		})
+	}
+	// Phase C: derive each tool case's deterministic mock-tool environment up
+	// front so its served content (the coined needle) is pinned in the hashed
+	// dataset artifact. The Fixtures back the mock endpoint stood up below.
+	toolFixtures := make([]toolexec.Fixture, len(toolCases))
+	fixtureDigests := make([]gen.FixtureDigest, len(toolCases))
+	for i, c := range toolCases {
+		f := toolexec.BuildFixture(seed, c)
+		toolFixtures[i] = f
+		fixtureDigests[i] = gen.FixtureDigest{CaseID: c.ID, Needle: f.NeedleText()}
+	}
+	sort.Slice(fixtureDigests, func(i, j int) bool { return fixtureDigests[i].CaseID < fixtureDigests[j].CaseID })
+	// The hashed artifact covers the secondary isolation graph too (when present),
+	// so a dispute re-scores the exact multi-graph seeding.
+	memWaves := memSuite.Waves
+	if len(iso.SecondaryWave.Pairs) > 0 {
+		memWaves = append(append([]protocol.SeedRequest{}, memSuite.Waves...), iso.SecondaryWave)
+	}
+	artifact := gen.DatasetArtifact{
+		Seed:         seed,
+		BenchVersion: protocol.BenchVersion,
+		GeneratedAt:  protocol.DatasetEpochRFC3339,
+		ToolCases:    toolCases,
+		MemoryWaves:  memWaves,
+		MemoryCases:  memCasesFlat,
+		ToolFixtures: fixtureDigests,
+	}
+	datasetHash, artifactBytes, hashErr := artifact.SHA256Hex()
+	if hashErr != nil {
+		log.Printf("run %s: dataset hashing failed: %v", runID, hashErr)
+	}
+	if dir := strings.TrimSpace(os.Getenv("DITTOBENCH_ARTIFACT_DIR")); dir != "" && artifactBytes != nil {
+		if err := os.WriteFile(filepath.Join(dir, runID+".json"), artifactBytes, 0o644); err != nil {
+			log.Printf("run %s: artifact persist failed: %v", runID, err)
+		}
+	}
 
 	// 3. start the container, forwarding the OpenRouter key + provider config so
 	//    the crate's agent + embedder can run. On the local harness_url path we
@@ -543,49 +617,224 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		return
 	}
 
-	// 4. seeding — push the fresh haystack to the crate's /seed.
-	s.store.SetStage(runID, store.StatusSeeding, 0, total)
-	if len(seedReq.Pairs) > 0 {
-		if _, err := runner.Seed(ctx, harnessURL, seedReq); err != nil {
-			s.store.Fail(runID, "seeding haystack failed: "+err.Error())
-			return
+	// Tools + judge setup.
+	tools := catalog.Catalog()
+	judgeCfg := scorer.JudgeConfig{Model: llm.ScorerModel(), ModelB: llm.ScorerModelB()}
+	perCase := make([]protocol.CaseScore, 0, total)
+	judgeAttempts, judgeErrors := 0, 0
+	countJudge := func(o scorer.JudgeOutcome) {
+		if o.Attempted {
+			judgeAttempts++
+			if o.Errored {
+				judgeErrors++
+			}
 		}
 	}
 
-	// 5. running — execute + score each case, appending partials for the UI.
-	s.store.SetStage(runID, store.StatusRunning, 0, total)
-	tools := catalog.Catalog()
-	scorerModel := llm.ScorerModel()
-	perCase := make([]protocol.CaseScore, 0, total)
+	// Phase C observed execution: stand up the validator's mock tool
+	// endpoint. It serves deterministic, seed-derived results for external-world
+	// tools AND records the real trajectory, so tool cases are scored on what the
+	// validator observed rather than the harness's self-report.
+	// Registered for every case (tool + memory) so a harness may route any
+	// non-memory call through it during any case.
+	toolSrv := toolexec.NewServer()
+	for i, c := range toolCases {
+		toolSrv.Register(c.ID, toolFixtures[i])
+	}
+	for _, sc := range memSuite.Cases {
+		toolSrv.Register(sc.Case.ID, toolexec.BuildFixture(seed, protocol.ToolCase{ID: sc.Case.ID}))
+	}
+	toolEndpoint, stopToolSrv, err := s.startToolServer(toolSrv, image != "")
+	if err != nil {
+		s.store.Fail(runID, "tool endpoint start failed: "+err.Error())
+		return
+	}
+	defer stopToolSrv()
+	if toolEndpoint == "" {
+		log.Printf("run %s: tool_endpoint not advertised (remote harness unreachable); observable tool cases scored capped", runID)
+	}
 
-	for _, c := range toolCases {
-		resp, runErr := runner.RunCase(ctx, harnessURL, c.ID, c.Prompt, tools)
-		cs := scorer.ScoreToolCase(c, resp, runErr == nil)
-		quality := scorer.JudgeToolQuality(ctx, llmClient, scorerModel, c.Prompt, cs.Called, c.ExpectedBehavior, resp.FinalText)
-		cs = scorer.ComposeTool(cs, quality)
+	// 4. tool cases — independent of the memory haystack, so run before seeding.
+	observedTool, cappedTool := 0, 0
+	s.store.SetStage(runID, store.StatusRunning, 0, total)
+	for i, c := range toolCases {
+		resp, runErr := runner.RunCase(ctx, harnessURL, c.ID, c.Prompt, tools, runner.CaseOptions{ToolEndpoint: toolEndpoint})
+		observed := toolSrv.Observed(c.ID)
+		cs := scorer.ScoreToolCaseObserved(c, resp, runErr == nil, observed)
+		injected := false
+		if datagen.IsResultUsage(c.Category) {
+			// Result-usage: deterministic — trajectory + whether the answer
+			// carried the served needle value. No LLM quality judge (the needle is a
+			// fabricated value only the executed tool could reveal).
+			cs = scorer.ComposeResultUsage(cs, resp.FinalText, toolFixtures[i].NeedleValue())
+		} else {
+			quality, inj, jo := scorer.GradeToolQuality(ctx, llmClient, judgeCfg, c.ID, c.Prompt, cs.Called, c.ExpectedBehavior, resp.FinalText)
+			countJudge(jo)
+			cs = scorer.ComposeTool(cs, quality)
+			injected = inj
+		}
+		switch {
+		case injected:
+			cs.Score, cs.Injection = 0, true
+			cs.Notes = append(cs.Notes, "judge flagged prompt-injection attempt (case scored 0)")
+		case len(observed) > 0:
+			observedTool++
+		case toolexec.Observable(c):
+			cs = scorer.CapUnobserved(cs)
+			cappedTool++
+		}
 		perCase = append(perCase, cs)
 		s.store.AppendPartial(runID, cs)
 	}
 
-	for _, mc := range memCases {
-		resp, _ := runner.RunCase(ctx, harnessURL, mc.ID, mc.Question, tools)
-		correct := scorer.JudgeMemory(ctx, llmClient, scorerModel, mc.Question, mc.ExpectedAnswer, resp.FinalText, mc.QuestionType)
-		cs := scorer.ScoreMemoryCase(mc, resp, correct)
-		perCase = append(perCase, cs)
-		s.store.AppendPartial(runID, cs)
+	// 5. memory cases — staged Tier-C ingestion: seed a wave,
+	//    then run the cases it unlocks (all their evidence is now seeded), then
+	//    the next wave. A single-wave run degrades to seed-then-run-all.
+	casesByWave := make([][]gen.StagedCase, memSuite.SeedingWaves)
+	for _, sc := range memSuite.Cases {
+		w := sc.RunAfterWave
+		if w < 0 {
+			w = 0
+		}
+		if w >= memSuite.SeedingWaves {
+			w = memSuite.SeedingWaves - 1
+		}
+		casesByWave[w] = append(casesByWave[w], sc)
+	}
+	// Seed the secondary isolation graph up front (a distinct user_id), so cross-
+	// user isolation cases can run in any wave.
+	if len(iso.SecondaryWave.Pairs) > 0 {
+		s.store.SetStage(runID, store.StatusSeeding, len(perCase), total)
+		if _, err := runner.Seed(ctx, harnessURL, iso.SecondaryWave); err != nil {
+			s.store.Fail(runID, "seeding secondary isolation graph failed: "+err.Error())
+			return
+		}
+	}
+	for w, wave := range memSuite.Waves {
+		if len(wave.Pairs) > 0 {
+			s.store.SetStage(runID, store.StatusSeeding, len(perCase), total)
+			if _, err := runner.Seed(ctx, harnessURL, wave); err != nil {
+				s.store.Fail(runID, fmt.Sprintf("seeding haystack wave %d failed: %s", w, err.Error()))
+				return
+			}
+		}
+		s.store.SetStage(runID, store.StatusRunning, len(perCase), total)
+		for _, sc := range casesByWave[w] {
+			mc := sc.Case
+			// Scope the query to the case's memory graph: isolation cases carry an
+			// explicit user_id; all others default to the primary wave's user.
+			uid := sc.UserID
+			if uid == "" {
+				uid = wave.UserID
+			}
+			resp, _ := runner.RunCase(ctx, harnessURL, mc.ID, mc.Question, tools, runner.CaseOptions{ToolEndpoint: toolEndpoint, UserID: uid})
+			cs, jo := scorer.GradeMemory(ctx, llmClient, judgeCfg, mc, resp)
+			countJudge(jo)
+			perCase = append(perCase, cs)
+			s.store.AppendPartial(runID, cs)
+		}
+	}
+
+	// Run-level LLM-availability gate: a persistent judge outage would
+	// otherwise record a deflated but validly-signed score (every judged case
+	// scored 0). If a majority of the judge calls that were actually attempted
+	// failed (after their per-call retry), fail the RUN as infrastructure error
+	// rather than persisting garbage.
+	if judgeAttempts > 0 && judgeErrors*2 >= judgeAttempts {
+		s.store.Fail(runID, fmt.Sprintf("judge LLM unavailable: %d/%d judge calls failed; run aborted (no score recorded)", judgeErrors, judgeAttempts))
+		log.Printf("run %s aborted: judge LLM unavailable (%d/%d judge calls failed)", runID, judgeErrors, judgeAttempts)
+		return
 	}
 
 	// 6. scoring — aggregate + finish.
 	s.store.SetStage(runID, store.StatusScoring, len(perCase), total)
 	report := scorer.Aggregate(runID, perCase)
 	report.Seed = seed
+	report.StructuralFingerprint = structuralFP
+	injections := 0
+	for _, cs := range perCase {
+		if cs.Injection {
+			injections++
+		}
+	}
+	report.Details = &protocol.RunDetails{
+		BenchVersion:      protocol.BenchVersion,
+		DatasetSHA256:     datasetHash,
+		Paraphrase:        &para,
+		InjectionAttempts: injections,
+		Tokens:            llmClient.Spent(),
+		ToolMean:          report.ToolMean,
+		MemoryMean:        report.MemoryMean,
+		SeedingWaves:      memSuite.SeedingWaves,
+		RawPairsCases:     memSuite.TierBCases,
+		ObservedToolCases: observedTool,
+		CappedToolCases:   cappedTool,
+		IsolationCases:    len(iso.Cases),
+		ToolEfficiency:    scorer.ToolEfficiencyFactor(perCase),
+		Models: &protocol.ModelInfo{
+			Generator:  genModel,
+			Judge:      judgeCfg.Model,
+			JudgeAudit: judgeCfg.ModelB,
+			Harness:    strings.TrimSpace(os.Getenv("DITTOBENCH_HARNESS_MODEL")),
+		},
+		PerCategory: report.PerCategory,
+	}
+	if memSuite.LexicalGap.Questions > 0 {
+		lg := memSuite.LexicalGap
+		report.Details.LexicalGap = &lg
+	}
+	if injections > 0 {
+		log.Printf("run %s: %d judge-injection attempt(s) flagged", runID, injections)
+	}
 	s.store.Finish(runID, report)
-	log.Printf("run %s done: composite=%.3f tool_mean=%.3f memory_mean=%.3f", runID, report.Composite, report.ToolMean, report.MemoryMean)
+	log.Printf("run %s done: bench_version=%d composite=%.3f tool_mean=%.3f memory_mean=%.3f observed=%d capped=%d tokens=%d",
+		runID, protocol.BenchVersion, report.Composite, report.ToolMean, report.MemoryMean, observedTool, cappedTool, llmClient.Spent())
+}
+
+// startToolServer stands up the Phase C mock tool-execution endpoint on an
+// ephemeral host port, serving h at POST /tool. It returns the URL the harness
+// should use (reachable from where the harness runs) and a stop func. The URL is
+// empty when the harness cannot reach our loopback port — a remote hosted
+// harness_url with the SSRF guard on — in which case observable tool cases are
+// scored capped (the harness simply won't call it). Listens on all interfaces so
+// a Docker-sandboxed container reaches it via host.docker.internal.
+func (s *server) startToolServer(h http.Handler, docker bool) (endpoint string, stop func(), err error) {
+	ln, err := net.Listen("tcp", ":0")
+	if err != nil {
+		return "", func() {}, err
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	mux := http.NewServeMux()
+	mux.Handle("POST /tool", h)
+	srv := &http.Server{Handler: mux}
+	go func() {
+		if serveErr := srv.Serve(ln); serveErr != nil && serveErr != http.ErrServerClosed {
+			log.Printf("tool endpoint serve error: %v", serveErr)
+		}
+	}()
+	stop = func() { _ = srv.Close() }
+
+	switch {
+	case docker:
+		// Docker sandbox: the container reaches the host at host.docker.internal
+		// (mapped to host-gateway when the container is started, see sandbox.Run).
+		endpoint = fmt.Sprintf("http://host.docker.internal:%d/tool", port)
+	case s.allowPrivate:
+		// Local dev: the harness runs on the same host as the validator.
+		endpoint = fmt.Sprintf("http://127.0.0.1:%d/tool", port)
+	default:
+		// Hosted practice with a remote harness_url: it cannot reach our loopback
+		// port. Leave the endpoint unadvertised; observable cases score capped.
+		endpoint = ""
+	}
+	return endpoint, stop, nil
 }
 
 // evaluate generates the dataset, runs the harness over it, scores it, and
-// stores the finished report. Shared by both submit modes.
-func (s *server) evaluate(ctx context.Context, runID, harnessURL string, seed int64, n int) (protocol.ScoreReport, error) {
+// stores the finished report. Shared by both submit modes. “fingerprint“ is the
+// crate's structural sketch (nil on the local harness_url path); it is attached to
+// the report as advisory anti-copy metadata and never affects the score.
+func (s *server) evaluate(ctx context.Context, runID, harnessURL string, seed int64, n int, fingerprint *protocol.CodeFingerprint) (protocol.ScoreReport, error) {
 	ds := datagen.Generate(seed, n)
 	tools := catalog.Catalog()
 
@@ -597,6 +846,7 @@ func (s *server) evaluate(ctx context.Context, runID, harnessURL string, seed in
 	s.store.SetStatus(runID, store.StatusScoring)
 	report := scorer.Score(runID, ds.ToolCases, resps)
 	report.Seed = seed
+	report.StructuralFingerprint = fingerprint
 	s.store.Finish(runID, report)
 	return report, nil
 }
