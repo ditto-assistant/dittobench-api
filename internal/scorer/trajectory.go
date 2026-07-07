@@ -59,7 +59,12 @@ func deterministicToolScore(c protocol.ToolCase, calls []protocol.ObservedToolCa
 	}
 
 	argF1 := argCorrectness(c.ExpectedTools, calls, &notes)
-	order := orderCredit(expectedNames, c.ExpectedTools, calls)
+	// Parallel (Unordered) cases: the expected calls are independent, so relative
+	// order carries no signal — award full order credit and grade on name/arg set.
+	order := 1.0
+	if !c.Unordered {
+		order = orderCredit(expectedNames, c.ExpectedTools, calls)
+	}
 
 	// Extra-call / over-budget penalty (scales with call count, unlike v1's flat
 	// 0.1). Skipped entirely when the case allows extra tools.

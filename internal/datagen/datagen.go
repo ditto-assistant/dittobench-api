@@ -21,6 +21,9 @@ type category struct {
 	// tools, when non-empty, is a multi-hop expected sequence (overrides tool);
 	// MaxToolCalls becomes len(tools) and order is scored.
 	tools []string
+	// unordered marks a tools set as INDEPENDENT parallel calls: name/arg set is
+	// scored but relative call order is not (ToolCase.Unordered).
+	unordered bool
 	// argKey, when set on a single-tool category whose filler is an exact token
 	// (a URL, a theme), pins RequiredArgs[argKey]=filler so the argument value is
 	// deterministically scored — right tool + wrong arg no longer gets full credit.
@@ -335,6 +338,17 @@ var categories = []category{
 		},
 	},
 	{
+		// Parallel independent calls (BFCL "parallel"): two unrelated actions in one
+		// turn, neither's input depending on the other's output — so any call order is
+		// correct. Both are about the same entity so one filler renders both.
+		name: "parallel_web_image", tools: []string{"search_web", "create_image"}, unordered: true,
+		templates: []string{
+			"Search the web for %s and also generate an image of it.",
+			"Look up %s online, and separately make me a picture of it.",
+			"Two things: find the latest on %s and create an image of it.",
+		},
+	},
+	{
 		name: "multi_subject_scope", tools: []string{"search_subjects", "search_memories_in_subjects"},
 		templates: []string{
 			"Find my notes related to %s and pull the details.",
@@ -432,7 +446,7 @@ func fillerFor(r *rand.Rand, cat string) string {
 		return efforts[r.Intn(len(efforts))]
 	case "set_tool_prefs":
 		return toolPrefs[r.Intn(len(toolPrefs))]
-	case "multi_web_read":
+	case "multi_web_read", "parallel_web_image":
 		return topics[r.Intn(len(topics))]
 	case "multi_subject_scope":
 		return subjects[r.Intn(len(subjects))]
@@ -602,7 +616,12 @@ func GenerateCasesWithFillers(r *rand.Rand, seed int64, n int) ([]protocol.ToolC
 			}
 			tc.ExpectedTools = tools
 			tc.MaxToolCalls = len(seq)
-			tc.ExpectedBehavior = "call " + strings.Join(seq, " then ") + " in that order"
+			if cat.unordered {
+				tc.Unordered = true
+				tc.ExpectedBehavior = "call " + strings.Join(seq, " and ") + " (in any order)"
+			} else {
+				tc.ExpectedBehavior = "call " + strings.Join(seq, " then ") + " in that order"
+			}
 		}
 
 		cases = append(cases, tc)

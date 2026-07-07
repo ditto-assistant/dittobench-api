@@ -109,6 +109,25 @@ func TestArgHallucinationIsNoTool(t *testing.T) {
 	}
 }
 
+// TestParallelToolsIsUnordered: the parallel category emits an independent
+// two-tool set flagged Unordered so call order is not graded.
+func TestParallelToolsIsUnordered(t *testing.T) {
+	ds := Generate(11, len(categories)*3)
+	seen := 0
+	for _, c := range ds.ToolCases {
+		if c.Category != "parallel_web_image" {
+			continue
+		}
+		seen++
+		if !c.Unordered || len(c.ExpectedTools) != 2 || c.MaxToolCalls != 2 {
+			t.Fatalf("parallel_web_image must be an unordered 2-tool case: %+v", c)
+		}
+	}
+	if seen == 0 {
+		t.Fatal("expected parallel_web_image cases to appear")
+	}
+}
+
 // TestCoversCategories: across a decent n, multiple categories appear.
 func TestCoversCategories(t *testing.T) {
 	ds := Generate(123, 120)

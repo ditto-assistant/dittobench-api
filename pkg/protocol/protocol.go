@@ -16,6 +16,11 @@ type ToolSpec struct {
 }
 
 // ToolCase is one tool-calling benchmark case.
+//
+// Unordered marks a case whose ExpectedTools are INDEPENDENT calls (a parallel
+// request), so the trajectory is scored on the set of names/args only and the
+// relative call order is not graded. Default false: a multi-hop sequence is
+// order-scored (the second call depends on the first).
 type ToolCase struct {
 	ID               string     `json:"id"`
 	Category         string     `json:"category"`
@@ -23,6 +28,7 @@ type ToolCase struct {
 	ExpectedTools    []ToolSpec `json:"expected_tools"`
 	MaxToolCalls     int        `json:"max_tool_calls"`
 	AllowExtraTools  bool       `json:"allow_extra_tools"`
+	Unordered        bool       `json:"unordered,omitempty"`
 	ExpectedBehavior string     `json:"expected_behavior,omitempty"`
 }
 
