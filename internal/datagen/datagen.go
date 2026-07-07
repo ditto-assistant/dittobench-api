@@ -9,15 +9,22 @@ import (
 	"fmt"
 	"math/rand"
 	"strings"
-	"time"
 
+	"github.com/ditto-assistant/dittobench-api/internal/toolexec"
 	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
 )
 
 // category describes one kind of tool-calling case and how to render it.
 type category struct {
-	name      string
-	tool      string // expected tool name; empty means "no tool"
+	name string
+	tool string // single expected tool; empty means "no tool" (unless tools is set)
+	// tools, when non-empty, is a multi-hop expected sequence (overrides tool);
+	// MaxToolCalls becomes len(tools) and order is scored.
+	tools []string
+	// argKey, when set on a single-tool category whose filler is an exact token
+	// (a URL, a theme), pins RequiredArgs[argKey]=filler so the argument value is
+	// deterministically scored — right tool + wrong arg no longer gets full credit.
+	argKey    string
 	templates []string
 }
 
@@ -57,6 +64,16 @@ var (
 		"build a CSV report", "deploy the staging branch",
 	}
 	themes = []string{"dark", "light", "system", "midnight", "solarized"}
+
+	memoryIDs = []string{"mem-1042", "mem-2087", "mem-3310", "mem-7761", "mem-9024"}
+	workflows = []string{"weekly-report", "inbox-triage", "release-notes", "standup-summary", "lead-enrichment"}
+	models    = []string{"gpt-5", "claude-sonnet-5", "gemini-3-pro", "llama-4-70b"}
+	efforts   = []string{"low", "medium", "high"}
+	toolPrefs = []string{"disable web search", "enable image tools", "turn off agent jobs", "allow only memory tools"}
+	feedback  = []string{
+		"the image tool keeps timing out", "love the new memory search",
+		"the export button is broken on mobile", "please add dark mode to artifacts",
+	}
 
 	chitchat = []string{
 		"hey, how's it going?", "thanks, that was helpful!",
@@ -100,7 +117,7 @@ var categories = []category{
 		},
 	},
 	{
-		name: "link_read", tool: "read_links",
+		name: "link_read", tool: "read_links", argKey: "url",
 		templates: []string{
 			"Read %s and summarize it.",
 			"What does this page say: %s",
@@ -132,7 +149,7 @@ var categories = []category{
 		},
 	},
 	{
-		name: "settings", tool: "set_theme",
+		name: "settings", tool: "set_theme", argKey: "theme",
 		templates: []string{
 			"Switch to %s mode.",
 			"Set my theme to %s.",
@@ -189,7 +206,124 @@ var categories = []category{
 			"%s",
 		},
 	},
+	// Full-catalog coverage: single-hop categories so every remaining
+	// catalog tool is the correct answer for some case (10/18 were dead in v1).
+	{
+		name: "memory_fetch", tool: "fetch_memories", argKey: "ids",
+		templates: []string{
+			"Fetch the full text of memory %s.",
+			"Pull up memory %s in full.",
+			"Open memory %s and show me everything in it.",
+		},
+	},
+	{
+		name: "agent_workflow", tool: "execute_agent_workflow", argKey: "workflow",
+		templates: []string{
+			"Run the %s workflow.",
+			"Kick off my %s workflow.",
+			"Execute the %s workflow now.",
+		},
+	},
+	{
+		name: "feedback", tool: "file_feedback_for_team",
+		templates: []string{
+			"Send this to the Ditto team: %s.",
+			"File feedback for the team — %s.",
+			"Report to the devs that %s.",
+		},
+	},
+	{
+		name: "set_model", tool: "set_main_model", argKey: "model",
+		templates: []string{
+			"Switch my chat model to %s.",
+			"Use %s as my main model.",
+			"Change my primary model to %s.",
+		},
+	},
+	{
+		name: "set_effort", tool: "set_reasoning_effort", argKey: "effort",
+		templates: []string{
+			"Set reasoning effort to %s.",
+			"Make responses use %s effort.",
+			"Change the thinking level to %s.",
+		},
+	},
+	{
+		name: "set_tool_prefs", tool: "set_chat_tool_preferences",
+		templates: []string{
+			"Update my tool preferences: %s.",
+			"Change my chat tools so you %s.",
+			"Adjust which tools you use — %s.",
+		},
+	},
+	// Multi-hop trajectories: the correct answer is a tool SEQUENCE, scored
+	// with order credit. These exercise the previously-dormant multi-call path.
+	{
+		name: "multi_web_read", tools: []string{"search_web", "read_links"},
+		templates: []string{
+			"Look up %s online and open the top result.",
+			"Find a page about %s and read it for me.",
+			"Search for %s and summarize the first source.",
+		},
+	},
+	{
+		name: "multi_subject_scope", tools: []string{"search_subjects", "search_memories_in_subjects"},
+		templates: []string{
+			"Find my notes related to %s and pull the details.",
+			"Which subject covers %s — then recall the specifics.",
+			"Look through my topics on %s and fetch what I saved.",
+		},
+	},
+	{
+		name: "multi_job_status", tools: []string{"execute_agent_job", "get_agent_job_status"},
+		templates: []string{
+			"Kick off a job to %s and tell me its status.",
+			"Start %s in the background, then check how it's going.",
+			"Run %s and report the job status.",
+		},
+	},
+	{
+		name: "multi_image_edit", tools: []string{"create_image", "edit_image"},
+		templates: []string{
+			"Make an image of %s, then brighten it.",
+			"Generate %s and then add more detail.",
+			"Create a picture of %s and tweak the colors.",
+		},
+	},
+	// Result-usage (Phase C, capability 13): the answer requires a value
+	// that exists ONLY in the tool's returned content — a fabricated per-seed
+	// needle (toolexec) — so the case cannot be answered by self-report or base-
+	// model knowledge; the harness must actually execute the tool and USE the
+	// result. The %s is the needle's Subject (filled below), keeping the question
+	// and the served fact coherent. Scored deterministically (trajectory + needle-
+	// in-answer), no LLM quality judge.
+	{
+		name: "web_result_usage", tool: "search_web",
+		templates: []string{
+			"Search the web for the latest figure on %s and tell me the exact number.",
+			"What number does the current top result report for %s?",
+			"Look up %s online and give me the precise figure it cites.",
+		},
+	},
+	{
+		name: "multi_web_result_usage", tools: []string{"search_web", "read_links"},
+		templates: []string{
+			"Look up %s online, open the top result, and tell me the exact figure it reports.",
+			"Find a page about %s, read it, and give me the precise number.",
+			"Research %s on the web, read the leading source, and report its exact figure.",
+		},
+	},
 }
+
+// resultUsageSuffix marks the categories whose correct answer must incorporate a
+// tool's returned content (result-usage). Their prompt %s is the fixture needle's
+// Subject and they are scored deterministically against the needle Value.
+const resultUsageSuffix = "_result_usage"
+
+// IsResultUsage reports whether a case category is a result-usage category — the
+// pipeline scores these on trajectory + answer-incorporates-needle rather than
+// the LLM quality judge.
+func IsResultUsage(category string) bool { return strings.HasSuffix(category, resultUsageSuffix) }
 
 // fillerFor returns a random entity string appropriate for a category.
 func fillerFor(r *rand.Rand, cat string) string {
@@ -216,6 +350,26 @@ func fillerFor(r *rand.Rand, cat string) string {
 		return agentTasks[r.Intn(len(agentTasks))]
 	case "agent_read_not_run":
 		return "" // templates have no placeholder
+	case "memory_fetch":
+		return memoryIDs[r.Intn(len(memoryIDs))]
+	case "agent_workflow":
+		return workflows[r.Intn(len(workflows))]
+	case "feedback":
+		return feedback[r.Intn(len(feedback))]
+	case "set_model":
+		return models[r.Intn(len(models))]
+	case "set_effort":
+		return efforts[r.Intn(len(efforts))]
+	case "set_tool_prefs":
+		return toolPrefs[r.Intn(len(toolPrefs))]
+	case "multi_web_read":
+		return topics[r.Intn(len(topics))]
+	case "multi_subject_scope":
+		return subjects[r.Intn(len(subjects))]
+	case "multi_job_status":
+		return agentTasks[r.Intn(len(agentTasks))]
+	case "multi_image_edit":
+		return imagePrompts[r.Intn(len(imagePrompts))]
 	case "no_tool":
 		return chitchat[r.Intn(len(chitchat))]
 	case "abstention":
@@ -238,7 +392,7 @@ func Generate(seed int64, n int) protocol.Dataset {
 	r := rand.New(rand.NewSource(seed))
 	return protocol.Dataset{
 		Seed:        seed,
-		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		GeneratedAt: protocol.DatasetEpochRFC3339,
 		ToolCases:   GenerateCases(r, seed, n),
 	}
 }
@@ -272,34 +426,68 @@ func stratifiedCategoryOrder(r *rand.Rand, n int) []int {
 
 // GenerateCases emits n raw tool cases from an existing RNG. Exported so the
 // anti-cheat generator (internal/gen) can reuse the same templated ground-truth
-// and then LLM-paraphrase the prompts. seed is only used for stable case IDs.
+// and then LLM-paraphrase the prompts. seed drives both the stable case IDs and
+// each result-usage prompt's fabricated needle subject (via toolexec.NeedleFor),
+// which must match the needle the mock endpoint serves.
 func GenerateCases(r *rand.Rand, seed int64, n int) []protocol.ToolCase {
+	cases, _ := GenerateCasesWithFillers(r, seed, n)
+	return cases
+}
+
+// GenerateCasesWithFillers is GenerateCases plus, for each case, the concrete
+// entity ("filler") substituted into its template (empty for templates with no
+// %s slot). The paraphrase verifier (internal/gen) checks that this entity
+// survives realization, so a rewrite that drops it falls back to the template
+// rather than silently shipping a case whose ground truth no longer matches the
+// prompt.
+func GenerateCasesWithFillers(r *rand.Rand, seed int64, n int) ([]protocol.ToolCase, []string) {
 	if n < 1 {
 		n = 1
 	}
 	order := stratifiedCategoryOrder(r, n)
 	cases := make([]protocol.ToolCase, 0, n)
+	fillers := make([]string, 0, n)
 	for i := 0; i < n; i++ {
 		cat := categories[order[i]]
 		tmpl := cat.templates[r.Intn(len(cat.templates))]
-		filler := fillerFor(r, cat.name)
+		caseID := fmt.Sprintf("%s-%d-%04d", cat.name, seed, i)
+		// Result-usage cases: the filler is the fixture needle's Subject, derived
+		// from the SAME (seed, caseID) the mock server uses to serve the answer — so
+		// the question ("...figure on the Veltrix index...") and the served fact
+		// ("the Veltrix index reached 3,418 points") are always coherent.
+		var filler string
+		if IsResultUsage(cat.name) {
+			filler = toolexec.NeedleFor(seed, caseID).Subject
+		} else {
+			filler = fillerFor(r, cat.name)
+		}
 		prompt := tmpl
+
+		// Expected tool sequence: multi-hop tools, else the single tool, else none.
+		seq := cat.tools
+		if len(seq) == 0 && cat.tool != "" {
+			seq = []string{cat.tool}
+		}
+
+		usedFiller := ""
 		if strings.Contains(tmpl, "%s") {
 			prompt = fmt.Sprintf(tmpl, filler)
+			// A real tool case has an entity worth preserving through paraphrase;
+			// no_tool / abstention fillers ARE the whole (freely rephrasable) message.
+			if len(seq) > 0 {
+				usedFiller = filler
+			}
 		}
 
 		tc := protocol.ToolCase{
-			ID:              fmt.Sprintf("%s-%d-%04d", cat.name, seed, i),
+			ID:              caseID,
 			Category:        cat.name,
 			Prompt:          prompt,
-			MaxToolCalls:    1,
 			AllowExtraTools: false,
 		}
 
-		if cat.tool != "" {
-			tc.ExpectedTools = []protocol.ToolSpec{{Name: cat.tool}}
-			tc.ExpectedBehavior = fmt.Sprintf("call %s exactly once", cat.tool)
-		} else {
+		switch {
+		case len(seq) == 0:
 			tc.ExpectedTools = nil
 			tc.MaxToolCalls = 0
 			if cat.name == "abstention" {
@@ -307,9 +495,27 @@ func GenerateCases(r *rand.Rand, seed int64, n int) []protocol.ToolCase {
 			} else {
 				tc.ExpectedBehavior = "respond conversationally without calling any tool"
 			}
+		case len(seq) == 1:
+			ts := protocol.ToolSpec{Name: seq[0]}
+			// Exact-value arg ground truth when the filler is a stable token.
+			if cat.argKey != "" && usedFiller != "" {
+				ts.RequiredArgs = map[string]string{cat.argKey: filler}
+			}
+			tc.ExpectedTools = []protocol.ToolSpec{ts}
+			tc.MaxToolCalls = 1
+			tc.ExpectedBehavior = fmt.Sprintf("call %s exactly once", seq[0])
+		default:
+			tools := make([]protocol.ToolSpec, len(seq))
+			for j, tn := range seq {
+				tools[j] = protocol.ToolSpec{Name: tn}
+			}
+			tc.ExpectedTools = tools
+			tc.MaxToolCalls = len(seq)
+			tc.ExpectedBehavior = "call " + strings.Join(seq, " then ") + " in that order"
 		}
 
 		cases = append(cases, tc)
+		fillers = append(fillers, usedFiller)
 	}
-	return cases
+	return cases, fillers
 }

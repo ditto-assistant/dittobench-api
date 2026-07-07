@@ -144,7 +144,7 @@ func TestRunCase(t *testing.T) {
 		json.NewEncoder(w).Encode(protocol.RunResponse{FinalText: "answer:" + req.UserInput})
 	}))
 	defer srv.Close()
-	resp, err := RunCase(context.Background(), srv.URL, "m1", "what color?", nil)
+	resp, err := RunCase(context.Background(), srv.URL, "m1", "what color?", nil, CaseOptions{})
 	if err != nil {
 		t.Fatalf("RunCase error: %v", err)
 	}

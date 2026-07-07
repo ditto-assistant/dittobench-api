@@ -107,7 +107,7 @@ func RunHarness(ctx context.Context, harnessURL string, ds protocol.Dataset, too
 	out := make(map[string]protocol.RunResponse, len(ds.ToolCases))
 
 	for _, c := range ds.ToolCases {
-		resp, err := runOne(ctx, harnessURL, c, tools)
+		resp, err := runOne(ctx, harnessURL, c, tools, CaseOptions{})
 		if err != nil {
 			// Record an empty response; scorer treats absence/zero as a miss.
 			out[c.ID] = protocol.RunResponse{}
@@ -154,15 +154,26 @@ func Seed(ctx context.Context, harnessURL string, req protocol.SeedRequest) (pro
 	return out, nil
 }
 
+// CaseOptions carries the optional Phase C per-case wire fields: a
+// validator-served mock tool-execution endpoint the harness should route its
+// non-memory tool calls through (so the validator observes the trajectory), and
+// the user_id the case's memory graph was seeded under (multi-graph isolation).
+// The zero value reproduces pre-Phase-C behavior (no endpoint, default user).
+type CaseOptions struct {
+	ToolEndpoint string
+	UserID       string
+}
+
 // RunCase POSTs one tool OR memory case to <harnessURL>/run. For a tool case,
 // pass c (the toolcase) and prompt=c.Prompt; for a memory case, pass a synthetic
 // ToolCase with the question as the prompt. Exported so the pipeline can run +
-// score cases one at a time (appending partial results).
-func RunCase(ctx context.Context, harnessURL, caseID, prompt string, tools []protocol.ToolDefinition) (protocol.RunResponse, error) {
-	return runOne(ctx, harnessURL, protocol.ToolCase{ID: caseID, Prompt: prompt}, tools)
+// score cases one at a time (appending partial results). opts carries the
+// optional Phase C fields (tool_endpoint, user_id).
+func RunCase(ctx context.Context, harnessURL, caseID, prompt string, tools []protocol.ToolDefinition, opts CaseOptions) (protocol.RunResponse, error) {
+	return runOne(ctx, harnessURL, protocol.ToolCase{ID: caseID, Prompt: prompt}, tools, opts)
 }
 
-func runOne(ctx context.Context, harnessURL string, c protocol.ToolCase, tools []protocol.ToolDefinition) (protocol.RunResponse, error) {
+func runOne(ctx context.Context, harnessURL string, c protocol.ToolCase, tools []protocol.ToolDefinition, opts CaseOptions) (protocol.RunResponse, error) {
 	ctx, cancel := context.WithTimeout(ctx, perCaseTimeout)
 	defer cancel()
 
@@ -171,6 +182,8 @@ func runOne(ctx context.Context, harnessURL string, c protocol.ToolCase, tools [
 		SystemPrompt: "You are Ditto, a helpful assistant with access to tools. Call a tool only when it is the right action for the user's request.",
 		UserInput:    c.Prompt,
 		Tools:        tools,
+		ToolEndpoint: opts.ToolEndpoint,
+		UserID:       opts.UserID,
 	}
 	buf, err := json.Marshal(reqBody)
 	if err != nil {
@@ -183,6 +196,7 @@ func runOne(ctx context.Context, harnessURL string, c protocol.ToolCase, tools [
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
+	start := time.Now()
 	httpResp, err := client.Do(httpReq)
 	if err != nil {
 		return protocol.RunResponse{}, fmt.Errorf("post /run: %w", err)
@@ -193,6 +207,7 @@ func runOne(ctx context.Context, harnessURL string, c protocol.ToolCase, tools [
 	if err != nil {
 		return protocol.RunResponse{}, fmt.Errorf("read /run body: %w", err)
 	}
+	elapsed := time.Since(start)
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		return protocol.RunResponse{}, fmt.Errorf("/run returned %d", httpResp.StatusCode)
 	}
@@ -201,5 +216,9 @@ func runOne(ctx context.Context, harnessURL string, c protocol.ToolCase, tools [
 	if err := json.Unmarshal(body, &out); err != nil {
 		return protocol.RunResponse{}, fmt.Errorf("decode /run response: %w", err)
 	}
+	// Measure latency validator-side (the /run round trip) and override any
+	// self-reported value: a harness-supplied latency_ms is untrusted and must
+	// never reach a score.
+	out.LatencyMs = elapsed.Milliseconds()
 	return out, nil
 }
