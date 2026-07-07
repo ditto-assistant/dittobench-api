@@ -26,6 +26,25 @@ const (
 	sessionGapMax  = 14      // up to 14 days between sessions within a case
 )
 
+// Abstention knobs. abstentionType must contain the substring the memory judge
+// keys on (JudgeMemory / buildLMEJudgeSystem) so the abstention clause fires.
+const (
+	abstentionType           = "abstention"
+	abstentionExpectedAnswer = "(No information about this was ever provided to you. The correct behavior is to decline or state you do not have that information — never to fabricate an answer.)"
+	// abstentionDenom sets the abstention share of a run (1/N of the cases).
+	abstentionDenom = 5
+)
+
+// abstentionQuota returns the seed-independent number of abstention cases for a
+// run of n memory cases (~1/abstentionDenom, at least one once a run is large
+// enough to spare it).
+func abstentionQuota(n int) int {
+	if n < abstentionDenom {
+		return 0
+	}
+	return n / abstentionDenom
+}
+
 // GenerateMemory builds a fresh LongMemEval memory benchmark for a submission:
 //   - randomly selects n oracle questions (that have usable manifest pairs),
 //   - assembles a combined haystack from their pairs,
@@ -62,7 +81,15 @@ func GenerateMemory(ctx context.Context, r *rand.Rand, n, distractors int, frac 
 		n = len(candidates)
 	}
 
-	// Stratify the selection by question_type with a fixed, seed-independent
+	// Carve out an abstention quota: needle-absent questions whose evidence is
+	// deliberately withheld from the haystack (and the distractor pool), so the
+	// correct behavior is a grounded decline rather than an answer. This revives
+	// v1's dead judge abstention clause (W6). The count is a fixed function of n
+	// (seed-independent); the recall suite is stratified over the remainder.
+	nAbs := abstentionQuota(n)
+	nRecall := n - nAbs
+
+	// Stratify the recall selection by question_type with a fixed, seed-independent
 	// per-type quota (like the tool suite's stratifiedCategoryOrder). WHICH
 	// questions are drawn within a type varies by seed; HOW MANY of each type
 	// does not — removing the multinomial question-type-draw variance that v1's
@@ -82,10 +109,10 @@ func GenerateMemory(ctx context.Context, r *rand.Rand, n, distractors int, frac 
 	for qt, qs := range byType {
 		avail[qt] = len(qs)
 	}
-	quota := stratifiedTypeQuota(typeOrder, avail, n)
+	quota := stratifiedTypeQuota(typeOrder, avail, nRecall)
 
-	selected := make(map[string]bool, n)
-	selectedOrder := make([]string, 0, n)
+	selected := make(map[string]bool, nRecall)
+	selectedOrder := make([]string, 0, nRecall)
 	for _, qt := range typeOrder {
 		pool := byType[qt] // stable order (candidates follow assets.oracleOrder)
 		perm := r.Perm(len(pool))
@@ -93,6 +120,33 @@ func GenerateMemory(ctx context.Context, r *rand.Rand, n, distractors int, frac 
 			qid := pool[perm[i]]
 			selected[qid] = true
 			selectedOrder = append(selectedOrder, qid)
+		}
+	}
+
+	// Select abstention questions disjoint from the recall set. Their evidence
+	// pairs (absPairs) are withheld from the haystack AND the distractor pool so
+	// the needle is genuinely absent.
+	absSelected := make(map[string]bool, nAbs)
+	absOrder := make([]string, 0, nAbs)
+	absPairs := map[string]bool{}
+	if nAbs > 0 {
+		remaining := make([]string, 0, len(candidates))
+		for _, qid := range candidates {
+			if !selected[qid] {
+				remaining = append(remaining, qid)
+			}
+		}
+		aperm := r.Perm(len(remaining))
+		for i := 0; i < nAbs && i < len(remaining); i++ {
+			qid := remaining[aperm[i]]
+			absSelected[qid] = true
+			absOrder = append(absOrder, qid)
+			mc := assets.manifest[qid]
+			for _, sessIdx := range slices.Sorted(maps.Keys(mc.SessionToPairs)) {
+				for _, pid := range mc.SessionToPairs[sessIdx] {
+					absPairs[pid] = true
+				}
+			}
 		}
 	}
 
@@ -121,13 +175,15 @@ func GenerateMemory(ctx context.Context, r *rand.Rand, n, distractors int, frac 
 	// Inject distractor pairs drawn from NON-selected questions' pairs.
 	distractorPool := make([]string, 0)
 	for _, qid := range candidates {
-		if selected[qid] {
+		if selected[qid] || absSelected[qid] {
 			continue
 		}
 		mc := assets.manifest[qid]
 		for _, sessIdx := range slices.Sorted(maps.Keys(mc.SessionToPairs)) {
 			for _, pid := range mc.SessionToPairs[sessIdx] {
-				if _, ok := assets.pairsByID[pid]; ok && !usedPairs[pid] {
+				// Never seed a pair that is evidence for an abstention question,
+				// even if some other question also references it.
+				if _, ok := assets.pairsByID[pid]; ok && !usedPairs[pid] && !absPairs[pid] {
 					distractorPool = append(distractorPool, pid)
 				}
 			}
@@ -206,11 +262,11 @@ func GenerateMemory(ctx context.Context, r *rand.Rand, n, distractors int, frac 
 		})
 	}
 
-	// Build the memory cases (paraphrase question text, keep the answer).
-	cases := make([]protocol.MemoryCase, 0, len(selectedOrder))
-	for i, qid := range selectedOrder {
-		q := assets.oracle[qid]
-		question := q.Question
+	// maybeParaphraseQ rewrites a question with probability frac (retry+verify
+	// via paraphraseQuestion), accumulating the same fallback telemetry as the
+	// pair path. Shared by recall and abstention cases so the r.Float64() draw
+	// stays in one place.
+	maybeParaphraseQ := func(question string) string {
 		if llm != nil && frac > 0 && r.Float64() < frac {
 			stats.Attempted++
 			pq, retried, ok := paraphraseQuestion(ctx, llm, model, question)
@@ -218,18 +274,36 @@ func GenerateMemory(ctx context.Context, r *rand.Rand, n, distractors int, frac 
 				stats.Retried++
 			}
 			if ok {
-				question = pq
 				stats.Applied++
-			} else {
-				stats.Fallback++
+				return pq
 			}
+			stats.Fallback++
 		}
+		return question
+	}
+
+	// Build the memory cases (paraphrase question text, keep the answer).
+	cases := make([]protocol.MemoryCase, 0, len(selectedOrder)+len(absOrder))
+	for i, qid := range selectedOrder {
+		q := assets.oracle[qid]
 		cases = append(cases, protocol.MemoryCase{
 			ID:             fmt.Sprintf("mem-%04d-%s", i, qid),
 			QuestionID:     qid,
-			QuestionType:   q.QuestionType,
-			Question:       question,
+			QuestionType:   memQuestionType(q.QuestionType),
+			Question:       maybeParaphraseQ(q.Question),
 			ExpectedAnswer: answerText(q.Answer),
+		})
+	}
+	// Abstention cases: the question is asked but its evidence was withheld, so
+	// the graded-correct behavior is a decline (judged by the abstention clause).
+	for i, qid := range absOrder {
+		q := assets.oracle[qid]
+		cases = append(cases, protocol.MemoryCase{
+			ID:             fmt.Sprintf("abs-%04d-%s", i, qid),
+			QuestionID:     qid,
+			QuestionType:   abstentionType,
+			Question:       maybeParaphraseQ(q.Question),
+			ExpectedAnswer: abstentionExpectedAnswer,
 		})
 	}
 

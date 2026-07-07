@@ -92,6 +92,23 @@ func TestJudgeMemory(t *testing.T) {
 	}
 }
 
+func TestJudgeMemoryAbstentionRouting(t *testing.T) {
+	ctx := context.Background()
+	// A clean decline, judged under the abstention clause, is correct.
+	f := &fakeLLM{reply: `{"correct":"yes"}`}
+	if !JudgeMemory(ctx, f, "m", "what is my passport number?", "(no info)", "I don't have that information.", "abstention") {
+		t.Fatal("clean decline should be judged correct")
+	}
+	if !strings.Contains(f.lastSystem, "ABSTENTION") {
+		t.Fatalf("abstention question_type must route to the abstention clause; system=%q", f.lastSystem)
+	}
+	// A fabricated answer is judged incorrect.
+	f2 := &fakeLLM{reply: `{"correct":"no"}`}
+	if JudgeMemory(ctx, f2, "m", "what is my passport number?", "(no info)", "It's X1234567.", "abstention") {
+		t.Fatal("fabricated answer should be judged incorrect")
+	}
+}
+
 func TestJudgeToolQuality(t *testing.T) {
 	ctx := context.Background()
 	// empty response → 0 without calling the LLM
