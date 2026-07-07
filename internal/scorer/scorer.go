@@ -20,33 +20,75 @@ import (
 	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
 )
 
+// Latency (wall-clock) scoring. A per-case latency is mapped to a 0..1 reward:
+// full credit at/below LatencyTargetMs, zero at/above LatencyCeilingMs, linear
+// in between. The per-case rewards are averaged into a latency_mean that takes
+// LatencyWeight of the final composite; correctness keeps the remaining
+// (1-LatencyWeight). Correctness therefore stays primary — speed can lift a
+// correct-but-slow harness but can never rescue a wrong one (a zero-accuracy
+// case still contributes ~0 to the correctness term).
+//
+// These are the sole policy knobs for latency scoring; tune them here.
+const (
+	LatencyTargetMs  int64   = 1000  // at/below this: full latency credit
+	LatencyCeilingMs int64   = 10000 // at/above this: zero latency credit
+	LatencyWeight    float64 = 0.10  // latency's share of the composite
+)
+
+// latencyScore maps a per-case wall-clock latency (ms) to a 0..1 reward using
+// the linear target→ceiling curve documented above.
+func latencyScore(ms int64) float64 {
+	if ms <= LatencyTargetMs {
+		return 1.0
+	}
+	if ms >= LatencyCeilingMs {
+		return 0.0
+	}
+	return float64(LatencyCeilingMs-ms) / float64(LatencyCeilingMs-LatencyTargetMs)
+}
+
+// blendLatency folds a correctness score (0..1) and a latency_mean (0..1) into
+// the final composite. With no cases (latN == 0) the correctness score passes
+// through unchanged.
+func blendLatency(correctness, latencyMean float64, latN int) float64 {
+	if latN == 0 {
+		return correctness
+	}
+	return (1-LatencyWeight)*correctness + LatencyWeight*latencyMean
+}
+
 // Score builds the aggregate report for a set of cases and their responses.
 // Missing responses (harness error / timeout) are scored as zero.
 func Score(runID string, cases []protocol.ToolCase, resps map[string]protocol.RunResponse) protocol.ScoreReport {
 	perCase := make([]protocol.CaseScore, 0, len(cases))
-	var toolSum float64
+	var toolSum, latSum float64
 	latencies := make([]int64, 0, len(cases))
 
 	for _, c := range cases {
 		resp, ok := resps[c.ID]
 		cs := scoreCase(c, resp, ok)
-		cs.Score = cs.ToolScore // direct/legacy mode: composite == tool accuracy
+		cs.Score = cs.ToolScore // direct/legacy mode: correctness == tool accuracy
+		cs.LatencyScore = latencyScore(cs.LatencyMs)
 		perCase = append(perCase, cs)
 		toolSum += cs.ToolScore
+		latSum += cs.LatencyScore
 		latencies = append(latencies, cs.LatencyMs)
 	}
 
 	n := len(cases)
 	toolMean := 0.0
+	latencyMean := 0.0
 	if n > 0 {
 		toolMean = toolSum / float64(n)
+		latencyMean = latSum / float64(n)
 	}
 
 	report := protocol.ScoreReport{
 		RunID:       runID,
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
-		Composite:   toolMean, // tool-mean is the composite for the practice scope
+		Composite:   blendLatency(toolMean, latencyMean, n), // tool accuracy + latency
 		ToolMean:    toolMean,
+		LatencyMean: latencyMean,
 		MedianMs:    median(latencies),
 		N:           n,
 		PerCase:     perCase,
@@ -98,14 +140,17 @@ func ScoreMemoryCase(mc protocol.MemoryCase, resp protocol.RunResponse, correct 
 // canonical 0.6*tool_mean + 0.4*memory_mean (see below); per-category breakdown
 // and median latency included.
 func Aggregate(runID string, perCase []protocol.CaseScore) protocol.ScoreReport {
-	var toolSum, toolN, memSum, memN float64
+	var toolSum, toolN, memSum, memN, latSum float64
 	latencies := make([]int64, 0, len(perCase))
 	catSum := map[string]float64{}
 	catCount := map[string]int{}
 	catOrder := make([]string, 0)
 
-	for _, cs := range perCase {
+	for i := range perCase {
+		cs := &perCase[i]
+		cs.LatencyScore = latencyScore(cs.LatencyMs)
 		latencies = append(latencies, cs.LatencyMs)
+		latSum += cs.LatencyScore
 		switch cs.Kind {
 		case protocol.KindMemory:
 			memSum += cs.Score
@@ -129,18 +174,25 @@ func Aggregate(runID string, perCase []protocol.CaseScore) protocol.ScoreReport 
 	if memN > 0 {
 		memMean = memSum / memN
 	}
-	// Canonical DittoBench composite (matches the platform's recorded formula):
-	// 0.6*tool_mean + 0.4*memory_mean when both kinds are present; falls back to
-	// the single present mean for tool-only or memory-only runs.
-	composite := 0.0
+	// Canonical DittoBench correctness score: 0.6*tool_mean + 0.4*memory_mean when
+	// both kinds are present; falls back to the single present mean for tool-only
+	// or memory-only runs.
+	correctness := 0.0
 	switch {
 	case toolN > 0 && memN > 0:
-		composite = 0.6*toolMean + 0.4*memMean
+		correctness = 0.6*toolMean + 0.4*memMean
 	case toolN > 0:
-		composite = toolMean
+		correctness = toolMean
 	case memN > 0:
-		composite = memMean
+		correctness = memMean
 	}
+	latencyMean := 0.0
+	if len(perCase) > 0 {
+		latencyMean = latSum / float64(len(perCase))
+	}
+	// Blend wall-clock into the composite: correctness keeps (1-LatencyWeight),
+	// latency takes LatencyWeight. Correctness stays primary.
+	composite := blendLatency(correctness, latencyMean, len(perCase))
 
 	perCat := make([]protocol.CategoryStat, 0, len(catOrder))
 	for _, cat := range catOrder {
@@ -157,6 +209,7 @@ func Aggregate(runID string, perCase []protocol.CaseScore) protocol.ScoreReport 
 		Composite:   composite,
 		ToolMean:    toolMean,
 		MemoryMean:  memMean,
+		LatencyMean: latencyMean,
 		MedianMs:    median(latencies),
 		N:           len(perCase),
 		PerCase:     perCase,

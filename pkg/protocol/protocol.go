@@ -129,17 +129,20 @@ const (
 // For a memory case: Score is 1.0 or 0.0 from the LongMemEval yes/no judge, and
 // ToolAccuracy/Quality are unused.
 type CaseScore struct {
-	CaseID    string   `json:"case_id"`
-	Category  string   `json:"category"`
-	Kind      string   `json:"kind"`              // "tool" | "memory"
-	Score     float64  `json:"score"`             // 0..1 composite for this case
-	ToolScore float64  `json:"tool_score"`        // 0..1 deterministic tool accuracy (tool cases)
-	Quality   float64  `json:"quality,omitempty"` // 0..1 LLM response-quality judge (tool cases)
-	Correct   bool     `json:"correct,omitempty"` // memory judge verdict (memory cases)
-	LatencyMs int64    `json:"latency_ms"`
-	Called    []string `json:"called"`
-	Expected  []string `json:"expected"`
-	Notes     []string `json:"notes,omitempty"`
+	CaseID    string  `json:"case_id"`
+	Category  string  `json:"category"`
+	Kind      string  `json:"kind"`              // "tool" | "memory"
+	Score     float64 `json:"score"`             // 0..1 composite for this case
+	ToolScore float64 `json:"tool_score"`        // 0..1 deterministic tool accuracy (tool cases)
+	Quality   float64 `json:"quality,omitempty"` // 0..1 LLM response-quality judge (tool cases)
+	Correct   bool    `json:"correct,omitempty"` // memory judge verdict (memory cases)
+	LatencyMs int64   `json:"latency_ms"`
+	// LatencyScore is the 0..1 wall-clock reward for this case: 1.0 at/below the
+	// latency target, 0.0 at/above the ceiling, linear between (see scorer).
+	LatencyScore float64  `json:"latency_score"`
+	Called       []string `json:"called"`
+	Expected     []string `json:"expected"`
+	Notes        []string `json:"notes,omitempty"`
 }
 
 // CategoryStat is the mean composite score for one category.
@@ -164,12 +167,15 @@ type CodeFingerprint struct {
 
 // ScoreReport is the full result of scoring a run.
 type ScoreReport struct {
-	RunID       string         `json:"run_id"`
-	Seed        int64          `json:"seed"` // dataset seed (anti-overfit reproducibility)
-	GeneratedAt string         `json:"generated_at"`
-	Composite   float64        `json:"composite"`   // 0..1 weighted composite: 0.6*tool_mean + 0.4*memory_mean
-	ToolMean    float64        `json:"tool_mean"`   // 0..1 mean tool-case composite
-	MemoryMean  float64        `json:"memory_mean"` // 0..1 fraction of memory cases correct
+	RunID       string  `json:"run_id"`
+	Seed        int64   `json:"seed"` // dataset seed (anti-overfit reproducibility)
+	GeneratedAt string  `json:"generated_at"`
+	Composite   float64 `json:"composite"`   // 0..1 weighted composite: (1-latency_weight)*(0.6*tool_mean+0.4*memory_mean) + latency_weight*latency_mean
+	ToolMean    float64 `json:"tool_mean"`   // 0..1 mean tool-case composite
+	MemoryMean  float64 `json:"memory_mean"` // 0..1 fraction of memory cases correct
+	// LatencyMean is the 0..1 mean per-case wall-clock reward (see scorer's
+	// latency curve). MedianMs is the raw median latency in ms, kept for display.
+	LatencyMean float64        `json:"latency_mean"`
 	MedianMs    int64          `json:"median_ms"`
 	N           int            `json:"n"`
 	PerCase     []CaseScore    `json:"per_case"`

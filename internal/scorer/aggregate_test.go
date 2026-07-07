@@ -50,8 +50,13 @@ func TestAggregate(t *testing.T) {
 	if r.MemoryMean != 0.5 {
 		t.Fatalf("memory_mean expected 0.5, got %v", r.MemoryMean)
 	}
-	if r.Composite != 0.5 {
-		t.Fatalf("composite expected 0.5, got %v", r.Composite)
+	// All four latencies (10..40ms) are well under the 1s target → latency_mean 1.0.
+	if r.LatencyMean != 1.0 {
+		t.Fatalf("latency_mean expected 1.0, got %v", r.LatencyMean)
+	}
+	// correctness = 0.6*0.5 + 0.4*0.5 = 0.5; composite = 0.9*0.5 + 0.1*1.0 = 0.55.
+	if r.Composite != 0.55 {
+		t.Fatalf("composite expected 0.55, got %v", r.Composite)
 	}
 	if r.N != 4 {
 		t.Fatalf("n expected 4, got %d", r.N)
@@ -70,8 +75,10 @@ func TestAggregate(t *testing.T) {
 }
 
 func TestAggregateCompositeWeighting(t *testing.T) {
-	// tool_mean=1.0, memory_mean=0.0 → 0.6*1.0 + 0.4*0.0 = 0.6 (NOT the old
-	// equal-per-case 0.5), pinning the canonical 0.6/0.4 weighting.
+	// tool_mean=1.0, memory_mean=0.0 → correctness 0.6*1.0 + 0.4*0.0 = 0.6 (NOT
+	// the old equal-per-case 0.5), pinning the canonical 0.6/0.4 weighting. Both
+	// cases report 0ms latency → latency_mean 1.0, so the composite adds the 10%
+	// latency slice: 0.9*0.6 + 0.1*1.0 = 0.64.
 	r := Aggregate("run", []protocol.CaseScore{
 		{CaseID: "t1", Category: "web_search", Kind: protocol.KindTool, Score: 1.0},
 		{CaseID: "m1", Category: "multi-session", Kind: protocol.KindMemory, Score: 0.0},
@@ -79,8 +86,44 @@ func TestAggregateCompositeWeighting(t *testing.T) {
 	if r.ToolMean != 1.0 || r.MemoryMean != 0.0 {
 		t.Fatalf("means: tool=%v mem=%v", r.ToolMean, r.MemoryMean)
 	}
-	if r.Composite != 0.6 {
-		t.Fatalf("composite expected 0.6 (0.6*1 + 0.4*0), got %v", r.Composite)
+	if r.Composite != 0.64 {
+		t.Fatalf("composite expected 0.64 (0.9*(0.6*1+0.4*0) + 0.1*1.0), got %v", r.Composite)
+	}
+}
+
+func TestLatencyScoreCurve(t *testing.T) {
+	cases := []struct {
+		ms   int64
+		want float64
+	}{
+		{0, 1.0},
+		{LatencyTargetMs, 1.0},       // at target: full credit
+		{LatencyCeilingMs, 0.0},      // at ceiling: zero credit
+		{LatencyCeilingMs + 5000, 0}, // past ceiling: clamped to zero
+		{5500, 0.5},                  // midpoint of 1000..10000 → 0.5
+	}
+	for _, c := range cases {
+		if got := latencyScore(c.ms); got != c.want {
+			t.Fatalf("latencyScore(%d) = %v, want %v", c.ms, got, c.want)
+		}
+	}
+}
+
+func TestAggregateLatencyLowersComposite(t *testing.T) {
+	// A perfectly correct but slow (at/over ceiling) run: correctness 1.0 but
+	// latency_mean 0.0 → composite = 0.9*1.0 + 0.1*0.0 = 0.9. Speed cannot be
+	// faked, and slowness costs the 10% latency slice.
+	r := Aggregate("run", []protocol.CaseScore{
+		{Kind: protocol.KindTool, Score: 1.0, Category: "x", LatencyMs: LatencyCeilingMs},
+	})
+	if r.LatencyMean != 0.0 {
+		t.Fatalf("latency_mean expected 0.0, got %v", r.LatencyMean)
+	}
+	if r.Composite != 0.9 {
+		t.Fatalf("composite expected 0.9, got %v", r.Composite)
+	}
+	if r.PerCase[0].LatencyScore != 0.0 {
+		t.Fatalf("per-case latency_score expected 0.0, got %v", r.PerCase[0].LatencyScore)
 	}
 }
 

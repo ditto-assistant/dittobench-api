@@ -212,13 +212,14 @@ func sourceFromReq(req submitRequest) sandbox.Source {
 
 // submitResponse is returned by the direct (synchronous) path.
 type submitResponse struct {
-	RunID     string  `json:"run_id"`
-	Status    string  `json:"status"`
-	Composite float64 `json:"composite"`
-	ToolMean  float64 `json:"tool_mean"`
-	MedianMs  int64   `json:"median_ms"`
-	N         int     `json:"n"`
-	Seed      int64   `json:"seed"`
+	RunID       string  `json:"run_id"`
+	Status      string  `json:"status"`
+	Composite   float64 `json:"composite"`
+	ToolMean    float64 `json:"tool_mean"`
+	LatencyMean float64 `json:"latency_mean"`
+	MedianMs    int64   `json:"median_ms"`
+	N           int     `json:"n"`
+	Seed        int64   `json:"seed"`
 }
 
 // acceptedResponse is returned by the sandbox (asynchronous) path; poll
@@ -322,13 +323,14 @@ func (s *server) submitDirect(w http.ResponseWriter, r *http.Request, req submit
 	}
 
 	writeJSON(w, http.StatusOK, submitResponse{
-		RunID:     report.RunID,
-		Status:    string(store.StatusDone),
-		Composite: report.Composite,
-		ToolMean:  report.ToolMean,
-		MedianMs:  report.MedianMs,
-		N:         report.N,
-		Seed:      seed,
+		RunID:       report.RunID,
+		Status:      string(store.StatusDone),
+		Composite:   report.Composite,
+		ToolMean:    report.ToolMean,
+		LatencyMean: report.LatencyMean,
+		MedianMs:    report.MedianMs,
+		N:           report.N,
+		Seed:        seed,
 	})
 }
 
@@ -572,7 +574,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	report.Seed = seed
 	report.StructuralFingerprint = structuralFP
 	s.store.Finish(runID, report)
-	log.Printf("run %s done: composite=%.3f tool_mean=%.3f memory_mean=%.3f", runID, report.Composite, report.ToolMean, report.MemoryMean)
+	log.Printf("run %s done: composite=%.3f tool_mean=%.3f memory_mean=%.3f latency_mean=%.3f", runID, report.Composite, report.ToolMean, report.MemoryMean, report.LatencyMean)
 }
 
 // evaluate generates the dataset, runs the harness over it, scores it, and

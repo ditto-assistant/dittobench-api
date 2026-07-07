@@ -99,6 +99,7 @@ After running every case, the validator produces a `ScoreReport`.
   "generated_at": "2026-06-16T00:00:00Z",
   "composite": 0.93,
   "tool_mean": 0.93,
+  "latency_mean": 0.98,
   "median_ms": 42,
   "n": 30,
   "per_case": [ /* CaseScore */ ],
@@ -120,6 +121,7 @@ After running every case, the validator produces a `ScoreReport`.
   "category": "web_search",
   "tool_score": 1.0,
   "latency_ms": 42,
+  "latency_score": 1.0,
   "called": ["search_web"],
   "expected": ["search_web"],
   "notes": ["..."]    // optional
@@ -133,7 +135,23 @@ After running every case, the validator produces a `ScoreReport`.
 - `penalty` = `0.1` per unexpected/extra call (skipped if `allow_extra_tools`).
 - `tool_score` = `clamp(base - penalty, 0, 1)`.
 - No-expected-tool cases score `1.0` iff the harness called nothing, else `0.0`.
-- `composite` = mean `tool_score`; `median_ms` = median per-case latency.
+- `median_ms` = median per-case latency (raw, for display).
 
-> Practice scope is tool-calling + speed only. Token cost and memory recall are
-> scored by the on-chain validator, not here.
+### Latency (wall-clock) scoring
+
+Every case also earns a `latency_score` in `[0, 1]` from its `latency_ms`:
+
+- `latency_score` = `1.0` at/below the **target** (`1000ms`), `0.0` at/above the
+  **ceiling** (`10000ms`), linear in between.
+- `latency_mean` = mean `latency_score` across all cases.
+
+The composite blends correctness and latency, with correctness kept primary:
+
+- `correctness` = mean `tool_score` (tool-only), or `0.6*tool_mean + 0.4*memory_mean`
+  when memory cases are present.
+- `composite` = `0.9 * correctness + 0.1 * latency_mean`.
+
+Speed can lift a correct-but-slow harness but never rescues a wrong one — a
+zero-accuracy case still contributes ~0 to the correctness term. The target,
+ceiling, and 10% weight are the only latency policy knobs (see
+`internal/scorer/scorer.go`).
