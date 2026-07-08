@@ -105,6 +105,12 @@ per request (BYOK). The repo stays **private**; the deployed URL is public so
 miners can practice. The `git_url` Docker-build path is intentionally inert here
 (Cloud Run has no Docker daemon).
 
+> **The on-chain scoring path runs this same binary elsewhere.** The Cloud Run
+> deployment above is the *practice* endpoint (`harness_url` only). The subnet
+> validator co-locates a second instance on a **Docker-capable host** (a VM, not
+> Cloud Run) so the `git_url` / `tarball_url` build-and-score path (mode B) is
+> live there — that is the deployment miners are actually graded on.
+
 ## Security (public endpoint hardening)
 
 The hosted service is public + unauthenticated and dials caller-supplied

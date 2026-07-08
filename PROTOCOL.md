@@ -202,12 +202,14 @@ composite:
 - **`structural_fingerprint`** — the AST-shape MinHash sketch above, forwarded
   UNSIGNED with the `ScoreReport`. It is the parse-tree shape only (no
   identifier or literal text), so reformatting and renaming do not change it.
-- **Observed tool-call trajectory** — the `(name, args, hop)` sequence the
-  validator records when a harness executes through `tool_endpoint` (see
-  *Observed tool execution* above). Because it is what the agent *did* at
-  runtime, not source text, it is the copy signal a source-level edit cannot
-  forge; the platform's behavioral check compares trajectories on a shared
-  dataset seed.
+- **Observed tool-call trajectory** — the ordered sequence of observed tool
+  **names** per case (`CaseScore.called`), captured when a harness executes
+  through `tool_endpoint` (see *Observed tool execution* above). Because it is
+  what the agent *did* at runtime, not source text, it is a copy signal a
+  source-level edit cannot forge; the platform's behavioral check compares these
+  name-sequences on a shared dataset seed. Each call's full `(name, args, hop)`
+  is recorded server-side during execution, but the forwarded score report
+  currently carries the per-case name order only (`called`), not the arguments.
 
 The gate holds exact/near-exact copies for review (the earlier upload wins by
 first-seen) and requires agreement across independent signals before flagging
