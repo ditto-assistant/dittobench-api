@@ -26,6 +26,29 @@ jobs:
       - run: go vet ./...
       - run: go test ./...
 
+  # Build the production image on every PR — WITHOUT pushing or deploying. The
+  # test job above builds with cgo enabled (the runner default), but the deployed
+  # image builds in Docker (currently a static cgo/musl build for tree-sitter); a
+  # Dockerfile/cgo break passes `go build` yet fails the image build, which used
+  # to silently skip the deploy (deploy `needs: test`, not the image build). This
+  # reproduces the deploy's image build so that break fails the PR instead. On
+  # push to main the deploy job builds+pushes the image anyway, so this is
+  # PR-only to avoid a redundant build there.
+  docker-build:
+    name: docker image builds
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: false
+
   # Auto-deploy to Cloud Run on merge to main. Authenticates via the org's
   # Workload Identity Federation (same provider/SA the backend uses); no secrets.
   deploy:
