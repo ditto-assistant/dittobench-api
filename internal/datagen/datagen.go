@@ -21,6 +21,9 @@ type category struct {
 	// tools, when non-empty, is a multi-hop expected sequence (overrides tool);
 	// MaxToolCalls becomes len(tools) and order is scored.
 	tools []string
+	// unordered marks a tools set as INDEPENDENT parallel calls: name/arg set is
+	// scored but relative call order is not (ToolCase.Unordered).
+	unordered bool
 	// argKey, when set on a single-tool category whose filler is an exact token
 	// (a URL, a theme), pins RequiredArgs[argKey]=filler so the argument value is
 	// deterministically scored — right tool + wrong arg no longer gets full credit.
@@ -245,6 +248,22 @@ var categories = []category{
 			"%s",
 		},
 	},
+	{
+		// Hallucinated-argument trap (BFCL): the request names an action that needs a
+		// specific argument but never supplies its VALUE, and no prior context holds
+		// it. The correct behavior is to ask for the missing detail, NOT to invoke the
+		// tool with a fabricated argument — so, like abstention, calling any tool
+		// scores 0 (a guessed value is the failure mode being probed).
+		name: "arg_hallucination", tool: "", // required value missing — ask, don't invent
+		templates: []string{
+			"Change my theme.",
+			"Switch my main model, please.",
+			"Set my reasoning effort.",
+			"Read that link and summarize it.",
+			"File that as feedback for the team.",
+			"Run my workflow.",
+		},
+	},
 	// Full-catalog coverage: single-hop categories so every remaining
 	// catalog tool is the correct answer for some case (10/18 were dead in v1).
 	{
@@ -316,6 +335,17 @@ var categories = []category{
 			"Look up %s online and open the top result.",
 			"Find a page about %s and read it for me.",
 			"Search for %s and summarize the first source.",
+		},
+	},
+	{
+		// Parallel independent calls (BFCL "parallel"): two unrelated actions in one
+		// turn, neither's input depending on the other's output — so any call order is
+		// correct. Both are about the same entity so one filler renders both.
+		name: "parallel_web_image", tools: []string{"search_web", "create_image"}, unordered: true,
+		templates: []string{
+			"Search the web for %s and also generate an image of it.",
+			"Look up %s online, and separately make me a picture of it.",
+			"Two things: find the latest on %s and create an image of it.",
 		},
 	},
 	{
@@ -416,7 +446,7 @@ func fillerFor(r *rand.Rand, cat string) string {
 		return efforts[r.Intn(len(efforts))]
 	case "set_tool_prefs":
 		return toolPrefs[r.Intn(len(toolPrefs))]
-	case "multi_web_read":
+	case "multi_web_read", "parallel_web_image":
 		return topics[r.Intn(len(topics))]
 	case "multi_subject_scope":
 		return subjects[r.Intn(len(subjects))]
@@ -428,6 +458,8 @@ func fillerFor(r *rand.Rand, cat string) string {
 		return chitchat[r.Intn(len(chitchat))]
 	case "abstention":
 		return abstentions[r.Intn(len(abstentions))]
+	case "arg_hallucination":
+		return "" // templates omit the required value on purpose
 	default:
 		_ = people // reserved for future multi-entity templates
 		return topics[r.Intn(len(topics))]
@@ -559,9 +591,12 @@ func GenerateCasesWithFillers(r *rand.Rand, seed int64, n int) ([]protocol.ToolC
 		case len(seq) == 0:
 			tc.ExpectedTools = nil
 			tc.MaxToolCalls = 0
-			if cat.name == "abstention" {
+			switch cat.name {
+			case "abstention":
 				tc.ExpectedBehavior = "answer or abstain without calling any tool"
-			} else {
+			case "arg_hallucination":
+				tc.ExpectedBehavior = "ask for the missing detail; do not call a tool with a fabricated argument"
+			default:
 				tc.ExpectedBehavior = "respond conversationally without calling any tool"
 			}
 		case len(seq) == 1:
@@ -581,7 +616,12 @@ func GenerateCasesWithFillers(r *rand.Rand, seed int64, n int) ([]protocol.ToolC
 			}
 			tc.ExpectedTools = tools
 			tc.MaxToolCalls = len(seq)
-			tc.ExpectedBehavior = "call " + strings.Join(seq, " then ") + " in that order"
+			if cat.unordered {
+				tc.Unordered = true
+				tc.ExpectedBehavior = "call " + strings.Join(seq, " and ") + " (in any order)"
+			} else {
+				tc.ExpectedBehavior = "call " + strings.Join(seq, " then ") + " in that order"
+			}
 		}
 
 		cases = append(cases, tc)

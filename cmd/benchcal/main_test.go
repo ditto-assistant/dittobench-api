@@ -32,10 +32,34 @@ func TestCalibrateReportShape(t *testing.T) {
 	if len(rep.PerCategory) < 10 {
 		t.Fatalf("expected per-category breakdown, got %d categories", len(rep.PerCategory))
 	}
-	// Discrimination sanity: the refharness should ace at least one literal
-	// category and fail at least one routing trap (stddev/means vary by category).
-	if s, ok := rep.PerCategory["route_memory_not_web"]; !ok || s.Mean > 0.2 {
-		t.Fatalf("routing trap should defeat the keyword router: %+v", s)
+	// Discrimination sanity: the keyword router should ace at least one literal
+	// category and be defeated by at least one routing trap. Assert on the SET of
+	// traps (not one brittle category): overlap-sensitive traps like
+	// route_memory_not_web drift with the RNG draw, but the run-vs-read / edit /
+	// missing-arg traps structurally defeat a token-overlap router, so the minimum
+	// trap mean stays low regardless of the draw.
+	traps := []string{
+		"route_memory_not_web", "route_web_not_memory", "agent_run_not_read",
+		"agent_read_not_run", "image_edit_not_create", "workflow_not_job", "arg_hallucination",
+	}
+	minTrap := 1.0
+	for _, name := range traps {
+		if s, ok := rep.PerCategory[name]; ok && s.Mean < minTrap {
+			minTrap = s.Mean
+		}
+	}
+	if minTrap > 0.2 {
+		t.Fatalf("expected at least one routing/restraint trap to defeat the keyword router, min trap mean = %.3f", minTrap)
+	}
+	aced := false
+	for _, s := range rep.PerCategory {
+		if s.Mean >= 0.8 {
+			aced = true
+			break
+		}
+	}
+	if !aced {
+		t.Fatal("expected the keyword router to ace at least one literal category (mean >= 0.8)")
 	}
 }
 

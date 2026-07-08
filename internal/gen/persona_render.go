@@ -57,12 +57,17 @@ func RenderHaystack(ctx context.Context, r *rand.Rand, plan *persona.Plan, frac 
 			user, asst := b.UserText, b.AsstText
 			// The canonical value that must survive realization (empty for noise).
 			canonical := ""
+			// asstRec keeps the beat's fact value ONLY in the assistant turn; skip LLM
+			// realization for it so a rewrite can't relocate the value into the user
+			// turn (which would let a harness answer without recalling the assistant).
+			asstSide := false
 			if b.Kind == persona.BeatFact {
 				if f, ok := plan.FactByID(b.FactID); ok {
 					canonical = f.Value
+					asstSide = f.Kind == persona.KindAsstRec
 				}
 			}
-			if llm != nil && frac > 0 && r.Float64() < frac {
+			if llm != nil && frac > 0 && !asstSide && r.Float64() < frac {
 				stats.Attempted++
 				u, a, retried, ok := realizeBeat(ctx, llm, model, user, asst, canonical)
 				if retried {

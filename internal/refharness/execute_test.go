@@ -73,15 +73,24 @@ func TestResultUsageEndToEnd(t *testing.T) {
 	r := rand.New(rand.NewSource(seed))
 	cases := datagen.GenerateCases(r, seed, 200)
 
+	// Pick a single-hop result-usage case the reference (token-overlap) router
+	// actually routes to search_web — some result-usage templates omit the
+	// "search"/"web" keywords the baseline keys on, and this test exercises the
+	// execute→use→score path, which requires the harness to make the call.
 	var ruc protocol.ToolCase
+	var calls []protocol.ObservedToolCall
 	for _, c := range cases {
-		if datagen.IsResultUsage(c.Category) && len(c.ExpectedTools) == 1 { // single-hop web_result_usage
-			ruc = c
+		if !datagen.IsResultUsage(c.Category) || len(c.ExpectedTools) != 1 { // single-hop web_result_usage
+			continue
+		}
+		got := refharness.Route(c.Prompt, catalog.Catalog())
+		if len(got) == 1 && got[0].Name == "search_web" {
+			ruc, calls = c, got
 			break
 		}
 	}
 	if ruc.ID == "" {
-		t.Fatal("no single-hop result-usage case generated")
+		t.Fatal("no routable single-hop result-usage case generated")
 	}
 	fixture := toolexec.BuildFixture(seed, ruc)
 
@@ -92,7 +101,6 @@ func TestResultUsageEndToEnd(t *testing.T) {
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
-	calls := refharness.Route(ruc.Prompt, catalog.Catalog())
 	answer, err := refharness.Execute(context.Background(), ts.URL+"/tool", ruc.ID, "", calls)
 	if err != nil {
 		t.Fatalf("execute: %v", err)

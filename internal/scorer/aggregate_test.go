@@ -102,3 +102,32 @@ func TestAggregateToolOnly(t *testing.T) {
 		t.Fatalf("tool-only: tool=%v mem=%v comp=%v", r.ToolMean, r.MemoryMean, r.Composite)
 	}
 }
+
+// TestPerCategoryStdErr: a category with spread reports a positive standard error
+// of the mean; a single-case category reports 0; a zero-variance category is 0.
+func TestPerCategoryStdErr(t *testing.T) {
+	cases := []protocol.CaseScore{
+		{Category: "spread", Kind: protocol.KindTool, Score: 0},
+		{Category: "spread", Kind: protocol.KindTool, Score: 1},
+		{Category: "spread", Kind: protocol.KindTool, Score: 0},
+		{Category: "spread", Kind: protocol.KindTool, Score: 1},
+		{Category: "flat", Kind: protocol.KindTool, Score: 0.5},
+		{Category: "flat", Kind: protocol.KindTool, Score: 0.5},
+		{Category: "single", Kind: protocol.KindTool, Score: 1},
+	}
+	rep := Aggregate("r", cases)
+	got := map[string]protocol.CategoryStat{}
+	for _, c := range rep.PerCategory {
+		got[c.Category] = c
+	}
+	// mean 0.5 over {0,1,0,1}: sample sd = 0.5773.., se = sd/sqrt(4) = 0.2887..
+	if se := got["spread"].StdErr; se < 0.28 || se > 0.29 {
+		t.Fatalf("spread std_err expected ~0.2887, got %v", se)
+	}
+	if se := got["flat"].StdErr; se != 0 {
+		t.Fatalf("zero-variance category std_err must be 0, got %v", se)
+	}
+	if se := got["single"].StdErr; se != 0 {
+		t.Fatalf("single-case category std_err must be 0, got %v", se)
+	}
+}

@@ -161,8 +161,18 @@ func TestFactValuePreservedInBeat(t *testing.T) {
 	}
 	for _, f := range p.Facts {
 		b := beat[f.ID]
-		if !strings.Contains(b.UserText, f.Value) {
-			t.Fatalf("fact %s value %q not present in its beat user text %q", f.ID, f.Value, b.UserText)
+		// Assistant-side recommendations put the value ONLY in the assistant turn
+		// (the user request names no value) — that is what makes them assistant-side
+		// recall. Every other fact is user-stated.
+		side, sideName := b.UserText, "user"
+		if f.Kind == KindAsstRec {
+			side, sideName = b.AsstText, "assistant"
+			if strings.Contains(b.UserText, f.Value) {
+				t.Fatalf("asst-rec fact %s value %q leaked into user text %q", f.ID, f.Value, b.UserText)
+			}
+		}
+		if !strings.Contains(side, f.Value) {
+			t.Fatalf("fact %s value %q not present in its beat %s text %q", f.ID, f.Value, sideName, side)
 		}
 	}
 }

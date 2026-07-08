@@ -16,6 +16,11 @@ type ToolSpec struct {
 }
 
 // ToolCase is one tool-calling benchmark case.
+//
+// Unordered marks a case whose ExpectedTools are INDEPENDENT calls (a parallel
+// request), so the trajectory is scored on the set of names/args only and the
+// relative call order is not graded. Default false: a multi-hop sequence is
+// order-scored (the second call depends on the first).
 type ToolCase struct {
 	ID               string     `json:"id"`
 	Category         string     `json:"category"`
@@ -23,6 +28,7 @@ type ToolCase struct {
 	ExpectedTools    []ToolSpec `json:"expected_tools"`
 	MaxToolCalls     int        `json:"max_tool_calls"`
 	AllowExtraTools  bool       `json:"allow_extra_tools"`
+	Unordered        bool       `json:"unordered,omitempty"`
 	ExpectedBehavior string     `json:"expected_behavior,omitempty"`
 }
 
@@ -218,11 +224,16 @@ type CaseScore struct {
 	Injection bool `json:"injection,omitempty"`
 }
 
-// CategoryStat is the mean composite score for one category.
+// CategoryStat is the mean composite score for one category, with the standard
+// error of that mean. StdErr makes per-category signal legible: with only a few
+// cases per category a mean carries a wide band (≈StdErr·1.96 for a 95% CI), so a
+// consumer can tell a real per-capability gap from sampling noise instead of
+// over-reading a 2–6-case category. 0 for a single-case category.
 type CategoryStat struct {
 	Category string  `json:"category"`
 	Count    int     `json:"count"`
 	Mean     float64 `json:"mean"`
+	StdErr   float64 `json:"std_err,omitempty"`
 }
 
 // CodeFingerprint is a bottom-k MinHash (KMV) sketch of a submission's source,

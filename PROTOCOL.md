@@ -147,7 +147,8 @@ After running every case, the validator produces a `ScoreReport`.
   // AST-level shingle MinHash sketch of the built crate — the *shape* of the
   // parse tree, never identifier/literal text, so it survives renaming +
   // reformatting. The validator forwards it, UNSIGNED, to the platform's
-  // anti-copy gate; it never affects the score. Byte-compatible with the
+  // anti-copy gate as one signal among several (see "Anti-copy signals"
+  // below); it never affects the score computed here. Byte-compatible with the
   // platform's own fingerprint sketch (v: format version, k: bottom-k budget,
   // card: true shingle count, m: sorted bottom-k shingle hashes).
   "structural_fingerprint": { "v": 1, "k": 256, "card": 812, "m": ["0f1a…", "…"] }
@@ -187,3 +188,30 @@ penalizes overshooting the expected call budget on correctly-answered cases.
 > This local scope is tool-calling accuracy + efficiency; latency is measured and
 > reported but advisory. Memory recall and the memory/tool composite are scored by
 > the full `run_size` pipeline (and the on-chain validator), not here.
+
+## Anti-copy signals
+
+On-chain, the platform runs a duplicate-detection gate that compares each
+uploaded crate against other miners' eligible submissions across several
+dimensions (exact bytes, normalized source, lexical + structural fingerprints,
+prompt/strategy text, and a semantic code-embedding). None of it runs in this
+practice API, and none of it affects a score. This validator only **contributes
+two inputs** to that gate, both carried out-of-band and never folded into the
+composite:
+
+- **`structural_fingerprint`** — the AST-shape MinHash sketch above, forwarded
+  UNSIGNED with the `ScoreReport`. It is the parse-tree shape only (no
+  identifier or literal text), so reformatting and renaming do not change it.
+- **Observed tool-call trajectory** — the `(name, args, hop)` sequence the
+  validator records when a harness executes through `tool_endpoint` (see
+  *Observed tool execution* above). Because it is what the agent *did* at
+  runtime, not source text, it is the copy signal a source-level edit cannot
+  forge; the platform's behavioral check compares trajectories on a shared
+  dataset seed.
+
+The gate holds exact/near-exact copies for review (the earlier upload wins by
+first-seen) and requires agreement across independent signals before flagging
+the softer similarity band, so independent convergence on the shared reference
+harness is not penalized. The miner-facing summary is in the
+[starter kit](https://github.com/ditto-assistant/dittobench-starter-kit) README
+(*Mining on SN118 → Originality*).

@@ -114,6 +114,27 @@ var instruments = []string{
 	"marimba", "concertina", "bassoon", "sitar", "harpsichord", "kalimba",
 }
 
+// assistant-recommendation pools feed the assistant-side-recall questions: the
+// ASSISTANT proposes one of these (the user never names it), so recalling it
+// tests reading the assistant's past turn, not the user's. Values are distinctive
+// multi/proper-noun tokens (verbatim-preserved through realization).
+var asstNovels = []string{
+	"Piranesi", "The Left Hand of Darkness", "Klara and the Sun", "A Canticle for Leibowitz",
+	"The Dispossessed", "Station Eleven", "The Vorrh", "Annihilation",
+}
+var asstGadgets = []string{
+	"a Grovemade desk shelf", "an Elgato key light", "a Kinesis Advantage keyboard",
+	"a Roost laptop stand", "an Anker 737 charger", "a Logitech MX Vertical mouse",
+}
+var asstPodcasts = []string{
+	"Hardcore History", "Radiolab", "99% Invisible", "The Rest Is History",
+	"Cautionary Tales", "Reply All", "Twenty Thousand Hertz",
+}
+var asstTrails = []string{
+	"the Angels Landing trail", "the Precipice Loop", "the Cascade Pass route",
+	"the Devil's Bridge trail", "the Franconia Ridge Loop", "the Iron Goat trail",
+}
+
 // projectNames feeds the multi-session "list all / how many" synthesis
 // questions: several are drawn for one persona.
 var projectNames = []string{

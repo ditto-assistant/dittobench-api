@@ -27,6 +27,28 @@ func detScore(c protocol.ToolCase, calls ...protocol.ObservedToolCall) float64 {
 
 func near(a, b float64) bool { return math.Abs(a-b) < 1e-6 }
 
+// TestUnorderedParallelIgnoresOrder: a parallel (Unordered) case scores full for
+// either call order, while an ordered multi-hop case is penalized when reversed.
+func TestUnorderedParallelIgnoresOrder(t *testing.T) {
+	seq := specs("search_web", "create_image")
+	ordered := protocol.ToolCase{ID: "o", Category: "multi", ExpectedTools: seq, MaxToolCalls: 2}
+	parallel := protocol.ToolCase{ID: "p", Category: "parallel_web_image", ExpectedTools: seq, MaxToolCalls: 2, Unordered: true}
+
+	fwd := call("search_web", `{}`)
+	rev := call("create_image", `{}`)
+
+	if got := detScore(parallel, fwd, rev); !near(got, 1.0) {
+		t.Fatalf("parallel in nominal order should be 1.0, got %v", got)
+	}
+	if got := detScore(parallel, rev, fwd); !near(got, 1.0) {
+		t.Fatalf("parallel reversed should still be 1.0 (order not graded), got %v", got)
+	}
+	// The same reversal on an ORDERED case must lose the trajectory term.
+	if got := detScore(ordered, rev, fwd); got >= 1.0 {
+		t.Fatalf("ordered reversed should be penalized, got %v", got)
+	}
+}
+
 func TestArgScoringExactValue(t *testing.T) {
 	c := protocol.ToolCase{
 		ID: "c", Category: "link_read", MaxToolCalls: 1,

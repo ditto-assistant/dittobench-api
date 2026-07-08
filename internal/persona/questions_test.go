@@ -3,6 +3,7 @@ package persona
 import (
 	"encoding/json"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -239,5 +240,79 @@ func TestKnowledgeUpdateAnswerIsLatest(t *testing.T) {
 	}
 	if !found {
 		t.Skip("no knowledge-update question in this plan")
+	}
+}
+
+// TestAssistantRecallIsAssistantSide: every assistant-recall question's answer
+// lives in the assistant turn of its evidence beat and NOT the user turn — so it
+// genuinely tests recalling what the assistant said.
+func TestAssistantRecallIsAssistantSide(t *testing.T) {
+	p := BuildPlan(7, DefaultOpts())
+	beat := map[string]Beat{}
+	for _, s := range p.Sessions {
+		for _, b := range s.Beats {
+			if b.Kind == BeatFact {
+				beat[b.FactID] = b
+			}
+		}
+	}
+	n := 0
+	for _, q := range DeriveQuestions(p) {
+		if q.Type != QTAssistantRecall {
+			continue
+		}
+		n++
+		b := beat[q.Evidence[0]]
+		if !strings.Contains(b.AsstText, q.Answer) {
+			t.Fatalf("%s: answer %q not in assistant text %q", q.ID, q.Answer, b.AsstText)
+		}
+		if strings.Contains(b.UserText, q.Answer) {
+			t.Fatalf("%s: answer %q leaked into user text %q", q.ID, q.Answer, b.UserText)
+		}
+	}
+	if n == 0 {
+		t.Fatal("expected assistant-recall questions to be derived")
+	}
+}
+
+// TestAggregationCountMatchesMentions: the aggregation question's answer equals
+// the number of recurring-topic mentions, and those mentions span distinct
+// sessions (so it is genuinely a cross-session count).
+func TestAggregationCountMatchesMentions(t *testing.T) {
+	for _, seed := range []int64{1, 7, 42, 100} {
+		p := BuildPlan(seed, DefaultOpts())
+		sessOf := map[string]int{}
+		mentions := 0
+		for _, f := range p.Facts {
+			if f.Kind == KindRecurring {
+				mentions++
+				sessOf[f.ID] = f.Session
+			}
+		}
+		var q *Question
+		qs := DeriveQuestions(p)
+		for i := range qs {
+			if qs[i].Type == QTAggregation {
+				qq := qs[i]
+				q = &qq
+				break
+			}
+		}
+		if mentions < 2 {
+			t.Fatalf("seed %d: expected >=2 recurring mentions, got %d", seed, mentions)
+		}
+		if q == nil {
+			t.Fatalf("seed %d: no aggregation question derived", seed)
+		}
+		if q.Answer != strconv.Itoa(mentions) || len(q.Evidence) != mentions {
+			t.Fatalf("seed %d: answer %q / evidence %d != mentions %d", seed, q.Answer, len(q.Evidence), mentions)
+		}
+		distinct := map[int]bool{}
+		for _, id := range q.Evidence {
+			distinct[sessOf[id]] = true
+		}
+		if len(distinct) < 2 {
+			t.Fatalf("seed %d: mentions must span >=2 sessions, got %d", seed, len(distinct))
+		}
 	}
 }

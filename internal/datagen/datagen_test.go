@@ -1,6 +1,7 @@
 package datagen
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
@@ -67,13 +68,14 @@ func TestClampAndShape(t *testing.T) {
 		if c.ID == "" || c.Category == "" || c.Prompt == "" {
 			t.Fatalf("malformed case: %+v", c)
 		}
-		// no_tool / abstention categories must have no expected tools
-		if (c.Category == "no_tool" || c.Category == "abstention") && len(c.ExpectedTools) != 0 {
+		// no-tool categories (chit-chat, abstention, missing-arg) must expect no tools
+		noTool := c.Category == "no_tool" || c.Category == "abstention" || c.Category == "arg_hallucination"
+		if noTool && len(c.ExpectedTools) != 0 {
 			t.Fatalf("category %s should expect no tools: %+v", c.Category, c)
 		}
 		// tool categories expect >=1 tool, and MaxToolCalls tracks the sequence
 		// length (1 for single-hop, >1 for multi-hop trajectories).
-		if c.Category != "no_tool" && c.Category != "abstention" {
+		if !noTool {
 			if len(c.ExpectedTools) < 1 {
 				t.Fatalf("category %s should expect a tool: %+v", c.Category, c)
 			}
@@ -81,6 +83,48 @@ func TestClampAndShape(t *testing.T) {
 				t.Fatalf("category %s: MaxToolCalls %d != len(ExpectedTools) %d", c.Category, c.MaxToolCalls, len(c.ExpectedTools))
 			}
 		}
+	}
+}
+
+// TestArgHallucinationIsNoTool: the missing-argument trap emits no-expected-tool
+// cases whose expected behavior is to ask rather than fabricate — so the
+// no-tool scoring path (any tool call ⇒ 0) probes hallucinated arguments.
+func TestArgHallucinationIsNoTool(t *testing.T) {
+	ds := Generate(42, len(categories)*3)
+	seen := 0
+	for _, c := range ds.ToolCases {
+		if c.Category != "arg_hallucination" {
+			continue
+		}
+		seen++
+		if len(c.ExpectedTools) != 0 || c.MaxToolCalls != 0 {
+			t.Fatalf("arg_hallucination must expect no tools: %+v", c)
+		}
+		if !strings.Contains(c.ExpectedBehavior, "fabricated argument") {
+			t.Fatalf("arg_hallucination behavior should warn against fabrication: %q", c.ExpectedBehavior)
+		}
+	}
+	if seen == 0 {
+		t.Fatal("expected arg_hallucination cases to appear")
+	}
+}
+
+// TestParallelToolsIsUnordered: the parallel category emits an independent
+// two-tool set flagged Unordered so call order is not graded.
+func TestParallelToolsIsUnordered(t *testing.T) {
+	ds := Generate(11, len(categories)*3)
+	seen := 0
+	for _, c := range ds.ToolCases {
+		if c.Category != "parallel_web_image" {
+			continue
+		}
+		seen++
+		if !c.Unordered || len(c.ExpectedTools) != 2 || c.MaxToolCalls != 2 {
+			t.Fatalf("parallel_web_image must be an unordered 2-tool case: %+v", c)
+		}
+	}
+	if seen == 0 {
+		t.Fatal("expected parallel_web_image cases to appear")
 	}
 }
 
