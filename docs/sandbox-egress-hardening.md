@@ -1,9 +1,13 @@
 # Sandbox egress allowlist + isolation (C-ISO)
 
-**Status: design + phase-1 plumbing landed; enforcement (proxy + firewall)
-pending infra.** This is the SN118 roadmap item "sandbox egress allowlist +
-seccomp/isolation" — the top robustness gap before running real scoring at
-volume.
+**Status: design + phase-1 plumbing + the egress proxy landed; enforcement
+(host firewall + turning the sandbox env flags on) pending infra.** This is the
+SN118 roadmap item "sandbox egress allowlist + seccomp/isolation" — the top
+robustness gap before running real scoring at volume. The container-side flags
+(`internal/sandbox`) and the allowlisting proxy (`cmd/egress-proxy`) are built
+and unit-tested; what remains is the host firewall + the `ditto-sandbox` docker
+network + setting `DITTOBENCH_SANDBOX_*` on the deployed validator (Ansible,
+`infra`).
 
 ## Problem
 
@@ -88,7 +92,7 @@ nothing breaks until infra provisions the proxy + firewall):
 |-------------|---------|--------|
 | `EgressNetwork` / `DITTOBENCH_SANDBOX_EGRESS_NETWORK` | `""` | when set, `docker run --network <name>` (the isolated sandbox network) instead of the default bridge |
 | `EgressProxy` / `DITTOBENCH_SANDBOX_EGRESS_PROXY` | `""` | when set, injects `HTTPS_PROXY`/`HTTP_PROXY`/`NO_PROXY` into the container |
-| `Harden` / `DITTOBENCH_SANDBOX_HARDEN` | `false` | when true, `--cap-drop ALL` (a userland HTTP server needs no Linux caps) + a seccomp profile |
+| `Harden` / `DITTOBENCH_SANDBOX_HARDEN` | `false` | when true, `--cap-drop ALL` (a userland HTTP server needs no Linux caps). Docker's default seccomp profile stays applied; a stricter default-deny profile is a later add (see *Deeper isolation*) |
 | `PidsLimit` / `DITTOBENCH_SANDBOX_PIDS_LIMIT` | `512` | `--pids-limit` (fork-bomb bound) — **always on**; a safe unconditional add |
 
 Empty egress config = current full-egress behavior, so dev/CI keep working; infra
@@ -99,9 +103,12 @@ turns it all on together.
 Ansible on the validator/dittobench VM:
 
 1. Create the `ditto-sandbox` user-defined bridge network (fixed subnet).
-2. Run the **egress proxy** (a small allowlisting CONNECT proxy — a ~50-line Go
-   binary or a hardened `tinyproxy`/`squid` with `openrouter.ai` allowlisted),
-   reachable from the sandbox network, not from the internet.
+2. Run the **egress proxy** — implemented as `cmd/egress-proxy` (a small
+   fail-closed, CONNECT-only, hostname-allowlisting Go proxy;
+   `Dockerfile.egress-proxy`). Env: `EGRESS_PROXY_ALLOW=openrouter.ai`
+   (comma-separated; empty ⇒ deny all), `EGRESS_PROXY_ADDR=:3128`,
+   `EGRESS_PROXY_ALLOW_PORTS=443`. Attach it to the sandbox network, reachable
+   from there but **not** from the internet.
 3. Install **iptables/nftables** rules: for the `ditto-sandbox` subnet, `DROP`
    all `FORWARD` egress except → the proxy and → the host-gateway (Ollama).
 4. Set `DITTOBENCH_SANDBOX_EGRESS_NETWORK=ditto-sandbox`,
