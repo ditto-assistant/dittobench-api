@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
+	"github.com/ditto-assistant/dittobench-datagen/protocol"
 )
 
 // Deterministic tool-trajectory scoring. Ported from the backend's

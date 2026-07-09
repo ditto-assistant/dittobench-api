@@ -10,7 +10,7 @@ import (
 	"encoding/json"
 	"strings"
 
-	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
+	"github.com/ditto-assistant/dittobench-datagen/protocol"
 )
 
 // MinOverlap is the keyword-overlap floor to call a tool at all; below it the

@@ -17,7 +17,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
+	"github.com/ditto-assistant/dittobench-datagen/protocol"
 )
 
 // Score builds the aggregate report for a set of cases and their responses.

@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
+	"github.com/ditto-assistant/dittobench-datagen/protocol"
 )
 
 // execTimeout bounds a single mock tool-execution call.

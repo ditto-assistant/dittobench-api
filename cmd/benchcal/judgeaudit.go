@@ -5,9 +5,9 @@ import (
 	"fmt"
 
 	"github.com/ditto-assistant/dittobench-api/internal/llm"
-	"github.com/ditto-assistant/dittobench-api/internal/persona"
 	"github.com/ditto-assistant/dittobench-api/internal/scorer"
-	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
+	"github.com/ditto-assistant/dittobench-datagen/persona"
+	"github.com/ditto-assistant/dittobench-datagen/protocol"
 )
 
 // Judge-adjacency audit. LoCoMo's judge accepted

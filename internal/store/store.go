@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
+	"github.com/ditto-assistant/dittobench-datagen/protocol"
 )
 
 // Status is a job lifecycle state.

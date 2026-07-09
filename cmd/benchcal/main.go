@@ -25,12 +25,12 @@ import (
 	"os"
 	"sort"
 
-	"github.com/ditto-assistant/dittobench-api/internal/datagen"
-	"github.com/ditto-assistant/dittobench-api/internal/gen"
 	"github.com/ditto-assistant/dittobench-api/internal/refharness"
 	"github.com/ditto-assistant/dittobench-api/internal/scorer"
-	"github.com/ditto-assistant/dittobench-api/pkg/catalog"
-	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
+	"github.com/ditto-assistant/dittobench-datagen/catalog"
+	"github.com/ditto-assistant/dittobench-datagen/datagen"
+	"github.com/ditto-assistant/dittobench-datagen/gen"
+	"github.com/ditto-assistant/dittobench-datagen/protocol"
 )
 
 // refMemoryCompetence is a FIXED (seed-independent) reference harness profile:

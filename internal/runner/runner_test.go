@@ -8,7 +8,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
+	"github.com/ditto-assistant/dittobench-datagen/protocol"
 )
 
 // TestMain relaxes the SSRF guard so tests can reach loopback httptest servers

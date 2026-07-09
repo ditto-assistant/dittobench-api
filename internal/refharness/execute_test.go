@@ -8,12 +8,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ditto-assistant/dittobench-api/pkg/catalog"
-	"github.com/ditto-assistant/dittobench-api/internal/datagen"
 	"github.com/ditto-assistant/dittobench-api/internal/refharness"
 	"github.com/ditto-assistant/dittobench-api/internal/scorer"
-	"github.com/ditto-assistant/dittobench-api/pkg/toolexec"
-	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
+	"github.com/ditto-assistant/dittobench-datagen/catalog"
+	"github.com/ditto-assistant/dittobench-datagen/datagen"
+	"github.com/ditto-assistant/dittobench-datagen/protocol"
+	"github.com/ditto-assistant/dittobench-datagen/toolexec"
 )
 
 // End-to-end of Phase C observed execution across three packages: the reference

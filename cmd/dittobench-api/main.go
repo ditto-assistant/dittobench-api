@@ -22,8 +22,6 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/ditto-assistant/dittobench-api/internal/datagen"
-	"github.com/ditto-assistant/dittobench-api/internal/gen"
 	"github.com/ditto-assistant/dittobench-api/internal/llm"
 	"github.com/ditto-assistant/dittobench-api/internal/netguard"
 	"github.com/ditto-assistant/dittobench-api/internal/ratelimit"
@@ -31,9 +29,11 @@ import (
 	"github.com/ditto-assistant/dittobench-api/internal/sandbox"
 	"github.com/ditto-assistant/dittobench-api/internal/scorer"
 	"github.com/ditto-assistant/dittobench-api/internal/store"
-	"github.com/ditto-assistant/dittobench-api/pkg/catalog"
-	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
-	"github.com/ditto-assistant/dittobench-api/pkg/toolexec"
+	"github.com/ditto-assistant/dittobench-datagen/catalog"
+	"github.com/ditto-assistant/dittobench-datagen/datagen"
+	"github.com/ditto-assistant/dittobench-datagen/gen"
+	"github.com/ditto-assistant/dittobench-datagen/protocol"
+	"github.com/ditto-assistant/dittobench-datagen/toolexec"
 )
 
 const defaultN = 30

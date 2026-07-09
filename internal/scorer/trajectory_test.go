@@ -5,7 +5,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
+	"github.com/ditto-assistant/dittobench-datagen/protocol"
 )
 
 func specs(names ...string) []protocol.ToolSpec {

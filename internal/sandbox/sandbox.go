@@ -33,7 +33,7 @@ import (
 	"time"
 
 	"github.com/ditto-assistant/dittobench-api/internal/astfp"
-	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
+	"github.com/ditto-assistant/dittobench-datagen/protocol"
 )
 
 // Sandbox builds a submission into a runnable image and runs it as an
