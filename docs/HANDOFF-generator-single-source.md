@@ -4,6 +4,32 @@ Written 2026-07-09 for a fresh agent picking up this work with no prior context.
 It spans five repositories under `~/projects`. Read section 0 before doing
 anything.
 
+## Update 2026-07-09 (post-hardening)
+
+The benchmark hardening pass landed after this handoff was first written. It
+does not change the publish decision or the land sequence below, but it does
+change two facts:
+
+- The generator on `dittobench-datagen` `main` now carries the full hardening
+  (opaque case_ids, surface grammar, distractors, dependent-arg multi-hop,
+  error recovery, expanded 45-category catalog, per-seed injection payload,
+  procedural abstention, canaries, metamorphic twins, computed-answer and DRM
+  modalities). The plan of record is `docs/benchmark-hardening-v3.md` (see its
+  section 0 for landed/declined status). The hardening branch
+  `nick/v2-hardening` was fast-forwarded onto local `main`; the private repos'
+  hardening work lives on their own `nick/v2-hardening` branches.
+- The hardening changed generator output, so the known-vector SHA in sections 4
+  and 7 is superseded. The current anchor is: seed 123456789, run_size full ->
+  `e453e668b6f758bd40b913733fab8e20e126384c9f60b95e1c9f9cbeefd172e5`, pinned by
+  `gen/publicvector_test.go`. `bench_version` stays 2 (nothing has shipped to
+  prod, so the entire hardening went into the current version rather than a
+  version bump). 1c (sealed pool deltas) was declined to keep the dataset fully
+  public and byte-reproducible.
+
+Nothing else here changed: the publish is still a one-way door gated on Nick's
+approval, and the `nick/single-generator` -> `main` land sequence and prod
+deploys still wait on that approval.
+
 ## 0. Security constraints (still in effect, do not violate)
 
 - Nothing is made public without Nick's explicit approval. This is the hard gate
