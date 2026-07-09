@@ -16,7 +16,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -567,40 +566,18 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	// when DITTOBENCH_ARTIFACT_DIR is set, persist the artifact keyed by run_id
 	// (the local-file form of the "upload rendered dataset" persistence; a
 	// platform bucket is the drop-in replacement for os.WriteFile here).
-	memCasesFlat := make([]gen.ArtifactCase, 0, len(memSuite.Cases))
-	for _, sc := range memSuite.Cases {
-		memCasesFlat = append(memCasesFlat, gen.ArtifactCase{
-			MemoryCase:   sc.Case,
-			UserID:       sc.UserID,
-			RunAfterWave: sc.RunAfterWave,
-		})
-	}
-	// Phase C: derive each tool case's deterministic mock-tool environment up
-	// front so its served content (the coined needle) is pinned in the hashed
-	// dataset artifact. The Fixtures back the mock endpoint stood up below.
+	// Phase C: derive each tool case's live mock-tool environment (the Fixtures
+	// back the mock endpoint stood up below). The hashed artifact — assembled by
+	// gen.BuildArtifact so the run path and the generate service produce identical
+	// bytes for a seed — recomputes the fixture digests from the same (seed, case).
 	toolFixtures := make([]toolexec.Fixture, len(toolCases))
-	fixtureDigests := make([]gen.FixtureDigest, len(toolCases))
 	for i, c := range toolCases {
-		f := toolexec.BuildFixture(seed, c)
-		toolFixtures[i] = f
-		fixtureDigests[i] = gen.FixtureDigest{CaseID: c.ID, Needle: f.NeedleText()}
+		toolFixtures[i] = toolexec.BuildFixture(seed, c)
 	}
-	sort.Slice(fixtureDigests, func(i, j int) bool { return fixtureDigests[i].CaseID < fixtureDigests[j].CaseID })
 	// The hashed artifact covers the secondary isolation graph too (when present),
 	// so a dispute re-scores the exact multi-graph seeding.
-	memWaves := memSuite.Waves
-	if len(iso.SecondaryWave.Pairs) > 0 {
-		memWaves = append(append([]protocol.SeedRequest{}, memSuite.Waves...), iso.SecondaryWave)
-	}
-	artifact := gen.DatasetArtifact{
-		Seed:         seed,
-		BenchVersion: protocol.BenchVersion,
-		GeneratedAt:  protocol.DatasetEpochRFC3339,
-		ToolCases:    toolCases,
-		MemoryWaves:  memWaves,
-		MemoryCases:  memCasesFlat,
-		ToolFixtures: fixtureDigests,
-	}
+	memWaves := gen.MergeMemoryWaves(memSuite.Waves, iso.SecondaryWave)
+	artifact := gen.BuildArtifact(seed, toolCases, memSuite.Cases, memWaves)
 	datasetHash, artifactBytes, hashErr := artifact.SHA256Hex()
 	if hashErr != nil {
 		log.Printf("run %s: dataset hashing failed: %v", runID, hashErr)
