@@ -8,6 +8,43 @@ contamination-resistant benchmark design (2024-2026). Sections 2 and 3 are
 findings, section 4 is the plan, section 6 says what must land before the
 one-way-door publish.
 
+## 0. Status (2026-07-09)
+
+All of Tier 0, Tier 1, Tier 2, and the generator-independent parts of Tier 3
+have landed. One decision changed the plan: the benchmark stays at
+`bench_version = 2`. Nothing has shipped to production, so there is no released
+v2 surface to preserve; the entire hardening went into the current version
+rather than splitting across a v2/v3 boundary. Every reference to
+"bench_version 3" below is historical framing, not a live version bump. The
+version constant does not move.
+
+Landed:
+
+- Tier 0 (0a-0e): legacy oracle path and seeddata deleted, opaque seed-keyed
+  case_id, catalog drift fixed (array args + dynamic-goal workflow), per-seed
+  injection payload, procedural abstention.
+- Tier 1 (1a-1b, 1d-1g): surface grammar, no-op distractors and tell removal,
+  intent-phrased tool args, dependent-arg multi-hop (job_chain_result_usage),
+  scored error recovery (web_recovery_result_usage), near-miss tool presence.
+- Tier 2 (2a-2f): automations/recipes, capability discovery, Google Workspace,
+  memory-write routing, full settings cluster. Catalog is 45 tool categories.
+- Tier 3 (3a-3f): arg-stuffing penalty, metamorphic twins with
+  consistency sub-score, per-run nonce canaries with an integrity disqualifier,
+  pass^k reporting, behavioral-plausibility advisory signal, composite_stderr
+  threaded scorer -> ledger -> subnet KOTH band.
+- Two additional idea-tracks from BENCHMARK-V3-IDEAS: DRM/interference lures and
+  computed-answer modalities (#7/#9), a calibration/Brier proper-scoring slice
+  (#6), and an offline G-study + 2PL reliability analyzer, `cmd/gstudy` (#4/#5).
+
+Declined:
+
+- 1c (sealed per-version pool deltas): rejected. It conflicts with the standing
+  requirement that the dataset, generator, and benchmark stay fully public,
+  transparent, and auditable so independent validators can reproduce every
+  score byte-for-byte at any time. An encrypted just-in-time-revealed blob is a
+  private surface by construction. The fallback treadmill is plain per-version
+  pool rotation, which preserves full public reproducibility.
+
 ## 1. Threat model once the generator is public
 
 Assumptions: generator source fully public, seed derived from an on-chain block
