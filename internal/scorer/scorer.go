@@ -254,6 +254,40 @@ func CanaryIntegrityFactor(perCase []protocol.CaseScore) float64 {
 	return factor
 }
 
+// MetamorphicConsistency returns the fraction of invariance twin groups whose
+// member cases the harness answered consistently — all correct or all incorrect
+// (Ideas #3). A phrasing-brittle harness that gets one twin right and its
+// reworded twin wrong scores below 1.0. Returns nil when no twin groups ran
+// (nothing to measure). Advisory only — never folded into the composite.
+func MetamorphicConsistency(perCase []protocol.CaseScore) *float64 {
+	groups := map[string][]bool{}
+	for _, cs := range perCase {
+		if cs.TwinGroup == "" {
+			continue
+		}
+		groups[cs.TwinGroup] = append(groups[cs.TwinGroup], cs.Correct)
+	}
+	if len(groups) == 0 {
+		return nil
+	}
+	consistent := 0
+	for _, verdicts := range groups {
+		all, none := true, true
+		for _, v := range verdicts {
+			if v {
+				none = false
+			} else {
+				all = false
+			}
+		}
+		if all || none {
+			consistent++
+		}
+	}
+	v := round6(float64(consistent) / float64(len(groups)))
+	return &v
+}
+
 // Memory grading weights: graded credit = 0.7*correctness +
 // 0.3*grounding, replacing v1's binary yes/no (which maximized variance and hid
 // partial competence).
@@ -273,6 +307,7 @@ func memoryCaseScore(mc protocol.MemoryCase, resp protocol.RunResponse, correctn
 		// 1.0 in float64) without affecting scoring resolution.
 		Score:     clamp01(round6(memCorrectnessWeight*correctness + memGroundingWeight*grounding)),
 		Correct:   correctness >= 0.5,
+		TwinGroup: mc.TwinGroup,
 		LatencyMs: resp.LatencyMs,
 		Called:    calledNames(resp.ToolCalls),
 		Expected:  []string{}, // non-nil so the JSON is [] not null (memory has no expected tools)

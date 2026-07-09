@@ -138,3 +138,21 @@ func TestCanaryIntegrityFactor(t *testing.T) {
 		t.Fatalf("no canary should not penalize, got %v", f)
 	}
 }
+
+func TestMetamorphicConsistency(t *testing.T) {
+	// Two groups: one consistent (both correct), one inconsistent (split).
+	perCase := []protocol.CaseScore{
+		{Kind: protocol.KindMemory, TwinGroup: "g1", Correct: true},
+		{Kind: protocol.KindMemory, TwinGroup: "g1", Correct: true},
+		{Kind: protocol.KindMemory, TwinGroup: "g2", Correct: true},
+		{Kind: protocol.KindMemory, TwinGroup: "g2", Correct: false},
+		{Kind: protocol.KindMemory, Correct: true}, // ungrouped, ignored
+	}
+	got := MetamorphicConsistency(perCase)
+	if got == nil || *got != 0.5 {
+		t.Fatalf("expected 0.5 (1 of 2 groups consistent), got %v", got)
+	}
+	if MetamorphicConsistency([]protocol.CaseScore{{Kind: protocol.KindMemory, Correct: true}}) != nil {
+		t.Fatal("no twin groups should return nil")
+	}
+}
