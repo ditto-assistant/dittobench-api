@@ -68,11 +68,18 @@ can't drift.
 (the staged Tier-C `SeedRequest`s) and each memory case's `RunAfterWave`, so the
 consuming run phase can drive the exact wave staging from the provided artifact.
 
-**Remaining for #46 (exec side):** rewire dittobench-api's `/v1/submit` to accept
-a PROVIDED `DatasetArtifact` (from the platform ticket) and drive its run/score
-loop from it, instead of generating. Keep `scorer`/`runner`/`sandbox`. Design
-fork to settle: keep the miner practice path (`/v1/dataset` + generate-and-score)
-alongside the new score-provided path, or split them.
+**Exec side DONE (2026-07-09), additive:** kept the miner practice path
+(`/v1/dataset` + `/v1/submit` generate-and-score) and ADDED the canonical
+validator path **`POST /v1/score`**. Because generation is deterministic, the
+validator does not transmit the whole artifact — the platform issues
+`(seed, dataset_sha256)` with the ticket, and `/v1/score` regenerates the
+byte-identical dataset from the seed and **fails the run if the regenerated
+`dataset_sha256` does not match** (tamper-evidence for generator/bench_version
+drift). It requires a pinned seed, a `run_size`, the `dataset_sha256`, and exactly
+one harness source, then reuses the full run_size pipeline (build/run → seed →
+judge → signed score). This reuses `runSizeJob` wholesale rather than rewriting
+its staged-wave loop — the hash pin gives the same "scored exactly the platform's
+dataset" guarantee that shipping the raw bytes would.
 
 ## CRITICAL FINDING (2026-07-09, now RESOLVED above): generation was LLM-based + staged
 

@@ -92,6 +92,7 @@ func main() {
 	mux.HandleFunc("GET /v1/dataset", s.handleDataset)
 	mux.HandleFunc("GET /v1/catalog", s.handleCatalog)
 	mux.HandleFunc("POST /v1/submit", s.handleSubmit)
+	mux.HandleFunc("POST /v1/score", s.handleScore)
 	mux.HandleFunc("GET /v1/runs/{id}", s.handleGetRun)
 
 	addr := ":" + strconv.Itoa(*port)
@@ -223,6 +224,13 @@ type submitRequest struct {
 	RunSize string `json:"run_size,omitempty"`
 	// Seed pins the dataset seed (0 = fresh crypto-random per submission).
 	Seed int64 `json:"seed,omitempty"`
+	// ExpectedDatasetSHA256 pins the exact dataset the caller intends to score.
+	// When set, the run regenerates the dataset from Seed (generation is
+	// deterministic) and FAILS if the regenerated dataset_sha256 does not match —
+	// tamper-evidence for the canonical validator path (POST /v1/score): the
+	// platform issues (seed, dataset_sha256) with the ticket, and this guarantees
+	// the validator scored precisely that dataset. Empty on the practice path.
+	ExpectedDatasetSHA256 string `json:"dataset_sha256,omitempty"`
 	// OpenRouterKey is the miner's BYOK OpenRouter key, used for the generator
 	// (paraphrase) + judge (scoring). The hosted practice API requires it per
 	// request (it stores no keys); locally it falls back to the server env.
@@ -340,6 +348,65 @@ func (s *server) handleSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.submitDirect(w, r, req, n)
+}
+
+// handleScore is the CANONICAL validator scoring path. Unlike /v1/submit (miner
+// practice: fresh seed, generate-and-score), a validator scores the EXACT dataset
+// the platform issued with its ticket, so this endpoint requires a pinned seed, a
+// run_size, and the platform's dataset_sha256, and it fails the run if the
+// regenerated dataset does not hash to that value (tamper-evidence). It reuses
+// the full run_size pipeline (build/run → seed → judge → score → signed report).
+func (s *server) handleScore(w http.ResponseWriter, r *http.Request) {
+	if !s.allowPrivate && !s.limiter.Allow(clientIP(r)) {
+		writeError(w, http.StatusTooManyRequests, "rate limit exceeded; slow down and retry shortly")
+		return
+	}
+	var req submitRequest
+	r.Body = http.MaxBytesReader(w, r.Body, maxSubmitBody)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid or oversized JSON body")
+		return
+	}
+	// Validator-specific preconditions (beyond what submitRunSize enforces).
+	if req.Seed == 0 {
+		writeError(w, http.StatusBadRequest, "seed is required (the platform-issued dataset seed) for /v1/score")
+		return
+	}
+	if strings.TrimSpace(req.ExpectedDatasetSHA256) == "" {
+		writeError(w, http.StatusBadRequest, "dataset_sha256 is required (the platform-issued dataset hash) for /v1/score")
+		return
+	}
+	if req.RunSize == "" {
+		writeError(w, http.StatusBadRequest, "run_size is required (small|medium|full) for /v1/score")
+		return
+	}
+	// Exactly one harness source; SSRF-guard any caller-supplied URL (same rules
+	// as /v1/submit).
+	sources := 0
+	for _, set := range []bool{req.HarnessURL != "", req.GitURL != "", req.TarballURL != ""} {
+		if set {
+			sources++
+		}
+	}
+	if sources != 1 {
+		writeError(w, http.StatusBadRequest, "provide exactly one of harness_url, git_url, or tarball_url")
+		return
+	}
+	if req.HarnessURL != "" {
+		if err := netguard.ValidateURL(req.HarnessURL, s.allowPrivate); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	if req.TarballURL != "" {
+		if err := netguard.ValidateURL(req.TarballURL, s.allowPrivate); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	// Delegate to the shared run_size pipeline; the dataset_sha256 pin is enforced
+	// inside runSizeJob after regeneration.
+	s.submitRunSize(w, r, req)
 }
 
 // submitDirect scores a harness the miner is already running, synchronously.
@@ -581,6 +648,15 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	datasetHash, artifactBytes, hashErr := artifact.SHA256Hex()
 	if hashErr != nil {
 		log.Printf("run %s: dataset hashing failed: %v", runID, hashErr)
+	}
+	// Canonical validator path (/v1/score): the platform pins the dataset it
+	// issued with the ticket. Regeneration is deterministic, so a mismatch means
+	// the generator/bench_version drifted from what the platform shipped — fail
+	// loudly rather than score a different dataset than the one under dispute.
+	if want := strings.TrimSpace(req.ExpectedDatasetSHA256); want != "" && hashErr == nil && !strings.EqualFold(want, datasetHash) {
+		s.store.Fail(runID, "dataset_sha256 mismatch: platform issued "+want+" but this validator regenerated "+datasetHash+" (generator/bench_version drift)")
+		log.Printf("run %s: dataset_sha256 mismatch (want %s got %s)", runID, want, datasetHash)
+		return
 	}
 	if dir := strings.TrimSpace(os.Getenv("DITTOBENCH_ARTIFACT_DIR")); dir != "" && artifactBytes != nil {
 		if err := os.WriteFile(filepath.Join(dir, runID+".json"), artifactBytes, 0o644); err != nil {
