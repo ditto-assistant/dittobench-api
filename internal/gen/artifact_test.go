@@ -1,50 +1,13 @@
 package gen
 
-import (
-	"context"
-	"sort"
-	"testing"
+import "testing"
 
-	"github.com/ditto-assistant/dittobench-api/internal/toolexec"
-	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
-)
-
-// artifactFor assembles the full DatasetArtifact the pipeline hashes, from a
-// deterministic (nil-LLM) generation of the same (seed, n): tool cases, their
-// mock-tool fixtures, the memory waves and cases, and the multi-graph isolation
-// layer. It mirrors runSizeJob's assembly so the reproducibility test exercises
-// every generator whose output the digest depends on — not memory cases alone.
+// artifactFor builds the full DatasetArtifact for (seed, n) via the production
+// GenerateDataset entry point — the same deterministic pipeline the generate
+// service and the run path use — so the reproducibility tests exercise the real
+// assembly, not a test-local copy.
 func artifactFor(seed int64, n int) DatasetArtifact {
-	ctx := context.Background()
-	r := NewRNG(seed)
-	toolCases, _ := GenerateTools(ctx, r, seed, n, 0, nil, "")
-	suite := GenerateMemorySuite(ctx, r, seed, n, 0, 2, 0.3, nil, "")
-	iso := GenerateIsolation(ctx, r, seed, n, 2, 4)
-	suite.Cases = append(suite.Cases, iso.Cases...)
-
-	flat := make([]ArtifactCase, 0, len(suite.Cases))
-	for _, sc := range suite.Cases {
-		flat = append(flat, ArtifactCase{MemoryCase: sc.Case, UserID: sc.UserID, RunAfterWave: sc.RunAfterWave})
-	}
-	fixtures := make([]FixtureDigest, 0, len(toolCases))
-	for _, c := range toolCases {
-		f := toolexec.BuildFixture(seed, c)
-		fixtures = append(fixtures, FixtureDigest{CaseID: c.ID, Needle: f.NeedleText()})
-	}
-	sort.Slice(fixtures, func(i, j int) bool { return fixtures[i].CaseID < fixtures[j].CaseID })
-	memWaves := suite.Waves
-	if len(iso.SecondaryWave.Pairs) > 0 {
-		memWaves = append(append([]protocol.SeedRequest{}, suite.Waves...), iso.SecondaryWave)
-	}
-	return DatasetArtifact{
-		Seed:         seed,
-		BenchVersion: protocol.BenchVersion,
-		GeneratedAt:  protocol.DatasetEpochRFC3339,
-		ToolCases:    toolCases,
-		MemoryWaves:  memWaves,
-		MemoryCases:  flat,
-		ToolFixtures: fixtures,
-	}
+	return GenerateDataset(seed, Profile{Tools: n, Mem: n, Waves: 2, RawPairsFrac: 0.3, IsoCases: 4})
 }
 
 // TestDatasetHashStable checks a hash is stable across repeated hashing of the

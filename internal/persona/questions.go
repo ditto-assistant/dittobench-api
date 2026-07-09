@@ -22,14 +22,52 @@ const (
 	QTAggregation           = "aggregation-count"
 )
 
+// askVariant deterministically selects one phrasing from options, keyed by the
+// plan seed and a stable per-question key. A submission's seed fixes the wording
+// while different seeds vary it — deterministic surface anti-memorization,
+// mirroring the tool path's template-variant selection (datagen's
+// cat.templates[r.Intn(...)]). It hashes the key rather than drawing from a
+// positional rng stream, so a question's phrasing does not shift when unrelated
+// questions are added/removed. Empty options => "" (caller skips); a single
+// option is returned as-is.
+func askVariant(seed int64, key string, options []string) string {
+	if len(options) == 0 {
+		return ""
+	}
+	if len(options) == 1 {
+		return options[0]
+	}
+	// Mix the key hash with the seed (odd multiplier + golden-ratio constant) so
+	// distinct keys decorrelate and the same key varies across seeds.
+	h := uint64(factHash(key)) ^ (uint64(seed)*0x100000001b3 + 0x9e3779b97f4a7c15)
+	return options[h%uint64(len(options))]
+}
+
 // asstRecAsk is the recall question for an assistant-side recommendation, keyed
 // by the fact's attribute. The answer is the value the ASSISTANT gave, so it is
-// recoverable only from the assistant's past turn.
-var asstRecAsk = map[string]string{
-	"rec_novel":   "What novel did you recommend that I read?",
-	"rec_gadget":  "What gadget did you suggest for my home office?",
-	"rec_podcast": "Which podcast did you recommend for my commute?",
-	"rec_trail":   "Which hiking trail did you suggest for me?",
+// recoverable only from the assistant's past turn. Each attribute carries a set
+// of phrasings; askVariant picks one per (seed, attribute).
+var asstRecAsk = map[string][]string{
+	"rec_novel": {
+		"What novel did you recommend that I read?",
+		"Which book did you suggest I pick up?",
+		"What was the novel you told me to read?",
+	},
+	"rec_gadget": {
+		"What gadget did you suggest for my home office?",
+		"Which device did you recommend for my desk setup?",
+		"What piece of kit did you suggest for my office?",
+	},
+	"rec_podcast": {
+		"Which podcast did you recommend for my commute?",
+		"What podcast did you suggest I listen to on my way to work?",
+		"Which show did you tell me to put on for my commute?",
+	},
+	"rec_trail": {
+		"Which hiking trail did you suggest for me?",
+		"What trail did you recommend I hike?",
+		"Which walk did you suggest I try?",
+	},
 }
 
 // injectionPayload is the token an embedded prompt-injection tries to make the
@@ -81,63 +119,75 @@ type Question struct {
 
 // scalar recall question text, keyed by attribute. "current" wording disambiguates
 // the latest-value-wins semantics for updated attributes.
-var scalarAsk = map[string]string{
-	"city":       "Which city do I currently live in?",
-	"occupation": "What is my current job?",
-	"employer":   "Who is my current employer?",
-	"car":        "What car do I currently drive?",
-	"hometown":   "What is my hometown?",
-	"partner":    "What is my partner's name?",
-	"instrument": "What instrument do I play?",
-	"alma_mater": "Where did I go to university?",
+// scalarAsk holds the recall phrasings per attribute; askVariant picks one per
+// (seed, attribute). "current"/"now" wording disambiguates latest-value-wins for
+// updated attributes; every variant of an attribute must ask for the same fact.
+var scalarAsk = map[string][]string{
+	"city":       {"Which city do I currently live in?", "Where do I live these days?", "What city am I based in now?"},
+	"occupation": {"What is my current job?", "What do I do for work now?", "What's my current occupation?"},
+	"employer":   {"Who is my current employer?", "Which company do I work for now?", "Who do I currently work for?"},
+	"car":        {"What car do I currently drive?", "Which car do I drive these days?", "What's my current car?"},
+	"hometown":   {"What is my hometown?", "Where am I originally from?", "Which town did I grow up in?"},
+	"partner":    {"What is my partner's name?", "What's the name of my partner?", "Who is my partner?"},
+	"instrument": {"What instrument do I play?", "Which instrument do I play?", "What do I play musically?"},
+	"alma_mater": {"Where did I go to university?", "Which university did I attend?", "Where did I study for my degree?"},
 	// software domain
-	"primary_language": "What is my primary programming language?",
-	"code_editor":      "What code editor do I use?",
+	"primary_language": {"What is my primary programming language?", "Which language do I mainly code in?", "What's my main programming language?"},
+	"code_editor":      {"What code editor do I use?", "Which editor do I write code in?", "What's my editor of choice?"},
 	// medical domain
-	"diagnosis":  "What is my current medical diagnosis?",
-	"medication": "What medication am I currently taking?",
+	"diagnosis":  {"What is my current medical diagnosis?", "What have I been diagnosed with?", "What's my current diagnosis?"},
+	"medication": {"What medication am I currently taking?", "Which medication am I on right now?", "What am I currently prescribed?"},
 	// legal domain
-	"practice_area": "What area of law do I practice?",
-	"bar_admission": "Which state's bar am I admitted to?",
+	"practice_area": {"What area of law do I practice?", "Which area of law is my practice?", "What kind of law do I practice?"},
+	"bar_admission": {"Which state's bar am I admitted to?", "In which state am I admitted to the bar?", "Where am I admitted to practice law?"},
 	// finance domain
-	"risk_tolerance": "What is my current risk tolerance?",
-	"brokerage":      "Which brokerage do I use?",
+	"risk_tolerance": {"What is my current risk tolerance?", "How would I describe my risk tolerance now?", "What's my current appetite for risk?"},
+	"brokerage":      {"Which brokerage do I use?", "What brokerage do I hold my accounts with?", "Which broker do I use?"},
 }
 
-var prefAsk = map[string]string{
-	"favorite_cuisine": "What is my favorite cuisine?",
-	"dietary":          "What is my dietary preference?",
-	"favorite_color":   "What is my favorite color?",
+var prefAsk = map[string][]string{
+	"favorite_cuisine": {"What is my favorite cuisine?", "Which cuisine do I like best?", "What kind of food is my favorite?"},
+	"dietary":          {"What is my dietary preference?", "What are my dietary requirements?", "How would I describe my diet?"},
+	"favorite_color":   {"What is my favorite color?", "Which color do I like most?", "What's my favorite color?"},
 }
 
 // prefApply is the preference-APPLICATION request: a task whose correct answer
 // must honor the seeded preference without the preference being restated.
-var prefApply = map[string]string{
-	"favorite_cuisine": "I'm booking a restaurant for dinner tonight. What kind of place should I pick for me?",
-	"dietary":          "Suggest a main course for me to cook this evening.",
-	"favorite_color":   "I'm repainting my study and want a color I'll love. What would you suggest for me?",
+var prefApply = map[string][]string{
+	"favorite_cuisine": {
+		"I'm booking a restaurant for dinner tonight. What kind of place should I pick for me?",
+		"I want to eat out tonight. What sort of restaurant would suit me?",
+	},
+	"dietary": {
+		"Suggest a main course for me to cook this evening.",
+		"What should I make for dinner tonight? Suggest a main course for me.",
+	},
+	"favorite_color": {
+		"I'm repainting my study and want a color I'll love. What would you suggest for me?",
+		"I'm choosing a paint color for my study. What color should I go with?",
+	},
 }
 
-var listCountAsk = map[string]string{
-	"project": "How many different projects have I told you about?",
-	"trip":    "How many separate trips have I mentioned taking?",
-	"pet":     "How many pets do I have?",
+var listCountAsk = map[string][]string{
+	"project": {"How many different projects have I told you about?", "How many projects have I mentioned to you?", "How many separate projects have I brought up?"},
+	"trip":    {"How many separate trips have I mentioned taking?", "How many trips have I told you about?", "How many different trips have I mentioned?"},
+	"pet":     {"How many pets do I have?", "How many pets have I told you about?", "How many pets do I own?"},
 	// domain list families
-	"service":      "How many services do I maintain?",
-	"allergy":      "How many things am I allergic to?",
-	"legal_matter": "How many legal matters am I handling?",
-	"holding":      "How many holdings are in my portfolio?",
+	"service":      {"How many services do I maintain?", "How many services have I told you I run?", "How many services am I responsible for?"},
+	"allergy":      {"How many things am I allergic to?", "How many allergies do I have?", "How many things have I said I'm allergic to?"},
+	"legal_matter": {"How many legal matters am I handling?", "How many legal matters have I mentioned?", "How many cases am I working on?"},
+	"holding":      {"How many holdings are in my portfolio?", "How many holdings have I told you about?", "How many positions do I hold?"},
 }
 
-var listAllAsk = map[string]string{
-	"project": "List all the projects I have mentioned.",
-	"trip":    "Which places have I told you I traveled to?",
-	"pet":     "What are the names of all my pets?",
+var listAllAsk = map[string][]string{
+	"project": {"List all the projects I have mentioned.", "What are all the projects I've told you about?", "Name every project I've mentioned."},
+	"trip":    {"Which places have I told you I traveled to?", "List all the trips I've mentioned.", "Where have I told you I've traveled?"},
+	"pet":     {"What are the names of all my pets?", "List all my pets by name.", "Name every pet I have."},
 	// domain list families
-	"service":      "List all the services I maintain.",
-	"allergy":      "What am I allergic to?",
-	"legal_matter": "List all the legal matters I've told you about.",
-	"holding":      "List all the holdings in my portfolio.",
+	"service":      {"List all the services I maintain.", "What are all the services I run?", "Name every service I maintain."},
+	"allergy":      {"What am I allergic to?", "List everything I'm allergic to.", "Name all of my allergies."},
+	"legal_matter": {"List all the legal matters I've told you about.", "What are all the legal matters I'm handling?", "Name every case I've mentioned."},
+	"holding":      {"List all the holdings in my portfolio.", "What are all the holdings I've told you about?", "Name every position in my portfolio."},
 }
 
 // absentAttributes are plausible personal facts the persona generator NEVER
@@ -192,7 +242,7 @@ func DeriveQuestions(p *Plan) []Question {
 	// domain facts) and look the question phrasing up by attribute, so adding a
 	// domain fact family requires only pool + spec + scalarAsk/factLabel entries.
 	for _, cur := range currentScalarFacts(p) {
-		ask := scalarAsk[cur.Attribute]
+		ask := askVariant(p.Seed, "rec:"+cur.Attribute, scalarAsk[cur.Attribute])
 		if ask == "" {
 			continue
 		}
@@ -241,7 +291,7 @@ func DeriveQuestions(p *Plan) []Question {
 	// One per non-updated scalar so the sampler has variety; realization is skipped
 	// (the attack text must reach the harness verbatim).
 	for _, cur := range currentScalarFacts(p) {
-		ask := scalarAsk[cur.Attribute]
+		ask := askVariant(p.Seed, "rec:"+cur.Attribute, scalarAsk[cur.Attribute])
 		if ask == "" || cur.Supersedes != "" {
 			continue
 		}
@@ -264,7 +314,7 @@ func DeriveQuestions(p *Plan) []Question {
 		if f.Kind != KindAsstRec {
 			continue
 		}
-		if ask := asstRecAsk[f.Attribute]; ask != "" {
+		if ask := askVariant(p.Seed, "asstrec:"+f.Attribute, asstRecAsk[f.Attribute]); ask != "" {
 			qs = append(qs, Question{
 				ID:       "q-asstrec-" + f.Attribute,
 				Type:     QTAssistantRecall,
@@ -308,7 +358,7 @@ func DeriveQuestions(p *Plan) []Question {
 		if f.Kind != KindPreference {
 			continue
 		}
-		if ask := prefAsk[f.Attribute]; ask != "" {
+		if ask := askVariant(p.Seed, "pref:"+f.Attribute, prefAsk[f.Attribute]); ask != "" {
 			qs = append(qs, Question{
 				ID:       "q-pref-" + f.Attribute,
 				Type:     QTPreference,
@@ -318,7 +368,7 @@ func DeriveQuestions(p *Plan) []Question {
 				Evidence: []string{f.ID},
 			})
 		}
-		if req := prefApply[f.Attribute]; req != "" {
+		if req := askVariant(p.Seed, "prefapp:"+f.Attribute, prefApply[f.Attribute]); req != "" {
 			qs = append(qs, Question{
 				ID:       "q-prefapp-" + f.Attribute,
 				Type:     QTPreferenceApplication,
@@ -339,7 +389,7 @@ func DeriveQuestions(p *Plan) []Question {
 		if len(items) == 0 {
 			continue
 		}
-		ask := listCountAsk[attr]
+		ask := askVariant(p.Seed, "count:"+attr, listCountAsk[attr])
 		if ask == "" {
 			continue
 		}
@@ -368,7 +418,7 @@ func DeriveQuestions(p *Plan) []Question {
 			ID:       "q-list-" + attr,
 			Type:     QTMultiSession,
 			Tier:     pick3(len(sessions) >= 4, TierHard, TierMedium),
-			Text:     listAllAsk[attr],
+			Text:     askVariant(p.Seed, "listall:"+attr, listAllAsk[attr]),
 			Answer:   joinComma(vals),
 			Evidence: ev,
 		})

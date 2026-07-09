@@ -1,7 +1,6 @@
 package gen
 
 import (
-	"context"
 	"fmt"
 	"maps"
 	"math/rand"
@@ -11,14 +10,6 @@ import (
 
 	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
 )
-
-const pairParaphraseSystem = "You rewrite ONE turn of a past conversation (a user message and the assistant's reply) using different wording while preserving EVERY fact, name, number, date, and preference exactly. " +
-	"Do not add, remove, or change any information — only rephrase. " +
-	"Return ONLY valid JSON: {\"prompt\":\"<rewritten user message>\",\"response\":\"<rewritten assistant reply>\"}."
-
-const questionParaphraseSystem = "You rewrite a single benchmark question using different wording while preserving its exact meaning and what it asks for. " +
-	"Keep every concrete entity. Do not answer it. " +
-	"Return ONLY the rewritten question, no quotes, no preamble."
 
 // timestamp-space knobs (documented in package doc combinatorics).
 const (
@@ -51,14 +42,13 @@ func abstentionQuota(n int) int {
 //   - randomly selects n oracle questions (that have usable manifest pairs),
 //   - assembles a combined haystack from their pairs,
 //   - injects `distractors` random pairs from NON-selected questions,
-//   - assigns FRESH timestamps and shuffles the haystack,
-//   - LLM-paraphrases a random `frac` of pairs (facts preserved) and the selected
-//     questions' text (answer preserved).
+//   - assigns FRESH timestamps and shuffles the haystack.
 //
 // It returns the SeedRequest to POST to <harness>/seed and the MemoryCases to
-// run. A nil llm (or frac<=0) skips paraphrasing. Errors clearly (no crash) if
-// the seed assets are absent.
-func GenerateMemory(ctx context.Context, r *rand.Rand, n, distractors int, frac float64, llm LLM, model, seedDir, oraclePath string) (protocol.SeedRequest, []protocol.MemoryCase, protocol.ParaphraseStats, error) {
+// run. Generation is fully non-LLM and deterministic from (seed, assets); the
+// zero ParaphraseStats return is kept for signature compatibility with callers
+// that aggregate stats. Errors clearly (no crash) if the seed assets are absent.
+func GenerateMemory(r *rand.Rand, n, distractors int, seedDir, oraclePath string) (protocol.SeedRequest, []protocol.MemoryCase, protocol.ParaphraseStats, error) {
 	var stats protocol.ParaphraseStats
 	assets, err := loadSeedAssets(seedDir, oraclePath)
 	if err != nil {
@@ -221,19 +211,6 @@ func GenerateMemory(ctx context.Context, r *rand.Rand, n, distractors int, frac 
 	for _, h := range haystack {
 		sp := assets.pairsByID[h.pairID]
 		prompt, response := sp.Prompt, sp.Response
-		if llm != nil && frac > 0 && r.Float64() < frac {
-			stats.Attempted++
-			p, rsp, retried, ok := paraphrasePair(ctx, llm, model, prompt, response)
-			if retried {
-				stats.Retried++
-			}
-			if ok {
-				prompt, response = p, rsp
-				stats.Applied++
-			} else {
-				stats.Fallback++ // keep the verbatim pair; never a silent skip
-			}
-		}
 		// per-pair timestamp: session base + intra-session jitter (minutes..hours)
 		jitter := time.Duration(r.Intn(sessionGapMax*24*60)) * time.Minute
 		ts := sessionBase[h.session].Add(jitter)
@@ -267,27 +244,7 @@ func GenerateMemory(ctx context.Context, r *rand.Rand, n, distractors int, frac 
 		})
 	}
 
-	// maybeParaphraseQ rewrites a question with probability frac (retry+verify
-	// via paraphraseQuestion), accumulating the same fallback telemetry as the
-	// pair path. Shared by recall and abstention cases so the r.Float64() draw
-	// stays in one place.
-	maybeParaphraseQ := func(question string) string {
-		if llm != nil && frac > 0 && r.Float64() < frac {
-			stats.Attempted++
-			pq, retried, ok := paraphraseQuestion(ctx, llm, model, question)
-			if retried {
-				stats.Retried++
-			}
-			if ok {
-				stats.Applied++
-				return pq
-			}
-			stats.Fallback++
-		}
-		return question
-	}
-
-	// Build the memory cases (paraphrase question text, keep the answer).
+	// Build the memory cases (question text verbatim from the oracle; answer kept).
 	cases := make([]protocol.MemoryCase, 0, len(selectedOrder)+len(absOrder))
 	for i, qid := range selectedOrder {
 		q := assets.oracle[qid]
@@ -295,7 +252,7 @@ func GenerateMemory(ctx context.Context, r *rand.Rand, n, distractors int, frac 
 			ID:             fmt.Sprintf("mem-%04d-%s", i, qid),
 			QuestionID:     qid,
 			QuestionType:   memQuestionType(q.QuestionType),
-			Question:       maybeParaphraseQ(q.Question),
+			Question:       q.Question,
 			ExpectedAnswer: answerText(q.Answer),
 		})
 	}
@@ -307,7 +264,7 @@ func GenerateMemory(ctx context.Context, r *rand.Rand, n, distractors int, frac 
 			ID:             fmt.Sprintf("abs-%04d-%s", i, qid),
 			QuestionID:     qid,
 			QuestionType:   abstentionType,
-			Question:       maybeParaphraseQ(q.Question),
+			Question:       q.Question,
 			ExpectedAnswer: abstentionExpectedAnswer,
 		})
 	}

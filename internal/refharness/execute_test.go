@@ -8,11 +8,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ditto-assistant/dittobench-api/internal/catalog"
+	"github.com/ditto-assistant/dittobench-api/pkg/catalog"
 	"github.com/ditto-assistant/dittobench-api/internal/datagen"
 	"github.com/ditto-assistant/dittobench-api/internal/refharness"
 	"github.com/ditto-assistant/dittobench-api/internal/scorer"
-	"github.com/ditto-assistant/dittobench-api/internal/toolexec"
+	"github.com/ditto-assistant/dittobench-api/pkg/toolexec"
 	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
 )
 

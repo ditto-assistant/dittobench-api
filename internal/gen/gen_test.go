@@ -1,19 +1,9 @@
 package gen
 
 import (
-	"context"
 	"strings"
 	"testing"
 )
-
-// upperLLM uppercases the user message — a deterministic stand-in for the
-// paraphrase model that always "rewrites".
-type upperLLM struct{ calls int }
-
-func (u *upperLLM) Complete(_ context.Context, _ string, _ string, user string) (string, error) {
-	u.calls++
-	return strings.ToUpper(user), nil
-}
 
 func TestProfiles(t *testing.T) {
 	for _, size := range []string{"small", "medium", "full"} {
@@ -23,9 +13,6 @@ func TestProfiles(t *testing.T) {
 		}
 		if p.Tools <= 0 || p.Mem <= 0 || p.Distractors <= 0 {
 			t.Fatalf("profile %q has non-positive counts: %+v", size, p)
-		}
-		if p.ParaphraseFrac < 0 || p.ParaphraseFrac > 1 {
-			t.Fatalf("profile %q paraphrase frac out of range: %v", size, p.ParaphraseFrac)
 		}
 	}
 	// small must be the cheapest
@@ -56,7 +43,7 @@ func TestFreshSeedUnique(t *testing.T) {
 
 func TestGenerateToolsNilLLM(t *testing.T) {
 	r := NewRNG(7)
-	cases, _ := GenerateTools(context.Background(), r, 7, 10, 0.5, nil, "model")
+	cases, _ := GenerateTools(r, 7, 10)
 	if len(cases) != 10 {
 		t.Fatalf("expected 10 cases, got %d", len(cases))
 	}
@@ -67,63 +54,18 @@ func TestGenerateToolsNilLLM(t *testing.T) {
 	}
 }
 
-func TestGenerateToolsParaphrasePreservesGroundTruth(t *testing.T) {
-	// frac=1 → every prompt rewritten; ground truth (expected_tools/behavior)
-	// must be unchanged vs the nil-LLM baseline.
-	base, _ := GenerateTools(context.Background(), NewRNG(99), 99, 12, 0, nil, "m")
-	llm := &upperLLM{}
-	para, _ := GenerateTools(context.Background(), NewRNG(99), 99, 12, 1.0, llm, "m")
-
-	if len(base) != len(para) {
-		t.Fatalf("length mismatch")
-	}
-	if llm.calls == 0 {
-		t.Fatal("paraphrase LLM was never called with frac=1")
-	}
-	changed := 0
-	for i := range base {
-		if base[i].ID != para[i].ID || base[i].Category != para[i].Category {
-			t.Fatalf("case %d identity changed", i)
-		}
-		// expected tools preserved
-		if len(base[i].ExpectedTools) != len(para[i].ExpectedTools) {
-			t.Fatalf("case %d expected tools changed", i)
-		}
-		for j := range base[i].ExpectedTools {
-			if base[i].ExpectedTools[j].Name != para[i].ExpectedTools[j].Name {
-				t.Fatalf("case %d tool %d changed", i, j)
-			}
-		}
-		if base[i].ExpectedBehavior != para[i].ExpectedBehavior {
-			t.Fatalf("case %d expected behavior changed", i)
-		}
-		if base[i].Prompt != para[i].Prompt {
-			changed++
-		}
-	}
-	if changed == 0 {
-		t.Fatal("frac=1 should have changed at least some prompts")
-	}
-}
-
-func TestSanitizeParaphrase(t *testing.T) {
-	if got := sanitizeParaphrase(`"hello there"`); got != "hello there" {
-		t.Fatalf("quotes not stripped: %q", got)
-	}
-	if got := sanitizeParaphrase("  spaced  "); got != "spaced" {
-		t.Fatalf("not trimmed: %q", got)
-	}
-	if got := sanitizeParaphrase("x"); got != "" {
-		t.Fatalf("too short should be empty, got %q", got)
-	}
-}
+// GenerateTools no longer paraphrases (it is deterministic and LLM-free), so the
+// former ground-truth-preservation-across-paraphrase and paraphrase-sanitizing
+// tests were dropped. The prompt surface variation now comes from datagen's
+// template variants, and the ground truth is templated in the same pass, so
+// there is no separate rewrite step that could drift from it.
 
 // TestGenerateMemory exercises the embedded seed bundle (always present, so the
 // test is hermetic — no dependency on local on-disk assets).
 func TestGenerateMemory(t *testing.T) {
 	// Empty seedDir/oracle => embedded bundle.
 	r := NewRNG(12345)
-	seedReq, cases, _, err := GenerateMemory(context.Background(), r, 5, 20, 0, nil, "m", "", "")
+	seedReq, cases, _, err := GenerateMemory(r, 5, 20, "", "")
 	if err != nil {
 		t.Fatalf("GenerateMemory: %v", err)
 	}
@@ -150,7 +92,7 @@ func TestGenerateMemory(t *testing.T) {
 }
 
 func TestGenerateMemoryMissingAssets(t *testing.T) {
-	_, _, _, err := GenerateMemory(context.Background(), NewRNG(1), 5, 10, 0, nil, "m", "/no/such/seeddir", "/no/such/oracle.json")
+	_, _, _, err := GenerateMemory(NewRNG(1), 5, 10, "/no/such/seeddir", "/no/such/oracle.json")
 	if err == nil {
 		t.Fatal("expected a clear error for missing assets, got nil")
 	}

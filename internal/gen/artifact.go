@@ -4,8 +4,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"sort"
 
 	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
+	"github.com/ditto-assistant/dittobench-api/pkg/toolexec"
 )
 
 // DatasetArtifact is the canonical, hashable snapshot of a fully-rendered run
@@ -49,6 +51,62 @@ type ArtifactCase struct {
 type FixtureDigest struct {
 	CaseID string `json:"case_id"`
 	Needle string `json:"needle,omitempty"`
+}
+
+// GenerateDataset runs the full deterministic generation pipeline for
+// (seed, prof) and returns the canonical, hashable DatasetArtifact. It is the
+// generate service's single entry point: because generation is non-LLM, the
+// artifact is byte-reproducible from (seed, bench_version), so the platform can
+// ship it to a validator and a dispute can regenerate the identical bytes. The
+// run path (runSizeJob) generates the same pieces (it also needs the live
+// fixtures + staged suite) and calls BuildArtifact with them, so both paths
+// produce an identical artifact for a given seed.
+func GenerateDataset(seed int64, prof Profile) DatasetArtifact {
+	rng := NewRNG(seed)
+	toolCases, _ := GenerateTools(rng, seed, prof.Tools)
+	suite := GenerateMemorySuite(rng, seed, prof.Mem, prof.Waves, prof.RawPairsFrac)
+	iso := GenerateIsolation(seed, prof.Mem, prof.Waves, prof.IsoCases)
+	suite.Cases = append(suite.Cases, iso.Cases...)
+	memWaves := MergeMemoryWaves(suite.Waves, iso.SecondaryWave)
+	return BuildArtifact(seed, toolCases, suite.Cases, memWaves)
+}
+
+// MergeMemoryWaves appends the secondary isolation graph's seeding wave to the
+// primary waves when present, so the hashed artifact (and a dispute re-score)
+// covers the exact multi-graph seeding. A no-op copy when there is no secondary
+// graph. Kept as one helper so the run path and generate service agree.
+func MergeMemoryWaves(primary []protocol.SeedRequest, secondary protocol.SeedRequest) []protocol.SeedRequest {
+	if len(secondary.Pairs) == 0 {
+		return primary
+	}
+	return append(append([]protocol.SeedRequest{}, primary...), secondary)
+}
+
+// BuildArtifact assembles the canonical DatasetArtifact from already-generated
+// pieces — pure (no generation), so the run path and GenerateDataset share one
+// assembly and can never drift into different bytes for the same seed. Tool
+// fixtures are rebuilt from (seed, case) and sorted by CaseID so the JSON is
+// byte-stable.
+func BuildArtifact(seed int64, toolCases []protocol.ToolCase, memCases []StagedCase, memWaves []protocol.SeedRequest) DatasetArtifact {
+	flat := make([]ArtifactCase, 0, len(memCases))
+	for _, sc := range memCases {
+		flat = append(flat, ArtifactCase{MemoryCase: sc.Case, UserID: sc.UserID, RunAfterWave: sc.RunAfterWave})
+	}
+	fixtures := make([]FixtureDigest, 0, len(toolCases))
+	for _, c := range toolCases {
+		f := toolexec.BuildFixture(seed, c)
+		fixtures = append(fixtures, FixtureDigest{CaseID: c.ID, Needle: f.NeedleText()})
+	}
+	sort.Slice(fixtures, func(i, j int) bool { return fixtures[i].CaseID < fixtures[j].CaseID })
+	return DatasetArtifact{
+		Seed:         seed,
+		BenchVersion: protocol.BenchVersion,
+		GeneratedAt:  protocol.DatasetEpochRFC3339,
+		ToolCases:    toolCases,
+		MemoryWaves:  memWaves,
+		MemoryCases:  flat,
+		ToolFixtures: fixtures,
+	}
 }
 
 // Marshal returns the canonical JSON bytes of the artifact.

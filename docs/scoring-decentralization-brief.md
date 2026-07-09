@@ -73,6 +73,19 @@ the scorer going private, decide deliberately whether any publicly-reachable
 practice path should expose answers, or strip the oracle fields from it. Tracked
 as a task.
 
+Public dataset sampler (`GET /v1/sample`): a redacted, shape-only view of a
+**real** run-size `DatasetArtifact` (the artifact validators score, via
+`gen.GenerateDataset`), so the community can inspect the benchmark's shape and
+difficulty. Two structural guarantees: (1) it never accepts a caller seed — it
+derives the seed from a reserved **negative** namespace (`?sample=0..9`), disjoint
+from every non-negative per-submission seed, so a sample can never be a scored
+dataset nor be aimed at a future submission's not-yet-drawn seed; (2) the response
+carries only harness-visible prompts/questions plus aggregate shape counts
+(per-category/type histograms, wave + isolation counts) — `ExpectedTools`,
+`ExpectedAnswer`, `ForbiddenAnswer`, the seeded haystack pairs, and the tool
+needles are dropped by construction. No key required (generation is deterministic
+and LLM-free).
+
 ## Why this over the alternatives
 
 - It satisfies both hard constraints at once: open validator repo, and a private

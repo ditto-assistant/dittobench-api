@@ -16,14 +16,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 
-	"github.com/ditto-assistant/dittobench-api/internal/catalog"
 	"github.com/ditto-assistant/dittobench-api/internal/datagen"
 	"github.com/ditto-assistant/dittobench-api/internal/gen"
 	"github.com/ditto-assistant/dittobench-api/internal/llm"
@@ -33,8 +31,9 @@ import (
 	"github.com/ditto-assistant/dittobench-api/internal/sandbox"
 	"github.com/ditto-assistant/dittobench-api/internal/scorer"
 	"github.com/ditto-assistant/dittobench-api/internal/store"
-	"github.com/ditto-assistant/dittobench-api/internal/toolexec"
+	"github.com/ditto-assistant/dittobench-api/pkg/catalog"
 	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
+	"github.com/ditto-assistant/dittobench-api/pkg/toolexec"
 )
 
 const defaultN = 30
@@ -91,8 +90,10 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /v1/dataset", s.handleDataset)
+	mux.HandleFunc("GET /v1/sample", s.handleSample)
 	mux.HandleFunc("GET /v1/catalog", s.handleCatalog)
 	mux.HandleFunc("POST /v1/submit", s.handleSubmit)
+	mux.HandleFunc("POST /v1/score", s.handleScore)
 	mux.HandleFunc("GET /v1/runs/{id}", s.handleGetRun)
 
 	addr := ":" + strconv.Itoa(*port)
@@ -224,6 +225,13 @@ type submitRequest struct {
 	RunSize string `json:"run_size,omitempty"`
 	// Seed pins the dataset seed (0 = fresh crypto-random per submission).
 	Seed int64 `json:"seed,omitempty"`
+	// ExpectedDatasetSHA256 pins the exact dataset the caller intends to score.
+	// When set, the run regenerates the dataset from Seed (generation is
+	// deterministic) and FAILS if the regenerated dataset_sha256 does not match —
+	// tamper-evidence for the canonical validator path (POST /v1/score): the
+	// platform issues (seed, dataset_sha256) with the ticket, and this guarantees
+	// the validator scored precisely that dataset. Empty on the practice path.
+	ExpectedDatasetSHA256 string `json:"dataset_sha256,omitempty"`
 	// OpenRouterKey is the miner's BYOK OpenRouter key, used for the generator
 	// (paraphrase) + judge (scoring). The hosted practice API requires it per
 	// request (it stores no keys); locally it falls back to the server env.
@@ -341,6 +349,65 @@ func (s *server) handleSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.submitDirect(w, r, req, n)
+}
+
+// handleScore is the CANONICAL validator scoring path. Unlike /v1/submit (miner
+// practice: fresh seed, generate-and-score), a validator scores the EXACT dataset
+// the platform issued with its ticket, so this endpoint requires a pinned seed, a
+// run_size, and the platform's dataset_sha256, and it fails the run if the
+// regenerated dataset does not hash to that value (tamper-evidence). It reuses
+// the full run_size pipeline (build/run → seed → judge → score → signed report).
+func (s *server) handleScore(w http.ResponseWriter, r *http.Request) {
+	if !s.allowPrivate && !s.limiter.Allow(clientIP(r)) {
+		writeError(w, http.StatusTooManyRequests, "rate limit exceeded; slow down and retry shortly")
+		return
+	}
+	var req submitRequest
+	r.Body = http.MaxBytesReader(w, r.Body, maxSubmitBody)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid or oversized JSON body")
+		return
+	}
+	// Validator-specific preconditions (beyond what submitRunSize enforces).
+	if req.Seed == 0 {
+		writeError(w, http.StatusBadRequest, "seed is required (the platform-issued dataset seed) for /v1/score")
+		return
+	}
+	if strings.TrimSpace(req.ExpectedDatasetSHA256) == "" {
+		writeError(w, http.StatusBadRequest, "dataset_sha256 is required (the platform-issued dataset hash) for /v1/score")
+		return
+	}
+	if req.RunSize == "" {
+		writeError(w, http.StatusBadRequest, "run_size is required (small|medium|full) for /v1/score")
+		return
+	}
+	// Exactly one harness source; SSRF-guard any caller-supplied URL (same rules
+	// as /v1/submit).
+	sources := 0
+	for _, set := range []bool{req.HarnessURL != "", req.GitURL != "", req.TarballURL != ""} {
+		if set {
+			sources++
+		}
+	}
+	if sources != 1 {
+		writeError(w, http.StatusBadRequest, "provide exactly one of harness_url, git_url, or tarball_url")
+		return
+	}
+	if req.HarnessURL != "" {
+		if err := netguard.ValidateURL(req.HarnessURL, s.allowPrivate); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	if req.TarballURL != "" {
+		if err := netguard.ValidateURL(req.TarballURL, s.allowPrivate); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	// Delegate to the shared run_size pipeline; the dataset_sha256 pin is enforced
+	// inside runSizeJob after regeneration.
+	s.submitRunSize(w, r, req)
 }
 
 // submitDirect scores a harness the miner is already running, synchronously.
@@ -493,8 +560,8 @@ func (s *server) submitRunSize(w http.ResponseWriter, r *http.Request, req submi
 	runID := uuid.NewString()
 	s.store.Create(runID, "run_size", store.StatusQueued, seed, prof.Tools+prof.Mem)
 	s.store.SetRunSize(runID, req.RunSize)
-	log.Printf("run %s: run_size=%s seed=%d tools=%d mem=%d distractors=%d paraphrase=%.2f",
-		runID, req.RunSize, seed, prof.Tools, prof.Mem, prof.Distractors, prof.ParaphraseFrac)
+	log.Printf("run %s: run_size=%s seed=%d tools=%d mem=%d distractors=%d",
+		runID, req.RunSize, seed, prof.Tools, prof.Mem, prof.Distractors)
 
 	go s.runSizeJob(context.Background(), runID, req, prof, seed, llmClient, apiKey)
 
@@ -537,19 +604,18 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	// 2. generating — fresh, anti-cheat dataset (tools + memory haystack).
 	s.store.SetStage(runID, store.StatusGenerating, 0, total)
 	rng := gen.NewRNG(seed)
-	genModel := llm.GeneratorModel()
-	toolCases, toolPara := gen.GenerateTools(ctx, rng, seed, prof.Tools, prof.ParaphraseFrac, llmClient, genModel)
+	toolCases, toolPara := gen.GenerateTools(rng, seed, prof.Tools)
 	// v2 memory engine (bench_version 2): a fresh procedural persona universe
-	// per seed replaces the static LongMemEval fixture. The
-	// plan is a pure function of the master `seed`; realization + selection share
-	// the run rng. The suite lays cases out across seeding tiers (A prepared, B
-	// raw-pairs) and staged Tier-C waves.
-	memSuite := gen.GenerateMemorySuite(ctx, rng, seed, prof.Mem, prof.ParaphraseFrac, prof.Waves, prof.RawPairsFrac, llmClient, genModel)
+	// per seed replaces the static LongMemEval fixture. Generation is fully
+	// non-LLM and a pure function of the master `seed`; selection shares the run
+	// rng. The suite lays cases out across seeding tiers (A prepared, B raw-pairs)
+	// and staged Tier-C waves.
+	memSuite := gen.GenerateMemorySuite(rng, seed, prof.Mem, prof.Waves, prof.RawPairsFrac)
 	// Multi-graph isolation: seed a second persona under a different
 	// user_id and add cross-user isolation cases. The secondary graph is template-
-	// rendered (no generator tokens). Cases carry the user_id they must be answered
-	// under; they merge into the primary staged-case stream.
-	iso := gen.GenerateIsolation(ctx, rng, seed, prof.Mem, prof.Waves, prof.IsoCases)
+	// rendered. Cases carry the user_id they must be answered under; they merge
+	// into the primary staged-case stream.
+	iso := gen.GenerateIsolation(seed, prof.Mem, prof.Waves, prof.IsoCases)
 	memSuite.Cases = append(memSuite.Cases, iso.Cases...)
 	para := toolPara
 	para.Add(memSuite.Stats)
@@ -568,43 +634,30 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	// when DITTOBENCH_ARTIFACT_DIR is set, persist the artifact keyed by run_id
 	// (the local-file form of the "upload rendered dataset" persistence; a
 	// platform bucket is the drop-in replacement for os.WriteFile here).
-	memCasesFlat := make([]gen.ArtifactCase, 0, len(memSuite.Cases))
-	for _, sc := range memSuite.Cases {
-		memCasesFlat = append(memCasesFlat, gen.ArtifactCase{
-			MemoryCase:   sc.Case,
-			UserID:       sc.UserID,
-			RunAfterWave: sc.RunAfterWave,
-		})
-	}
-	// Phase C: derive each tool case's deterministic mock-tool environment up
-	// front so its served content (the coined needle) is pinned in the hashed
-	// dataset artifact. The Fixtures back the mock endpoint stood up below.
+	// Phase C: derive each tool case's live mock-tool environment (the Fixtures
+	// back the mock endpoint stood up below). The hashed artifact — assembled by
+	// gen.BuildArtifact so the run path and the generate service produce identical
+	// bytes for a seed — recomputes the fixture digests from the same (seed, case).
 	toolFixtures := make([]toolexec.Fixture, len(toolCases))
-	fixtureDigests := make([]gen.FixtureDigest, len(toolCases))
 	for i, c := range toolCases {
-		f := toolexec.BuildFixture(seed, c)
-		toolFixtures[i] = f
-		fixtureDigests[i] = gen.FixtureDigest{CaseID: c.ID, Needle: f.NeedleText()}
+		toolFixtures[i] = toolexec.BuildFixture(seed, c)
 	}
-	sort.Slice(fixtureDigests, func(i, j int) bool { return fixtureDigests[i].CaseID < fixtureDigests[j].CaseID })
 	// The hashed artifact covers the secondary isolation graph too (when present),
 	// so a dispute re-scores the exact multi-graph seeding.
-	memWaves := memSuite.Waves
-	if len(iso.SecondaryWave.Pairs) > 0 {
-		memWaves = append(append([]protocol.SeedRequest{}, memSuite.Waves...), iso.SecondaryWave)
-	}
-	artifact := gen.DatasetArtifact{
-		Seed:         seed,
-		BenchVersion: protocol.BenchVersion,
-		GeneratedAt:  protocol.DatasetEpochRFC3339,
-		ToolCases:    toolCases,
-		MemoryWaves:  memWaves,
-		MemoryCases:  memCasesFlat,
-		ToolFixtures: fixtureDigests,
-	}
+	memWaves := gen.MergeMemoryWaves(memSuite.Waves, iso.SecondaryWave)
+	artifact := gen.BuildArtifact(seed, toolCases, memSuite.Cases, memWaves)
 	datasetHash, artifactBytes, hashErr := artifact.SHA256Hex()
 	if hashErr != nil {
 		log.Printf("run %s: dataset hashing failed: %v", runID, hashErr)
+	}
+	// Canonical validator path (/v1/score): the platform pins the dataset it
+	// issued with the ticket. Regeneration is deterministic, so a mismatch means
+	// the generator/bench_version drifted from what the platform shipped — fail
+	// loudly rather than score a different dataset than the one under dispute.
+	if want := strings.TrimSpace(req.ExpectedDatasetSHA256); want != "" && hashErr == nil && !strings.EqualFold(want, datasetHash) {
+		s.store.Fail(runID, "dataset_sha256 mismatch: platform issued "+want+" but this validator regenerated "+datasetHash+" (generator/bench_version drift)")
+		log.Printf("run %s: dataset_sha256 mismatch (want %s got %s)", runID, want, datasetHash)
+		return
 	}
 	if dir := strings.TrimSpace(os.Getenv("DITTOBENCH_ARTIFACT_DIR")); dir != "" && artifactBytes != nil {
 		if err := os.WriteFile(filepath.Join(dir, runID+".json"), artifactBytes, 0o644); err != nil {
@@ -612,27 +665,11 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		}
 	}
 
-	// 3. start the container, forwarding the OpenRouter key + provider config so
-	//    the crate's agent + embedder can run. On the local harness_url path we
-	//    skip the container and target the miner's already-running harness.
+	// 3. start the container. On the local harness_url path we skip the container
+	//    and target the miner's already-running harness.
 	harnessURL := req.HarnessURL
 	if image != "" {
-		env := map[string]string{
-			"OPENROUTER_API_KEY":  apiKey,
-			"DITTOBENCH_PROVIDER": "openrouter",
-			"OLLAMA_BASE_URL":     "http://host.docker.internal:11434",
-		}
-		// Operator escape-hatch: when DITTOBENCH_HARNESS_MODEL is set on the
-		// server, force the harness's chat model. Off by default so a miner's own
-		// model choice is respected; set it only when the validator's OpenRouter
-		// key can't reach the harness's default provider (e.g. this key returns
-		// 404 "no endpoints found" for anthropic/* — see openai/gpt-4o-mini).
-		if m := strings.TrimSpace(os.Getenv("DITTOBENCH_HARNESS_MODEL")); m != "" {
-			env["DITTOBENCH_MODEL"] = m
-		}
-		for k, v := range req.Env {
-			env[k] = v
-		}
+		env := harnessSandboxEnv(apiKey, req.Env)
 		handle, err := s.sandbox.Run(ctx, image, env)
 		if err != nil {
 			s.store.Fail(runID, "container start failed: "+err.Error())
@@ -802,10 +839,10 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		IsolationCases:    len(iso.Cases),
 		ToolEfficiency:    scorer.ToolEfficiencyFactor(perCase),
 		Models: &protocol.ModelInfo{
-			Generator:  genModel,
+			Generator:  "", // generation is deterministic + non-LLM in v2
 			Judge:      judgeCfg.Model,
 			JudgeAudit: judgeCfg.ModelB,
-			Harness:    strings.TrimSpace(os.Getenv("DITTOBENCH_HARNESS_MODEL")),
+			Harness:    reportedHarnessModel(),
 		},
 		PerCategory: report.PerCategory,
 	}
@@ -821,7 +858,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	// it (DITTOBENCH_HARNESS_MODEL); when we can, warn if it matches the judge so the
 	// operator picks a distinct judge. (Programmatic scoring — tool trajectory,
 	// needle, isolation, injection — is unaffected; only the LLM-judged half is.)
-	if hm := strings.TrimSpace(os.Getenv("DITTOBENCH_HARNESS_MODEL")); hm != "" && sameModelFamily(hm, judgeCfg.Model) {
+	if hm := reportedHarnessModel(); hm != "" && sameModelFamily(hm, judgeCfg.Model) {
 		log.Printf("run %s: WARNING self-preference risk — judge model %q matches the harness model %q; use a distinct judge model (SCORER_MODEL) to avoid single-model-judge bias", runID, judgeCfg.Model, hm)
 	}
 	s.store.Finish(runID, report)
@@ -956,6 +993,93 @@ func envBool(name string) bool {
 		return true
 	}
 	return false
+}
+
+// envOr returns the env var value or def when unset/blank.
+func envOr(name, def string) string {
+	if v := strings.TrimSpace(os.Getenv(name)); v != "" {
+		return v
+	}
+	return def
+}
+
+// reportedHarnessModel returns the harness chat model this run scored against,
+// for RunDetails.Models.Harness (advisory transparency + the self-preference
+// guard). With the model lock on it is the locked model (llm.HarnessModel);
+// otherwise it is the operator escape-hatch DITTOBENCH_HARNESS_MODEL, or "" when
+// the harness used its own default (the server does not observe that choice).
+func reportedHarnessModel() string {
+	if modelLockEnabled() {
+		return llm.HarnessModel()
+	}
+	return strings.TrimSpace(os.Getenv("DITTOBENCH_HARNESS_MODEL"))
+}
+
+// modelLockEnabled reports whether the v2 harness model lock is active
+// (DITTOBENCH_MODEL_LOCK). Off by default so nothing breaks until infra
+// provisions the host gateway serving the locked model and drops openrouter.ai
+// from the egress allowlist; flip it on together with that infra. See
+// docs/model-lock.md and llm.HarnessModel.
+func modelLockEnabled() bool { return envBool("DITTOBENCH_MODEL_LOCK") }
+
+// lockedEnvKeys are the sandbox env vars the model lock owns. When the lock is
+// on, a caller-supplied req.Env may not set any of these — otherwise a miner
+// could route around the locked model (point at OpenRouter, swap the model id,
+// or redirect the gateway URL).
+var lockedEnvKeys = map[string]bool{
+	"OPENROUTER_API_KEY":  true,
+	"DITTOBENCH_PROVIDER": true,
+	"DITTOBENCH_MODEL":    true,
+	"OLLAMA_BASE_URL":     true,
+}
+
+// harnessSandboxEnv builds the env for the miner sandbox container.
+//
+// With the v2 model lock ON (DITTOBENCH_MODEL_LOCK): the harness is scored
+// against ONE locked open-weight model (llm.HarnessModel, Qwen2.5 by default)
+// served by the host gateway. No OpenRouter key is forwarded — the sandbox
+// cannot reach OpenRouter (dropped from the egress allowlist), so model choice
+// is not an attack surface and the median-of-3 validators' scores are
+// comparable. The locked provider/model/gateway are applied AFTER the
+// caller-supplied env and the caller's attempts to set any lockedEnvKey are
+// dropped, so req.Env can never override the lock.
+//
+// With the lock OFF (legacy/pre-lock BYOK): forward the OpenRouter key + provider
+// so the crate's agent makes its own LLM calls, honoring the
+// DITTOBENCH_HARNESS_MODEL operator escape-hatch.
+//
+// The provider string + gateway URL are env-configurable (HARNESS_PROVIDER,
+// HARNESS_GATEWAY_URL) because they must match what the miner crate honors and
+// the provisioned gateway serves; the defaults target an OpenAI-compatible
+// Ollama gateway on the host.
+func harnessSandboxEnv(apiKey string, reqEnv map[string]string) map[string]string {
+	gateway := envOr("HARNESS_GATEWAY_URL", "http://host.docker.internal:11434")
+	env := map[string]string{
+		"OLLAMA_BASE_URL": gateway,
+	}
+	lock := modelLockEnabled()
+	if !lock {
+		// Legacy BYOK path.
+		env["OPENROUTER_API_KEY"] = apiKey
+		env["DITTOBENCH_PROVIDER"] = "openrouter"
+		if m := strings.TrimSpace(os.Getenv("DITTOBENCH_HARNESS_MODEL")); m != "" {
+			env["DITTOBENCH_MODEL"] = m
+		}
+	}
+	for k, v := range reqEnv {
+		if lock && lockedEnvKeys[k] {
+			continue // the lock owns these; callers cannot set them
+		}
+		env[k] = v
+	}
+	if lock {
+		// Applied last so the lock wins over anything above.
+		env["DITTOBENCH_PROVIDER"] = envOr("HARNESS_PROVIDER", "ollama")
+		env["DITTOBENCH_MODEL"] = llm.HarnessModel()
+		env["OLLAMA_BASE_URL"] = gateway
+		delete(env, "OPENROUTER_API_KEY")
+	}
+	return env
 }
 
 // clientIP returns the caller's IP for rate-limiting, honoring the first hop of

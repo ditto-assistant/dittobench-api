@@ -16,6 +16,54 @@ func TestDeriveQuestionsDeterministic(t *testing.T) {
 	}
 }
 
+// TestAskVariantDeterministicAndSeedVarying pins the deterministic
+// phrasing-variant contract: a fixed (seed, key) always picks the same variant,
+// distinct seeds vary it, and single/empty option sets are handled.
+func TestAskVariantDeterministicAndSeedVarying(t *testing.T) {
+	opts := []string{"a", "b", "c", "d"}
+	if askVariant(7, "rec:city", opts) != askVariant(7, "rec:city", opts) {
+		t.Fatal("askVariant not stable for a fixed (seed,key)")
+	}
+	// Across many seeds the same key should land on more than one variant
+	// (surface anti-memorization), not a constant.
+	seen := map[string]bool{}
+	for s := int64(0); s < 200; s++ {
+		seen[askVariant(s, "rec:city", opts)] = true
+	}
+	if len(seen) < 2 {
+		t.Fatalf("askVariant never varied across seeds: %v", seen)
+	}
+	if askVariant(1, "k", nil) != "" {
+		t.Fatal("empty options must yield empty string")
+	}
+	if askVariant(1, "k", []string{"only"}) != "only" {
+		t.Fatal("single option must be returned as-is")
+	}
+}
+
+// TestQuestionPhrasingVariesAcrossSeeds: two different submission seeds should
+// produce at least some differently-worded questions for the same attribute
+// (the LLM paraphrase's anti-memorization role is now carried by the templates).
+func TestQuestionPhrasingVariesAcrossSeeds(t *testing.T) {
+	textByID := func(seed int64) map[string]string {
+		m := map[string]string{}
+		for _, q := range DeriveQuestions(BuildPlan(seed, DefaultOpts())) {
+			m[q.ID] = q.Text
+		}
+		return m
+	}
+	a, b := textByID(1), textByID(2)
+	diff := 0
+	for id, ta := range a {
+		if tb, ok := b[id]; ok && ta != tb {
+			diff++
+		}
+	}
+	if diff == 0 {
+		t.Fatal("no question rephrased between seeds — phrasing variants not seed-varying")
+	}
+}
+
 // TestQuestionTypeCoverage checks every question type is derivable from a
 // default plan — the per-type discrimination gate needs each present.
 func TestQuestionTypeCoverage(t *testing.T) {

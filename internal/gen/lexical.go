@@ -1,6 +1,18 @@
 package gen
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
+
+// wordRe matches a lowercase alphanumeric token; isNumeric reports whether a
+// token is a pure digit run. Generic text utilities used by the overlap
+// measurement below.
+var wordRe = regexp.MustCompile(`[a-z0-9]+`)
+
+var numberRe = regexp.MustCompile(`[0-9]+`)
+
+func isNumeric(s string) bool { return numberRe.MatchString(s) && wordRe.FindString(s) == s }
 
 // Lexical-overlap measurement for the query↔needle gap.
 //

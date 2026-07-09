@@ -1,7 +1,6 @@
 package gen
 
 import (
-	"context"
 	"strings"
 	"testing"
 )
@@ -16,7 +15,7 @@ func TestAbstentionNeedleAbsent(t *testing.T) {
 		t.Fatalf("loadSeedAssets: %v", err)
 	}
 	const n = 30
-	seedReq, cases, _, err := GenerateMemory(context.Background(), NewRNG(42), n, 60, 0, nil, "m", "", "")
+	seedReq, cases, _, err := GenerateMemory(NewRNG(42), n, 60, "", "")
 	if err != nil {
 		t.Fatalf("GenerateMemory: %v", err)
 	}

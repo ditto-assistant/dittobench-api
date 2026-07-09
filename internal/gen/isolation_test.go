@@ -1,7 +1,6 @@
 package gen
 
 import (
-	"context"
 	"strings"
 	"testing"
 
@@ -10,7 +9,7 @@ import (
 
 func TestGenerateIsolationStructure(t *testing.T) {
 	const seed = 778899
-	iso := GenerateIsolation(context.Background(), NewRNG(1), seed, 20, 2, 4)
+	iso := GenerateIsolation(seed, 20, 2, 4)
 
 	if len(iso.Cases) == 0 {
 		t.Fatal("expected isolation cases")
@@ -48,7 +47,7 @@ func TestGenerateIsolationStructure(t *testing.T) {
 // DIFFERENT value for the queried attribute — otherwise there is no leak to catch.
 func TestIsolationCasesHaveConflictingValue(t *testing.T) {
 	const seed = 4242
-	iso := GenerateIsolation(context.Background(), NewRNG(2), seed, 20, 2, 4)
+	iso := GenerateIsolation(seed, 20, 2, 4)
 
 	pCur := currentScalars(persona.BuildPlan(seed, personaOptsFor(20)))
 	sCur := currentScalars(persona.BuildPlan(seed^isolationSalt, isolationOpts()))
@@ -74,8 +73,8 @@ func TestIsolationCasesHaveConflictingValue(t *testing.T) {
 }
 
 func TestGenerateIsolationDeterministic(t *testing.T) {
-	a := GenerateIsolation(context.Background(), NewRNG(7), 31337, 20, 2, 4)
-	b := GenerateIsolation(context.Background(), NewRNG(7), 31337, 20, 2, 4)
+	a := GenerateIsolation(31337, 20, 2, 4)
+	b := GenerateIsolation(31337, 20, 2, 4)
 	if len(a.Cases) != len(b.Cases) || len(a.SecondaryWave.Pairs) != len(b.SecondaryWave.Pairs) {
 		t.Fatal("isolation generation not deterministic (counts differ)")
 	}
@@ -89,7 +88,7 @@ func TestGenerateIsolationDeterministic(t *testing.T) {
 }
 
 func TestGenerateIsolationDisabled(t *testing.T) {
-	iso := GenerateIsolation(context.Background(), NewRNG(1), 5, 20, 2, 0)
+	iso := GenerateIsolation(5, 20, 2, 0)
 	if len(iso.Cases) != 0 || len(iso.SecondaryWave.Pairs) != 0 {
 		t.Fatal("isoCases=0 should produce no isolation content")
 	}

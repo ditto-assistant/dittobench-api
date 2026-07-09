@@ -1,7 +1,6 @@
 package gen
 
 import (
-	"context"
 	"strings"
 	"testing"
 
@@ -13,7 +12,7 @@ import (
 // haystack accumulated through its RunAfterWave — so a case is never asked
 // before the facts it depends on have been seeded (ground truth stays exact).
 func TestStagedSuiteEvidenceSeededByUnlockWave(t *testing.T) {
-	suite := GenerateMemorySuite(context.Background(), NewRNG(1), 4242, 40, 0, 3, 0.35, nil, "")
+	suite := GenerateMemorySuite(NewRNG(1), 4242, 40, 3, 0.35)
 	if suite.SeedingWaves != 3 {
 		t.Fatalf("want 3 waves, got %d", suite.SeedingWaves)
 	}
@@ -53,7 +52,7 @@ func TestStagedSuiteEvidenceSeededByUnlockWave(t *testing.T) {
 // the haystack (no pair dropped, none duplicated) and that subject links only
 // reference pairs seeded in the SAME wave (no dangling cross-wave links).
 func TestEveryPairInExactlyOneWave(t *testing.T) {
-	suite := GenerateMemorySuite(context.Background(), NewRNG(2), 7, 30, 0, 3, 0.3, nil, "")
+	suite := GenerateMemorySuite(NewRNG(2), 7, 30, 3, 0.3)
 	pairWave := map[string]int{}
 	for w, wave := range suite.Waves {
 		for _, p := range wave.Pairs {
@@ -82,7 +81,7 @@ func TestEveryPairInExactlyOneWave(t *testing.T) {
 // not, so a subjects-first retriever must self-construct to answer.
 func TestTierBSeedsPairsWithoutSubjects(t *testing.T) {
 	unlinkedFrac := func(rawFrac float64) float64 {
-		suite := GenerateMemorySuite(context.Background(), NewRNG(3), 555, 40, 0, 1, rawFrac, nil, "")
+		suite := GenerateMemorySuite(NewRNG(3), 555, 40, 1, rawFrac)
 		var pairs int
 		linked := map[string]bool{}
 		for _, wave := range suite.Waves {
@@ -114,7 +113,7 @@ func TestTierBSeedsPairsWithoutSubjects(t *testing.T) {
 // TestSingleWaveMatchesFlat guards backward compatibility: a 1-wave, Tier-A
 // suite is exactly the flat GenerateMemoryV2 single-seed view.
 func TestSingleWaveMatchesFlat(t *testing.T) {
-	seedReq, cases, _, _ := GenerateMemoryV2(context.Background(), NewRNG(9), 111, 20, 0, nil, "")
+	seedReq, cases, _, _ := GenerateMemoryV2(NewRNG(9), 111, 20)
 	if len(cases) == 0 || len(seedReq.Pairs) == 0 {
 		t.Fatal("flat view empty")
 	}

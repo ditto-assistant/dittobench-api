@@ -1,7 +1,6 @@
 package gen
 
 import (
-	"context"
 	"fmt"
 	"math/rand"
 	"sort"
@@ -52,9 +51,11 @@ type MemorySuite struct {
 //     attribute cluster; the pipeline seeds a wave, runs the cases it unlocks,
 //     then seeds the next — memory built incrementally. nWaves=1 → single seed.
 //
-// The plan is a pure function of the master `seed`; realization + sampling use
-// the shared rng `r`. Reproducible from (seed, bench_version).
-func GenerateMemorySuite(ctx context.Context, r *rand.Rand, seed int64, n int, frac float64, nWaves int, rawPairsFrac float64, llm LLM, model string) MemorySuite {
+// The plan is a pure function of the master `seed`; sampling uses the shared rng
+// `r`. Fully non-LLM and reproducible from (seed, bench_version): the haystack
+// and questions come from the plan's deterministic template surfaces + seeded
+// phrasing variants, not a paraphrase pass.
+func GenerateMemorySuite(r *rand.Rand, seed int64, n int, nWaves int, rawPairsFrac float64) MemorySuite {
 	if nWaves < 1 {
 		nWaves = 1
 	}
@@ -65,8 +66,7 @@ func GenerateMemorySuite(ctx context.Context, r *rand.Rand, seed int64, n int, f
 	}
 
 	plan := persona.BuildPlan(seed, personaOptsFor(n))
-	pairs, evidence, renderStats := RenderHaystack(ctx, r, plan, frac, llm, model)
-	suite.Stats.Add(renderStats)
+	pairs, evidence := RenderHaystack(plan)
 
 	questions := persona.DeriveQuestions(plan)
 
@@ -148,63 +148,25 @@ func GenerateMemorySuite(ctx context.Context, r *rand.Rand, seed int64, n int, f
 		return sb.String()
 	}
 
-	// realizeQuestion emits the final question text. An evidence-bearing question
-	// gets a NoLiMa low-overlap rewrite (query side) — reword to share fewer
-	// content words with its stored fact, keeping the answer key; abstention /
-	// evidence-free questions get a plain meaning-preserving paraphrase. Records
-	// paraphrase telemetry AND, for measured questions, the overlap before/after so
-	// the literal-match gap stays visible.
+	// realizeQuestion emits the final question text. Generation is non-LLM: the
+	// question's surface was already varied by the seeded phrasing variant in
+	// persona.DeriveQuestions, so this only records the query↔needle lexical
+	// overlap telemetry (NoLiMa gap) for evidence-bearing questions. One rng roll
+	// is consumed per question to keep the draw-count stable regardless of type.
 	var gapBeforeSum, gapAfterSum float64
 	realizeQuestion := func(q persona.Question) string {
 		ev := evidenceText(q)
 		measured := !q.Abstain && ev != ""
-		out := q.Text
-		// Always consume one roll per question (keeps the RNG draw-count independent
-		// of LLM output and question type, so two runs of a seed stay identical).
-		roll := r.Float64()
-		// Injection-resistance attacks must reach the harness verbatim — never
-		// paraphrase or low-overlap-rewrite the override instruction (that would blunt
-		// or mangle the attack). The roll above is still consumed for RNG stability.
-		if q.Type == persona.QTInjection {
-			return q.Text
-		}
-		// The easy single-fact recall types share the most wording with their stored
-		// fact, so they benefit most from the low-overlap rewrite — force it for them
-		// (when an LLM is available) rather than leaving de-overlap to the frac roll.
-		forceRewrite := measured && easyRecallType[q.Type]
-		if llm != nil && frac > 0 && (forceRewrite || roll < frac) {
-			suite.Stats.Attempted++
-			if measured {
-				rq, retried, applied := realizeQuestionLowOverlap(ctx, llm, model, q.Text, ev, q.Answer)
-				if retried {
-					suite.Stats.Retried++
-				}
-				if applied {
-					suite.Stats.Applied++
-					suite.LexicalGap.Rewritten++
-					out = rq
-				} else {
-					suite.Stats.Fallback++
-				}
-			} else {
-				pq, retried, ok := paraphraseQuestion(ctx, llm, model, q.Text)
-				if retried {
-					suite.Stats.Retried++
-				}
-				if ok {
-					suite.Stats.Applied++
-					out = pq
-				} else {
-					suite.Stats.Fallback++
-				}
-			}
-		}
+		// Consume one roll per question (keeps the RNG draw-count independent of
+		// question type, so two runs of a seed stay identical).
+		_ = r.Float64()
 		if measured {
+			overlap := lexicalOverlap(q.Text, ev)
 			suite.LexicalGap.Questions++
-			gapBeforeSum += lexicalOverlap(q.Text, ev)
-			gapAfterSum += lexicalOverlap(out, ev)
+			gapBeforeSum += overlap
+			gapAfterSum += overlap
 		}
-		return out
+		return q.Text
 	}
 
 	fw := factWaves(plan, nWaves)
@@ -241,8 +203,8 @@ func GenerateMemorySuite(ctx context.Context, r *rand.Rand, seed int64, n int, f
 
 // GenerateMemoryV2 is the single-wave, all-Tier-A view of the suite, retained
 // for callers/tests that want a flat SeedRequest + cases (no staging).
-func GenerateMemoryV2(ctx context.Context, r *rand.Rand, seed int64, n int, frac float64, llm LLM, model string) (protocol.SeedRequest, []protocol.MemoryCase, protocol.ParaphraseStats, error) {
-	suite := GenerateMemorySuite(ctx, r, seed, n, frac, 1, 0, llm, model)
+func GenerateMemoryV2(r *rand.Rand, seed int64, n int) (protocol.SeedRequest, []protocol.MemoryCase, protocol.ParaphraseStats, error) {
+	suite := GenerateMemorySuite(r, seed, n, 1, 0)
 	cases := make([]protocol.MemoryCase, 0, len(suite.Cases))
 	for _, sc := range suite.Cases {
 		cases = append(cases, sc.Case)
@@ -390,15 +352,6 @@ var memoryTypeWeight = map[string]int{
 	persona.QTAggregation:           2,
 	persona.QTSingleSession:         1,
 	persona.QTPreference:            1,
-}
-
-// easyRecallType marks the single-fact recall types whose question wording most
-// overlaps its stored fact — these always get the low-overlap (NoLiMa) rewrite so
-// a lexical shortcut can't stand in for retrieval.
-var easyRecallType = map[string]bool{
-	persona.QTSingleSession:   true,
-	persona.QTPreference:      true,
-	persona.QTKnowledgeUpdate: true,
 }
 
 func typeWeight(t string) int {

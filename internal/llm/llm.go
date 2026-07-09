@@ -31,6 +31,15 @@ const (
 	defaultGeneratorModel = "qwen/qwen3-32b"
 	defaultScorerModel    = "google/gemini-3.1-flash-lite"
 
+	// defaultHarnessModel is the v2 locked open-weight model every miner harness
+	// is scored against. Locking the harness to ONE open-weight model shrinks the
+	// exploit surface (no model routing to game, no judge-family collusion) and
+	// makes the median-of-3 validators' scores of a submission comparable. Qwen2.5
+	// is the v2 start (strong open-weight tool-calling). This is the ONE place the
+	// locked model id lives; bump it here (or via HARNESS_MODEL) for v3. It must
+	// name the model the host gateway actually serves.
+	defaultHarnessModel = "qwen/qwen2.5-72b-instruct"
+
 	endpoint = "https://openrouter.ai/api/v1/chat/completions"
 
 	// defaultMaxTokens caps the completion length of every call. Judges emit a
@@ -125,6 +134,18 @@ func ScorerModel() string {
 // tuned to one model) is caught by the de-correlated second judge.
 func ScorerModelB() string {
 	return strings.TrimSpace(os.Getenv("SCORER_MODEL_B"))
+}
+
+// HarnessModel returns the v2 locked model id every miner harness is scored
+// against (env HARNESS_MODEL or the Qwen2.5 default). It is the model-routing
+// indirection: callers force this on the sandbox instead of letting the harness
+// pick its own model, so scores are comparable across validators and model
+// choice is not an attack surface. See defaultHarnessModel.
+func HarnessModel() string {
+	if m := strings.TrimSpace(os.Getenv("HARNESS_MODEL")); m != "" {
+		return m
+	}
+	return defaultHarnessModel
 }
 
 type chatMessage struct {

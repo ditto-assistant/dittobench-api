@@ -1,9 +1,7 @@
 package gen
 
 import (
-	"context"
 	"fmt"
-	"math/rand"
 	"sort"
 
 	"github.com/ditto-assistant/dittobench-api/internal/persona"
@@ -49,7 +47,7 @@ func isolationOpts() persona.Opts {
 // value lives in B) and B-scoped (query SecondaryUser, the conflict lives in A).
 // The secondary haystack is TEMPLATE-rendered (no LLM) — it is contamination, so
 // it adds zero generator token cost. isoCases<=0 returns an empty suite.
-func GenerateIsolation(ctx context.Context, r *rand.Rand, seed int64, primaryN, nWaves, isoCases int) IsolationSuite {
+func GenerateIsolation(seed int64, primaryN, nWaves, isoCases int) IsolationSuite {
 	if isoCases <= 0 {
 		return IsolationSuite{}
 	}
@@ -59,10 +57,9 @@ func GenerateIsolation(ctx context.Context, r *rand.Rand, seed int64, primaryN, 
 	pPlan := persona.BuildPlan(seed, personaOptsFor(primaryN))
 	sPlan := persona.BuildPlan(seed^isolationSalt, isolationOpts())
 
-	// Secondary haystack: template-rendered (frac 0, nil LLM ⇒ no LLM calls),
-	// fully Tier-A (prepared subjects) so it is retrievable — a cross-graph leak
-	// actually surfaces it.
-	sPairs, sEvidence, _ := RenderHaystack(ctx, r, sPlan, 0, nil, "")
+	// Secondary haystack: template-rendered (non-LLM), fully Tier-A (prepared
+	// subjects) so it is retrievable — a cross-graph leak actually surfaces it.
+	sPairs, sEvidence := RenderHaystack(sPlan)
 	sSubjects, sLinks := synthesizeSubjects(sPlan, sEvidence, nil)
 	secondary := protocol.SeedRequest{
 		UserID:   SecondaryUser,

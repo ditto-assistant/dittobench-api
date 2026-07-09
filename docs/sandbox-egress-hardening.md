@@ -42,6 +42,13 @@ From `cmd/dittobench-api/main.go` the sandbox env is:
 So the allowlist is tiny: **OpenRouter (by hostname)** + **the host Ollama
 gateway**. Everything else is denied.
 
+> **v2 model lock supersedes the OpenRouter row.** Once the harness model lock
+> is on (see model-lock.md), openrouter.ai is **dropped** from the allowlist:
+> the host gateway serves the single locked open-weight model and is the ONLY
+> reachable LLM, so the sandbox needs no OpenRouter egress (and no OpenRouter key
+> is forwarded, which removes threat #1 below on the locked path). The allowlist
+> collapses to just the host gateway.
+
 ## Why Docker alone can't do this
 
 Docker has no per-container egress allowlist by hostname. OpenRouter sits behind

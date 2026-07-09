@@ -1,7 +1,6 @@
 package gen
 
 import (
-	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -11,33 +10,11 @@ import (
 	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
 )
 
-// echoLLM returns valid paraphrase JSON that echoes the input, so every number
-// and canonical value survives — models a well-behaved generator (Applied path).
-type echoLLM struct{ calls int }
-
-func (e *echoLLM) Complete(_ context.Context, _ string, _ string, user string) (string, error) {
-	e.calls++
-	b, _ := json.Marshal(map[string]string{
-		"prompt":   "Rewritten — " + user,
-		"response": "Understood. " + user,
-	})
-	return string(b), nil
-}
-
-// dropLLM returns generic reworded JSON with NO facts — the canonical value is
-// gone, so fact beats must fall back to their template (Fallback path).
-type dropLLM struct{ calls int }
-
-func (d *dropLLM) Complete(_ context.Context, _ string, _ string, _ string) (string, error) {
-	d.calls++
-	return `{"prompt":"We chatted about something.","response":"Sounds good."}`, nil
-}
-
-// evidenceCarriesValue is the reproducibility invariant (plan
-// level): for every fact, the pair the evidence map points at contains the
-// fact's canonical value verbatim — no matter whether the LLM rendering was
-// accepted or the template was used as fallback. If this holds, the answer token
-// a memory case is graded on is always seeded.
+// evidenceCarriesValue is the reproducibility invariant (plan level): for every
+// fact, the pair the evidence map points at contains the fact's canonical value
+// verbatim. If this holds, the answer token a memory case is graded on is always
+// seeded. Generation is non-LLM, so the value comes straight from the beat's
+// deterministic template surface.
 func evidenceCarriesValue(t *testing.T, plan *persona.Plan, pairs []protocol.MemoryPair, evidence map[string]string) {
 	t.Helper()
 	byID := map[string]protocol.MemoryPair{}
@@ -62,8 +39,8 @@ func evidenceCarriesValue(t *testing.T, plan *persona.Plan, pairs []protocol.Mem
 
 func TestRenderHaystackTemplateDeterministic(t *testing.T) {
 	plan := persona.BuildPlan(42, persona.DefaultOpts())
-	a, evA, _ := RenderHaystack(context.Background(), NewRNG(1), plan, 0, nil, "")
-	b, evB, _ := RenderHaystack(context.Background(), NewRNG(1), plan, 0, nil, "")
+	a, evA := RenderHaystack(plan)
+	b, evB := RenderHaystack(plan)
 	if len(a) != len(b) {
 		t.Fatalf("pair count differs: %d vs %d", len(a), len(b))
 	}
@@ -93,36 +70,4 @@ func TestRenderHaystackTemplateDeterministic(t *testing.T) {
 		}
 		prev = ts
 	}
-}
-
-func TestRenderHaystackLLMApplied(t *testing.T) {
-	plan := persona.BuildPlan(7, persona.DefaultOpts())
-	llm := &echoLLM{}
-	pairs, ev, stats := RenderHaystack(context.Background(), NewRNG(2), plan, 1.0, llm, "gen-model")
-	if stats.Attempted == 0 {
-		t.Fatal("expected paraphrase attempts at frac=1.0")
-	}
-	if stats.Applied == 0 {
-		t.Fatal("echo LLM preserves facts — expected some Applied")
-	}
-	if stats.Fallback != 0 {
-		t.Fatalf("echo LLM should never fail verification, got %d fallbacks", stats.Fallback)
-	}
-	// Rewrites were accepted, yet every canonical value still survives.
-	evidenceCarriesValue(t, plan, pairs, ev)
-	if !strings.Contains(pairs[0].Prompt, "Rewritten") && !strings.Contains(pairs[0].Response, "Understood") {
-		t.Fatal("expected LLM-rendered surface, got template")
-	}
-}
-
-func TestRenderHaystackLLMFallbackPreservesValue(t *testing.T) {
-	plan := persona.BuildPlan(99, persona.DefaultOpts())
-	llm := &dropLLM{}
-	pairs, ev, stats := RenderHaystack(context.Background(), NewRNG(3), plan, 1.0, llm, "gen-model")
-	if stats.Fallback == 0 {
-		t.Fatal("drop LLM strips fact values — expected fallbacks on fact beats")
-	}
-	// Despite the LLM dropping facts, every canonical value is preserved via the
-	// template fallback — the reproducibility contract survives a hostile LLM.
-	evidenceCarriesValue(t, plan, pairs, ev)
 }
