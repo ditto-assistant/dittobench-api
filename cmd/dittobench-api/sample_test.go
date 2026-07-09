@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ditto-assistant/dittobench-api/internal/gen"
+	"github.com/ditto-assistant/dittobench-datagen/gen"
 )
 
 func getSample(t *testing.T, s *server, query string) (*httptest.ResponseRecorder, gen.DatasetArtifact) {

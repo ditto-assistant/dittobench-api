@@ -3,7 +3,7 @@ package scorer
 import (
 	"testing"
 
-	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
+	"github.com/ditto-assistant/dittobench-datagen/protocol"
 )
 
 func webToolCase() protocol.ToolCase {

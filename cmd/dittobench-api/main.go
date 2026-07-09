@@ -22,8 +22,6 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/ditto-assistant/dittobench-api/internal/datagen"
-	"github.com/ditto-assistant/dittobench-api/internal/gen"
 	"github.com/ditto-assistant/dittobench-api/internal/llm"
 	"github.com/ditto-assistant/dittobench-api/internal/netguard"
 	"github.com/ditto-assistant/dittobench-api/internal/ratelimit"
@@ -31,9 +29,11 @@ import (
 	"github.com/ditto-assistant/dittobench-api/internal/sandbox"
 	"github.com/ditto-assistant/dittobench-api/internal/scorer"
 	"github.com/ditto-assistant/dittobench-api/internal/store"
-	"github.com/ditto-assistant/dittobench-api/pkg/catalog"
-	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
-	"github.com/ditto-assistant/dittobench-api/pkg/toolexec"
+	"github.com/ditto-assistant/dittobench-datagen/catalog"
+	"github.com/ditto-assistant/dittobench-datagen/datagen"
+	"github.com/ditto-assistant/dittobench-datagen/gen"
+	"github.com/ditto-assistant/dittobench-datagen/protocol"
+	"github.com/ditto-assistant/dittobench-datagen/toolexec"
 )
 
 const defaultN = 30
@@ -560,8 +560,8 @@ func (s *server) submitRunSize(w http.ResponseWriter, r *http.Request, req submi
 	runID := uuid.NewString()
 	s.store.Create(runID, "run_size", store.StatusQueued, seed, prof.Tools+prof.Mem)
 	s.store.SetRunSize(runID, req.RunSize)
-	log.Printf("run %s: run_size=%s seed=%d tools=%d mem=%d distractors=%d",
-		runID, req.RunSize, seed, prof.Tools, prof.Mem, prof.Distractors)
+	log.Printf("run %s: run_size=%s seed=%d tools=%d mem=%d",
+		runID, req.RunSize, seed, prof.Tools, prof.Mem)
 
 	go s.runSizeJob(context.Background(), runID, req, prof, seed, llmClient, apiKey)
 
@@ -849,6 +849,11 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	if memSuite.LexicalGap.Questions > 0 {
 		lg := memSuite.LexicalGap
 		report.Details.LexicalGap = &lg
+	}
+	report.Details.MetamorphicConsistency = scorer.MetamorphicConsistency(perCase)
+	if brier, cn := scorer.CalibrationBrier(perCase); brier != nil {
+		report.Details.CalibrationBrier = brier
+		report.Details.CalibrationN = cn
 	}
 	if injections > 0 {
 		log.Printf("run %s: %d judge-injection attempt(s) flagged", runID, injections)

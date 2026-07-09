@@ -5,7 +5,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
+	"github.com/ditto-assistant/dittobench-datagen/protocol"
 )
 
 func specs(names ...string) []protocol.ToolSpec {
@@ -136,5 +136,20 @@ func TestMultiHopOrderCredit(t *testing.T) {
 	none := detScore(c, call("create_image", ""))
 	if none != 0 {
 		t.Fatalf("calling none of the expected tools should be 0, got %v", none)
+	}
+}
+
+func TestArgStuffingRejected(t *testing.T) {
+	// Natural phrasing embedding the entity → credited.
+	if !argValueEqual("the latest news about Tokyo please", "Tokyo") {
+		t.Fatal("natural phrase embedding the entity should credit")
+	}
+	// A short two-word query still credits.
+	if !argValueEqual("Tokyo weather", "Tokyo") {
+		t.Fatal("short query should credit")
+	}
+	// Candidate-stuffing a long list of pool values → rejected.
+	if argValueEqual("Tokyo Paris London Berlin Madrid Rome Cairo Oslo", "Tokyo") {
+		t.Fatal("stuffed candidate list should NOT credit the embedded value")
 	}
 }

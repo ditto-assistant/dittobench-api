@@ -3,7 +3,7 @@ package main
 import (
 	"net/http"
 
-	"github.com/ditto-assistant/dittobench-api/internal/gen"
+	"github.com/ditto-assistant/dittobench-datagen/gen"
 )
 
 // Public dataset sampler (task #52).

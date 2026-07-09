@@ -17,7 +17,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
+	"github.com/ditto-assistant/dittobench-datagen/protocol"
 )
 
 // Score builds the aggregate report for a set of cases and their responses.
@@ -224,6 +224,98 @@ func CapUnobserved(cs protocol.CaseScore) protocol.CaseScore {
 	return cs
 }
 
+// Canary integrity gate. A per-run canary case asks for a seed-derived nonce
+// seeded into the conversation; recalling it proves genuine in-context retrieval
+// this run (the value cannot be cached across runs or known to a base model),
+// and a bait decoy catches a harness that echoes any nonce-shaped token. A miss
+// or leak multiplies the composite by canaryFailPenalty, a disqualifier that
+// easy recall elsewhere cannot offset.
+const (
+	canaryPassThreshold = 0.5 // canary case Score at/above this counts as passed
+	canaryFailPenalty   = 0.5 // composite multiplier when a canary is failed
+)
+
+// isCanaryCase reports whether a CaseScore is the integrity canary (its category
+// carries the "canary" question type).
+func isCanaryCase(cs protocol.CaseScore) bool {
+	return cs.Kind == protocol.KindMemory && strings.Contains(strings.ToLower(cs.Category), "canary")
+}
+
+// CanaryIntegrityFactor returns canaryFailPenalty when any canary case scored
+// below the pass threshold, else 1.0 (including when no canary ran). Each failed
+// canary compounds, so a harness cannot dilute the signal by failing several.
+func CanaryIntegrityFactor(perCase []protocol.CaseScore) float64 {
+	factor := 1.0
+	for _, cs := range perCase {
+		if isCanaryCase(cs) && cs.Score < canaryPassThreshold {
+			factor *= canaryFailPenalty
+		}
+	}
+	return factor
+}
+
+// MetamorphicConsistency returns the fraction of invariance twin groups whose
+// member cases the harness answered consistently — all correct or all incorrect
+// (Ideas #3). A phrasing-brittle harness that gets one twin right and its
+// reworded twin wrong scores below 1.0. Returns nil when no twin groups ran
+// (nothing to measure). Advisory only — never folded into the composite.
+func MetamorphicConsistency(perCase []protocol.CaseScore) *float64 {
+	groups := map[string][]bool{}
+	for _, cs := range perCase {
+		if cs.TwinGroup == "" {
+			continue
+		}
+		groups[cs.TwinGroup] = append(groups[cs.TwinGroup], cs.Correct)
+	}
+	if len(groups) == 0 {
+		return nil
+	}
+	consistent := 0
+	for _, verdicts := range groups {
+		all, none := true, true
+		for _, v := range verdicts {
+			if v {
+				none = false
+			} else {
+				all = false
+			}
+		}
+		if all || none {
+			consistent++
+		}
+	}
+	v := round6(float64(consistent) / float64(len(groups)))
+	return &v
+}
+
+// CalibrationBrier returns the mean Brier score over cases whose harness
+// reported a confidence (Ideas #6): mean((confidence - outcome)^2) where outcome
+// is 1 for a correct case and 0 otherwise. Lower is better; a well-calibrated
+// harness minimizes it, and always-claiming-1.0 is punished on its wrong cases.
+// Returns (nil, 0) when no case carried a confidence. Advisory only.
+func CalibrationBrier(perCase []protocol.CaseScore) (*float64, int) {
+	var sum float64
+	var n int
+	for _, cs := range perCase {
+		if cs.Confidence == nil {
+			continue
+		}
+		c := clamp01(*cs.Confidence)
+		outcome := 0.0
+		if cs.Correct {
+			outcome = 1.0
+		}
+		d := c - outcome
+		sum += d * d
+		n++
+	}
+	if n == 0 {
+		return nil, 0
+	}
+	v := round6(sum / float64(n))
+	return &v, n
+}
+
 // Memory grading weights: graded credit = 0.7*correctness +
 // 0.3*grounding, replacing v1's binary yes/no (which maximized variance and hid
 // partial competence).
@@ -241,11 +333,13 @@ func memoryCaseScore(mc protocol.MemoryCase, resp protocol.RunResponse, correctn
 		Kind:     protocol.KindMemory,
 		// Round to 6 dp so the exact endpoints are clean (0.7+0.3 is not exactly
 		// 1.0 in float64) without affecting scoring resolution.
-		Score:     clamp01(round6(memCorrectnessWeight*correctness + memGroundingWeight*grounding)),
-		Correct:   correctness >= 0.5,
-		LatencyMs: resp.LatencyMs,
-		Called:    calledNames(resp.ToolCalls),
-		Expected:  []string{}, // non-nil so the JSON is [] not null (memory has no expected tools)
+		Score:      clamp01(round6(memCorrectnessWeight*correctness + memGroundingWeight*grounding)),
+		Correct:    correctness >= 0.5,
+		TwinGroup:  mc.TwinGroup,
+		Confidence: resp.Confidence,
+		LatencyMs:  resp.LatencyMs,
+		Called:     calledNames(resp.ToolCalls),
+		Expected:   []string{}, // non-nil so the JSON is [] not null (memory has no expected tools)
 	}
 	if mc.QuestionType == "" {
 		cs.Category = "memory"
@@ -434,6 +528,7 @@ func stdErrOfMean(sum, sumSq float64, n int) float64 {
 // median latency included.
 func Aggregate(runID string, perCase []protocol.CaseScore) protocol.ScoreReport {
 	var toolSum, toolN, memSum, memN float64
+	var toolSumSq, memSumSq float64
 	latencies := make([]int64, 0, len(perCase))
 	catSum := map[string]float64{}
 	catSumSq := map[string]float64{}
@@ -445,9 +540,11 @@ func Aggregate(runID string, perCase []protocol.CaseScore) protocol.ScoreReport 
 		switch cs.Kind {
 		case protocol.KindMemory:
 			memSum += cs.Score
+			memSumSq += cs.Score * cs.Score
 			memN++
 		default:
 			toolSum += cs.Score
+			toolSumSq += cs.Score * cs.Score
 			toolN++
 		}
 		if _, seen := catCount[cs.Category]; !seen {
@@ -485,6 +582,11 @@ func Aggregate(runID string, perCase []protocol.CaseScore) protocol.ScoreReport 
 	// ran under observed execution). Applied to the composite only — tool_mean,
 	// memory_mean, and per_category stay pure accuracy.
 	composite = round6(composite * ToolEfficiencyFactor(perCase))
+	// Integrity disqualifier: failing the per-run canary (not recalling the
+	// seeded nonce, or leaking the bait) multiplies the composite down. It cannot
+	// be bought back with easy recall, so a harness that does not genuinely
+	// retrieve in-context this run is capped hard.
+	composite = round6(composite * CanaryIntegrityFactor(perCase))
 
 	perCat := make([]protocol.CategoryStat, 0, len(catOrder))
 	for _, cat := range catOrder {
@@ -498,16 +600,34 @@ func Aggregate(runID string, perCase []protocol.CaseScore) protocol.ScoreReport 
 		})
 	}
 
+	// Composite standard error (v3 #2): combine the tool-half and memory-half SEs.
+	// The two halves are independent samples and the composite is 0.5*tool +
+	// 0.5*mem, so Var(composite) = 0.25*Var(toolMean) + 0.25*Var(memMean) and
+	// SE = 0.5*sqrt(se_tool^2 + se_mem^2). When only one half is present the
+	// composite is that half's mean, so its SE is that half's SE.
+	seTool := stdErrOfMean(toolSum, toolSumSq, int(toolN))
+	seMem := stdErrOfMean(memSum, memSumSq, int(memN))
+	var compositeStderr float64
+	switch {
+	case toolN > 0 && memN > 0:
+		compositeStderr = 0.5 * math.Sqrt(seTool*seTool+seMem*seMem)
+	case toolN > 0:
+		compositeStderr = seTool
+	case memN > 0:
+		compositeStderr = seMem
+	}
+
 	return protocol.ScoreReport{
-		RunID:       runID,
-		GeneratedAt: protocol.DatasetEpochRFC3339,
-		Composite:   composite,
-		ToolMean:    toolMean,
-		MemoryMean:  memMean,
-		MedianMs:    median(latencies),
-		N:           len(perCase),
-		PerCase:     perCase,
-		PerCategory: perCat,
+		RunID:           runID,
+		GeneratedAt:     protocol.DatasetEpochRFC3339,
+		Composite:       composite,
+		CompositeStderr: round6(compositeStderr),
+		ToolMean:        toolMean,
+		MemoryMean:      memMean,
+		MedianMs:        median(latencies),
+		N:               len(perCase),
+		PerCase:         perCase,
+		PerCategory:     perCat,
 	}
 }
 

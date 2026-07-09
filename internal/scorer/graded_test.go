@@ -6,7 +6,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
+	"github.com/ditto-assistant/dittobench-datagen/protocol"
 )
 
 func approx(a, b float64) bool { return math.Abs(a-b) < 1e-9 }

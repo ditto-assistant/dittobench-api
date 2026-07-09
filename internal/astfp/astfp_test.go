@@ -8,7 +8,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
+	"github.com/ditto-assistant/dittobench-datagen/protocol"
 )
 
 // writeCrate materializes {relpath: source} under a fresh temp dir and returns it.

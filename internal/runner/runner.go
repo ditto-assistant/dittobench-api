@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/ditto-assistant/dittobench-api/internal/netguard"
-	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
+	"github.com/ditto-assistant/dittobench-datagen/protocol"
 )
 
 // perCaseTimeout bounds a single /run call.

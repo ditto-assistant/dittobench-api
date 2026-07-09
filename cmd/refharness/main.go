@@ -23,7 +23,7 @@ import (
 	"strconv"
 
 	"github.com/ditto-assistant/dittobench-api/internal/refharness"
-	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
+	"github.com/ditto-assistant/dittobench-datagen/protocol"
 )
 
 // fixedLatencyMs is reported for every case so median latency is deterministic.

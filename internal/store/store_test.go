@@ -4,7 +4,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
+	"github.com/ditto-assistant/dittobench-datagen/protocol"
 )
 
 func TestCreateFinishGet(t *testing.T) {

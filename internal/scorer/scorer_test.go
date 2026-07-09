@@ -3,7 +3,7 @@ package scorer
 import (
 	"testing"
 
-	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
+	"github.com/ditto-assistant/dittobench-datagen/protocol"
 )
 
 func tc(id, cat string, expected ...string) protocol.ToolCase {
@@ -117,5 +117,65 @@ func TestMedianEvenCount(t *testing.T) {
 	}
 	if got := median(nil); got != 0 {
 		t.Fatalf("expected 0 for empty, got %d", got)
+	}
+}
+
+func TestCanaryIntegrityFactor(t *testing.T) {
+	pass := protocol.CaseScore{Kind: protocol.KindMemory, Category: "canary", Score: 0.8}
+	fail := protocol.CaseScore{Kind: protocol.KindMemory, Category: "canary", Score: 0.1}
+	other := protocol.CaseScore{Kind: protocol.KindMemory, Category: "single-session-recall", Score: 0.1}
+
+	if f := CanaryIntegrityFactor([]protocol.CaseScore{pass, other}); f != 1.0 {
+		t.Fatalf("passed canary should not penalize, got %v", f)
+	}
+	if f := CanaryIntegrityFactor([]protocol.CaseScore{fail, other}); f != canaryFailPenalty {
+		t.Fatalf("failed canary should apply %v, got %v", canaryFailPenalty, f)
+	}
+	if f := CanaryIntegrityFactor([]protocol.CaseScore{fail, fail}); f != canaryFailPenalty*canaryFailPenalty {
+		t.Fatalf("two failed canaries should compound, got %v", f)
+	}
+	if f := CanaryIntegrityFactor([]protocol.CaseScore{other}); f != 1.0 {
+		t.Fatalf("no canary should not penalize, got %v", f)
+	}
+}
+
+func TestMetamorphicConsistency(t *testing.T) {
+	// Two groups: one consistent (both correct), one inconsistent (split).
+	perCase := []protocol.CaseScore{
+		{Kind: protocol.KindMemory, TwinGroup: "g1", Correct: true},
+		{Kind: protocol.KindMemory, TwinGroup: "g1", Correct: true},
+		{Kind: protocol.KindMemory, TwinGroup: "g2", Correct: true},
+		{Kind: protocol.KindMemory, TwinGroup: "g2", Correct: false},
+		{Kind: protocol.KindMemory, Correct: true}, // ungrouped, ignored
+	}
+	got := MetamorphicConsistency(perCase)
+	if got == nil || *got != 0.5 {
+		t.Fatalf("expected 0.5 (1 of 2 groups consistent), got %v", got)
+	}
+	if MetamorphicConsistency([]protocol.CaseScore{{Kind: protocol.KindMemory, Correct: true}}) != nil {
+		t.Fatal("no twin groups should return nil")
+	}
+}
+
+func TestCalibrationBrier(t *testing.T) {
+	c := func(v float64) *float64 { return &v }
+	// Perfectly calibrated extremes: confident+correct and unconfident+wrong → 0.
+	perfect := []protocol.CaseScore{
+		{Kind: protocol.KindMemory, Correct: true, Confidence: c(1.0)},
+		{Kind: protocol.KindMemory, Correct: false, Confidence: c(0.0)},
+	}
+	b, n := CalibrationBrier(perfect)
+	if b == nil || *b != 0 || n != 2 {
+		t.Fatalf("perfect calibration should be Brier 0 over 2 cases, got %v n=%d", b, n)
+	}
+	// Overconfident wrong answer is punished: (1-0)^2 = 1.
+	over := []protocol.CaseScore{{Kind: protocol.KindMemory, Correct: false, Confidence: c(1.0)}}
+	b, _ = CalibrationBrier(over)
+	if b == nil || *b != 1.0 {
+		t.Fatalf("overconfident-wrong should score Brier 1.0, got %v", b)
+	}
+	// No confidences → nil.
+	if b, n := CalibrationBrier([]protocol.CaseScore{{Kind: protocol.KindMemory, Correct: true}}); b != nil || n != 0 {
+		t.Fatalf("no confidences should return nil, got %v n=%d", b, n)
 	}
 }
