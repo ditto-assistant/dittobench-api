@@ -119,3 +119,22 @@ func TestMedianEvenCount(t *testing.T) {
 		t.Fatalf("expected 0 for empty, got %d", got)
 	}
 }
+
+func TestCanaryIntegrityFactor(t *testing.T) {
+	pass := protocol.CaseScore{Kind: protocol.KindMemory, Category: "canary", Score: 0.8}
+	fail := protocol.CaseScore{Kind: protocol.KindMemory, Category: "canary", Score: 0.1}
+	other := protocol.CaseScore{Kind: protocol.KindMemory, Category: "single-session-recall", Score: 0.1}
+
+	if f := CanaryIntegrityFactor([]protocol.CaseScore{pass, other}); f != 1.0 {
+		t.Fatalf("passed canary should not penalize, got %v", f)
+	}
+	if f := CanaryIntegrityFactor([]protocol.CaseScore{fail, other}); f != canaryFailPenalty {
+		t.Fatalf("failed canary should apply %v, got %v", canaryFailPenalty, f)
+	}
+	if f := CanaryIntegrityFactor([]protocol.CaseScore{fail, fail}); f != canaryFailPenalty*canaryFailPenalty {
+		t.Fatalf("two failed canaries should compound, got %v", f)
+	}
+	if f := CanaryIntegrityFactor([]protocol.CaseScore{other}); f != 1.0 {
+		t.Fatalf("no canary should not penalize, got %v", f)
+	}
+}

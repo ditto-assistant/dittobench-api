@@ -224,6 +224,36 @@ func CapUnobserved(cs protocol.CaseScore) protocol.CaseScore {
 	return cs
 }
 
+// Canary integrity gate. A per-run canary case asks for a seed-derived nonce
+// seeded into the conversation; recalling it proves genuine in-context retrieval
+// this run (the value cannot be cached across runs or known to a base model),
+// and a bait decoy catches a harness that echoes any nonce-shaped token. A miss
+// or leak multiplies the composite by canaryFailPenalty, a disqualifier that
+// easy recall elsewhere cannot offset.
+const (
+	canaryPassThreshold = 0.5 // canary case Score at/above this counts as passed
+	canaryFailPenalty   = 0.5 // composite multiplier when a canary is failed
+)
+
+// isCanaryCase reports whether a CaseScore is the integrity canary (its category
+// carries the "canary" question type).
+func isCanaryCase(cs protocol.CaseScore) bool {
+	return cs.Kind == protocol.KindMemory && strings.Contains(strings.ToLower(cs.Category), "canary")
+}
+
+// CanaryIntegrityFactor returns canaryFailPenalty when any canary case scored
+// below the pass threshold, else 1.0 (including when no canary ran). Each failed
+// canary compounds, so a harness cannot dilute the signal by failing several.
+func CanaryIntegrityFactor(perCase []protocol.CaseScore) float64 {
+	factor := 1.0
+	for _, cs := range perCase {
+		if isCanaryCase(cs) && cs.Score < canaryPassThreshold {
+			factor *= canaryFailPenalty
+		}
+	}
+	return factor
+}
+
 // Memory grading weights: graded credit = 0.7*correctness +
 // 0.3*grounding, replacing v1's binary yes/no (which maximized variance and hid
 // partial competence).
@@ -485,6 +515,11 @@ func Aggregate(runID string, perCase []protocol.CaseScore) protocol.ScoreReport 
 	// ran under observed execution). Applied to the composite only — tool_mean,
 	// memory_mean, and per_category stay pure accuracy.
 	composite = round6(composite * ToolEfficiencyFactor(perCase))
+	// Integrity disqualifier: failing the per-run canary (not recalling the
+	// seeded nonce, or leaking the bait) multiplies the composite down. It cannot
+	// be bought back with easy recall, so a harness that does not genuinely
+	// retrieve in-context this run is capped hard.
+	composite = round6(composite * CanaryIntegrityFactor(perCase))
 
 	perCat := make([]protocol.CategoryStat, 0, len(catOrder))
 	for _, cat := range catOrder {
