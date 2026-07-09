@@ -90,6 +90,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /v1/dataset", s.handleDataset)
+	mux.HandleFunc("GET /v1/sample", s.handleSample)
 	mux.HandleFunc("GET /v1/catalog", s.handleCatalog)
 	mux.HandleFunc("POST /v1/submit", s.handleSubmit)
 	mux.HandleFunc("POST /v1/score", s.handleScore)
