@@ -145,7 +145,51 @@ func (s *server) handleDataset(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	ds := datagen.Generate(seed, n)
+	// The oracle (expected tools/answers, category labels, grading params) is
+	// validator-internal grading data. On the public hosted deployment we serve
+	// only what the harness itself sees at scoring time (the prompt/question), so
+	// this endpoint cannot be scraped into a prompt->answer training set. Trusted
+	// local mode (DITTOBENCH_ALLOW_PRIVATE_HARNESS) returns the full labeled
+	// dataset for calibration and self-hosted practice.
+	if !s.allowPrivate {
+		writeJSON(w, http.StatusOK, redactDataset(ds))
+		return
+	}
 	writeJSON(w, http.StatusOK, ds)
+}
+
+// publicDataset is the answer-free view of a Dataset served on the public
+// practice endpoint: only the harness-visible prompt/question, never the
+// expected tools/answers, category label, or grading params.
+type publicDataset struct {
+	Seed        int64              `json:"seed"`
+	GeneratedAt string             `json:"generated_at"`
+	ToolCases   []publicToolCase   `json:"tool_cases"`
+	MemoryCases []publicMemoryCase `json:"memory_cases,omitempty"`
+}
+
+type publicToolCase struct {
+	ID     string `json:"id"`
+	Prompt string `json:"prompt"`
+}
+
+type publicMemoryCase struct {
+	ID       string `json:"id"`
+	Question string `json:"question"`
+}
+
+// redactDataset strips validator-internal grading data, leaving only what the
+// harness sees. See the "validator-internal" comments on ToolCase/MemoryCase in
+// pkg/protocol and docs/scoring-decentralization-brief.md.
+func redactDataset(ds protocol.Dataset) publicDataset {
+	pub := publicDataset{Seed: ds.Seed, GeneratedAt: ds.GeneratedAt}
+	for _, c := range ds.ToolCases {
+		pub.ToolCases = append(pub.ToolCases, publicToolCase{ID: c.ID, Prompt: c.Prompt})
+	}
+	for _, c := range ds.MemoryCases {
+		pub.MemoryCases = append(pub.MemoryCases, publicMemoryCase{ID: c.ID, Question: c.Question})
+	}
+	return pub
 }
 
 // submitRequest accepts two mutually-exclusive modes:
