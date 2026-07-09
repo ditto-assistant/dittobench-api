@@ -66,10 +66,15 @@ DatasetArtifact,StagedCase,FreshSeed}`, `datagen.IsResultUsage`.
 
 ## Mechanics defaults (proceeding unless told otherwise)
 
-1. Shared packages (`protocol`/`catalog`/`toolexec`/`llm`) stay in
-   `dittobench-api`; the pipeline imports them via a local `replace
-   github.com/ditto-assistant/dittobench-api => ../dittobench-api` until
-   published. No third shared module.
+1. Shared packages stay in `dittobench-api`; the pipeline imports them via a
+   local `replace github.com/ditto-assistant/dittobench-api => ../dittobench-api`
+   until published. No third shared module. **Prerequisite (found on the first
+   compile, 2026-07-09):** Go forbids importing another module's `internal/`
+   packages, so the shared packages the generator needs must first be promoted
+   out of `internal/`. The generator (`datagen`/`gen`/`persona`) needs
+   `catalog` + `toolexec` (it uses `protocol`, already in `pkg/`, and does NOT
+   import `llm`). So move `internal/catalog -> pkg/catalog` and
+   `internal/toolexec -> pkg/toolexec` and update all importers before the move.
 2. Generation is an HTTP service (`cmd/generate`) the platform calls, mirroring
    how the platform already talks to services over HTTP.
 3. The extraction is done **locally first** (`../ditto-data-pipeline`, no
@@ -77,9 +82,15 @@ DatasetArtifact,StagedCase,FreshSeed}`, `datagen.IsResultUsage`.
 
 ## Execution order (dittobench-api will not compile mid-split; do on a branch)
 
-1. Scaffold `../ditto-data-pipeline` module (go.mod + `replace`).
+0. **Prerequisite:** promote `internal/catalog -> pkg/catalog` and
+   `internal/toolexec -> pkg/toolexec` in dittobench-api (Go blocks a foreign
+   module from importing `internal/`); update every importer. This is a
+   self-contained, non-breaking refactor dittobench-api can land on its own.
+1. Scaffold `../ditto-data-pipeline` module (go.mod + `replace`). [done]
 2. Move `persona`, `datagen`, `gen` (and the generator dev tools) into it;
-   fix imports to the `dittobench-api` module. Compile the pipeline.
+   `gen`'s imports of `datagen`/`persona` repoint to the pipeline module, its
+   `catalog`/`toolexec` imports repoint to the new `pkg/` paths. Compile the
+   pipeline.
 3. Strip generation from `cmd/dittobench-api`: `/v1/submit` takes a provided
    dataset; remove the `gen`/`datagen` imports. Compile the exec API.
 4. Add `cmd/generate` to the pipeline (POST /generate). Compile + smoke test.
