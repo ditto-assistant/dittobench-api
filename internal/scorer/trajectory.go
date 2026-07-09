@@ -211,7 +211,36 @@ func argValueEqual(got any, want string) bool {
 	if isPureNumber(want) {
 		return containsNumberToken(gotStr, want)
 	}
-	return gotStr == want || containsBoundedPhrase(gotStr, want)
+	if gotStr == want {
+		return true
+	}
+	// Containment credits a value naturally embedded in a phrase ("news about
+	// Tokyo" ⊇ "Tokyo"), but must not credit ARGUMENT STUFFING — packing many
+	// candidate pool values into one arg so the right one is present by brute
+	// force ("Tokyo Paris London Berlin ..."). A genuine phrasing of a single
+	// entity stays short relative to the entity; reject a containment match when
+	// the observed value is grossly longer than the expected token.
+	if argStuffed(gotStr, want) {
+		return false
+	}
+	return containsBoundedPhrase(gotStr, want)
+}
+
+// argStuffingRatio is how many times longer than the expected value an observed
+// arg may be and still count as a natural phrasing rather than stuffing. A
+// natural embedding ("the latest news about Tokyo" for "Tokyo") stays well
+// under this; a brute-force candidate list blows past it.
+const argStuffingRatio = 8
+
+// argStuffed reports whether an observed arg looks like candidate-stuffing
+// around the expected value: much longer than the value AND carrying several
+// comma/space-separated tokens (the shape of a packed candidate list). Short
+// natural phrases are never flagged.
+func argStuffed(got, want string) bool {
+	if len(got) <= argStuffingRatio*len(want) {
+		return false
+	}
+	return len(strings.Fields(got)) >= 6
 }
 
 func sortedArgKeys(m map[string]string) []string {
