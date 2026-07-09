@@ -156,3 +156,26 @@ func TestMetamorphicConsistency(t *testing.T) {
 		t.Fatal("no twin groups should return nil")
 	}
 }
+
+func TestCalibrationBrier(t *testing.T) {
+	c := func(v float64) *float64 { return &v }
+	// Perfectly calibrated extremes: confident+correct and unconfident+wrong → 0.
+	perfect := []protocol.CaseScore{
+		{Kind: protocol.KindMemory, Correct: true, Confidence: c(1.0)},
+		{Kind: protocol.KindMemory, Correct: false, Confidence: c(0.0)},
+	}
+	b, n := CalibrationBrier(perfect)
+	if b == nil || *b != 0 || n != 2 {
+		t.Fatalf("perfect calibration should be Brier 0 over 2 cases, got %v n=%d", b, n)
+	}
+	// Overconfident wrong answer is punished: (1-0)^2 = 1.
+	over := []protocol.CaseScore{{Kind: protocol.KindMemory, Correct: false, Confidence: c(1.0)}}
+	b, _ = CalibrationBrier(over)
+	if b == nil || *b != 1.0 {
+		t.Fatalf("overconfident-wrong should score Brier 1.0, got %v", b)
+	}
+	// No confidences → nil.
+	if b, n := CalibrationBrier([]protocol.CaseScore{{Kind: protocol.KindMemory, Correct: true}}); b != nil || n != 0 {
+		t.Fatalf("no confidences should return nil, got %v n=%d", b, n)
+	}
+}

@@ -851,6 +851,10 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		report.Details.LexicalGap = &lg
 	}
 	report.Details.MetamorphicConsistency = scorer.MetamorphicConsistency(perCase)
+	if brier, cn := scorer.CalibrationBrier(perCase); brier != nil {
+		report.Details.CalibrationBrier = brier
+		report.Details.CalibrationN = cn
+	}
 	if injections > 0 {
 		log.Printf("run %s: %d judge-injection attempt(s) flagged", runID, injections)
 	}

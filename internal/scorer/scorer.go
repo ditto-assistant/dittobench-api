@@ -288,6 +288,34 @@ func MetamorphicConsistency(perCase []protocol.CaseScore) *float64 {
 	return &v
 }
 
+// CalibrationBrier returns the mean Brier score over cases whose harness
+// reported a confidence (Ideas #6): mean((confidence - outcome)^2) where outcome
+// is 1 for a correct case and 0 otherwise. Lower is better; a well-calibrated
+// harness minimizes it, and always-claiming-1.0 is punished on its wrong cases.
+// Returns (nil, 0) when no case carried a confidence. Advisory only.
+func CalibrationBrier(perCase []protocol.CaseScore) (*float64, int) {
+	var sum float64
+	var n int
+	for _, cs := range perCase {
+		if cs.Confidence == nil {
+			continue
+		}
+		c := clamp01(*cs.Confidence)
+		outcome := 0.0
+		if cs.Correct {
+			outcome = 1.0
+		}
+		d := c - outcome
+		sum += d * d
+		n++
+	}
+	if n == 0 {
+		return nil, 0
+	}
+	v := round6(sum / float64(n))
+	return &v, n
+}
+
 // Memory grading weights: graded credit = 0.7*correctness +
 // 0.3*grounding, replacing v1's binary yes/no (which maximized variance and hid
 // partial competence).
@@ -305,12 +333,13 @@ func memoryCaseScore(mc protocol.MemoryCase, resp protocol.RunResponse, correctn
 		Kind:     protocol.KindMemory,
 		// Round to 6 dp so the exact endpoints are clean (0.7+0.3 is not exactly
 		// 1.0 in float64) without affecting scoring resolution.
-		Score:     clamp01(round6(memCorrectnessWeight*correctness + memGroundingWeight*grounding)),
-		Correct:   correctness >= 0.5,
-		TwinGroup: mc.TwinGroup,
-		LatencyMs: resp.LatencyMs,
-		Called:    calledNames(resp.ToolCalls),
-		Expected:  []string{}, // non-nil so the JSON is [] not null (memory has no expected tools)
+		Score:      clamp01(round6(memCorrectnessWeight*correctness + memGroundingWeight*grounding)),
+		Correct:    correctness >= 0.5,
+		TwinGroup:  mc.TwinGroup,
+		Confidence: resp.Confidence,
+		LatencyMs:  resp.LatencyMs,
+		Called:     calledNames(resp.ToolCalls),
+		Expected:   []string{}, // non-nil so the JSON is [] not null (memory has no expected tools)
 	}
 	if mc.QuestionType == "" {
 		cs.Category = "memory"
