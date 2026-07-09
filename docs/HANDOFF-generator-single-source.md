@@ -19,12 +19,17 @@ change two facts:
   `nick/v2-hardening` was fast-forwarded onto local `main`; the private repos'
   hardening work lives on their own `nick/v2-hardening` branches.
 - The hardening changed generator output, so the known-vector SHA in sections 4
-  and 7 is superseded. The current anchor is: seed 123456789, run_size full ->
-  `e453e668b6f758bd40b913733fab8e20e126384c9f60b95e1c9f9cbeefd172e5`, pinned by
+  and 7 is superseded. As of dittobench-datagen v0.2.0 the anchor is: seed
+  123456789, run_size full ->
+  `d7e042d1749a08c2ea3a186b9f5bceccaba2985173cb1a2a1ea549d2ceac7c53`, pinned by
   `gen/publicvector_test.go`. `bench_version` stays 2 (nothing has shipped to
   prod, so the entire hardening went into the current version rather than a
-  version bump). 1c (sealed pool deltas) was declined to keep the dataset fully
-  public and byte-reproducible.
+  version bump).
+- 1c shipped in its public form (v0.2.0): per-version surface rotation via
+  `protocol.RotateSeed`, so generator output is a function of (seed,
+  bench_version) and rotates on a version bump. The sealed encrypted-delta form
+  was declined to keep the dataset fully public and byte-reproducible. api is
+  pinned to datagen v0.2.0.
 
 Nothing else here changed: the publish is still a one-way door gated on Nick's
 approval, and the `nick/single-generator` -> `main` land sequence and prod

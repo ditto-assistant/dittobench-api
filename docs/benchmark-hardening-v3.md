@@ -26,6 +26,9 @@ Landed:
 - Tier 1 (1a-1b, 1d-1g): surface grammar, no-op distractors and tell removal,
   intent-phrased tool args, dependent-arg multi-hop (job_chain_result_usage),
   scored error recovery (web_recovery_result_usage), near-miss tool presence.
+- Tier 1 (1c), public form: per-version surface rotation (protocol.RotateSeed),
+  shipped in dittobench-datagen v0.2.0. The sealed encrypted-delta form was
+  rejected for transparency; details below.
 - Tier 2 (2a-2f): automations/recipes, capability discovery, Google Workspace,
   memory-write routing, full settings cluster. Catalog is 45 tool categories.
 - Tier 3 (3a-3f): arg-stuffing penalty, metamorphic twins with
@@ -36,14 +39,22 @@ Landed:
   computed-answer modalities (#7/#9), a calibration/Brier proper-scoring slice
   (#6), and an offline G-study + 2PL reliability analyzer, `cmd/gstudy` (#4/#5).
 
-Declined:
+Item 1c (treadmill), public form:
 
-- 1c (sealed per-version pool deltas): rejected. It conflicts with the standing
-  requirement that the dataset, generator, and benchmark stay fully public,
-  transparent, and auditable so independent validators can reproduce every
-  score byte-for-byte at any time. An encrypted just-in-time-revealed blob is a
-  private surface by construction. The fallback treadmill is plain per-version
-  pool rotation, which preserves full public reproducibility.
+- The sealed encrypted-delta form of 1c was rejected. It conflicts with the
+  standing requirement that the dataset, generator, and benchmark stay fully
+  public, auditable, and reproducible by independent validators. An encrypted
+  just-in-time-revealed blob is a private surface by construction.
+- The treadmill intent shipped in its public form instead: per-version surface
+  rotation. Generation seeds its RNG streams from `protocol.RotateSeed(seed)`,
+  which folds bench_version into the seed, so the rendered surface is a function
+  of (seed, bench_version) and rotates on every version bump. A template-matcher
+  tuned to one version's surfaces degrades on the next; a reasoning harness is
+  unaffected. The rotation is deterministic and public, so byte-reproducibility
+  from (seed, bench_version) is preserved. Seed-derived answer material (case
+  ids, mock-tool needles, canary nonces) keeps using the raw seed, so haystack
+  values and their expected answers stay coupled across the rotation. Shipped in
+  dittobench-datagen v0.2.0.
 
 ## 1. Threat model once the generator is public
 

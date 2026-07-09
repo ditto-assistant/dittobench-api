@@ -25,6 +25,17 @@ reported, never scored. A `composite_stderr` accompanies the composite so a
 consumer (the subnet KOTH fold) can gate on measurement uncertainty rather than
 a flat margin.
 
+## Per-version rotation
+
+Generator output is a function of `(seed, bench_version)`, not the seed alone.
+Each version folds its number into the generation stream (`protocol.RotateSeed`),
+so the rendered surface rotates on a version bump. A harness that only
+pattern-matches one version's rendered templates degrades on the next; a
+reasoning harness is unaffected. The rotation is deterministic and public, so
+byte-reproducibility from `(seed, bench_version)` holds. Seed-derived answer
+material (case ids, tool needles, canary nonces) stays on the raw seed, so
+haystack values and their expected answers remain coupled across the rotation.
+
 ## Opaque case identifiers
 
 Case IDs are a seed-keyed hash, not a readable label. They no longer embed the
