@@ -560,8 +560,8 @@ func (s *server) submitRunSize(w http.ResponseWriter, r *http.Request, req submi
 	runID := uuid.NewString()
 	s.store.Create(runID, "run_size", store.StatusQueued, seed, prof.Tools+prof.Mem)
 	s.store.SetRunSize(runID, req.RunSize)
-	log.Printf("run %s: run_size=%s seed=%d tools=%d mem=%d distractors=%d",
-		runID, req.RunSize, seed, prof.Tools, prof.Mem, prof.Distractors)
+	log.Printf("run %s: run_size=%s seed=%d tools=%d mem=%d",
+		runID, req.RunSize, seed, prof.Tools, prof.Mem)
 
 	go s.runSizeJob(context.Background(), runID, req, prof, seed, llmClient, apiKey)
 
