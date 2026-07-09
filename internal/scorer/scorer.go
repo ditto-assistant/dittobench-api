@@ -464,6 +464,7 @@ func stdErrOfMean(sum, sumSq float64, n int) float64 {
 // median latency included.
 func Aggregate(runID string, perCase []protocol.CaseScore) protocol.ScoreReport {
 	var toolSum, toolN, memSum, memN float64
+	var toolSumSq, memSumSq float64
 	latencies := make([]int64, 0, len(perCase))
 	catSum := map[string]float64{}
 	catSumSq := map[string]float64{}
@@ -475,9 +476,11 @@ func Aggregate(runID string, perCase []protocol.CaseScore) protocol.ScoreReport 
 		switch cs.Kind {
 		case protocol.KindMemory:
 			memSum += cs.Score
+			memSumSq += cs.Score * cs.Score
 			memN++
 		default:
 			toolSum += cs.Score
+			toolSumSq += cs.Score * cs.Score
 			toolN++
 		}
 		if _, seen := catCount[cs.Category]; !seen {
@@ -533,16 +536,34 @@ func Aggregate(runID string, perCase []protocol.CaseScore) protocol.ScoreReport 
 		})
 	}
 
+	// Composite standard error (v3 #2): combine the tool-half and memory-half SEs.
+	// The two halves are independent samples and the composite is 0.5*tool +
+	// 0.5*mem, so Var(composite) = 0.25*Var(toolMean) + 0.25*Var(memMean) and
+	// SE = 0.5*sqrt(se_tool^2 + se_mem^2). When only one half is present the
+	// composite is that half's mean, so its SE is that half's SE.
+	seTool := stdErrOfMean(toolSum, toolSumSq, int(toolN))
+	seMem := stdErrOfMean(memSum, memSumSq, int(memN))
+	var compositeStderr float64
+	switch {
+	case toolN > 0 && memN > 0:
+		compositeStderr = 0.5 * math.Sqrt(seTool*seTool+seMem*seMem)
+	case toolN > 0:
+		compositeStderr = seTool
+	case memN > 0:
+		compositeStderr = seMem
+	}
+
 	return protocol.ScoreReport{
-		RunID:       runID,
-		GeneratedAt: protocol.DatasetEpochRFC3339,
-		Composite:   composite,
-		ToolMean:    toolMean,
-		MemoryMean:  memMean,
-		MedianMs:    median(latencies),
-		N:           len(perCase),
-		PerCase:     perCase,
-		PerCategory: perCat,
+		RunID:           runID,
+		GeneratedAt:     protocol.DatasetEpochRFC3339,
+		Composite:       composite,
+		CompositeStderr: round6(compositeStderr),
+		ToolMean:        toolMean,
+		MemoryMean:      memMean,
+		MedianMs:        median(latencies),
+		N:               len(perCase),
+		PerCase:         perCase,
+		PerCategory:     perCat,
 	}
 }
 

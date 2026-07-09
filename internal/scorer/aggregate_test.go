@@ -131,3 +131,27 @@ func TestPerCategoryStdErr(t *testing.T) {
 		t.Fatalf("single-case category std_err must be 0, got %v", se)
 	}
 }
+
+func TestCompositeStderrCombinesHalves(t *testing.T) {
+	perCase := []protocol.CaseScore{
+		{Kind: protocol.KindTool, Category: "web_search", Score: 1.0},
+		{Kind: protocol.KindTool, Category: "web_search", Score: 0.0},
+		{Kind: protocol.KindTool, Category: "web_search", Score: 0.5},
+		{Kind: protocol.KindMemory, Category: "single-session-recall", Score: 0.9},
+		{Kind: protocol.KindMemory, Category: "single-session-recall", Score: 0.2},
+		{Kind: protocol.KindMemory, Category: "single-session-recall", Score: 0.6},
+	}
+	rep := Aggregate("run", perCase)
+	if rep.CompositeStderr <= 0 {
+		t.Fatalf("expected a positive composite stderr, got %v", rep.CompositeStderr)
+	}
+	flat := []protocol.CaseScore{
+		{Kind: protocol.KindTool, Category: "web_search", Score: 0.5},
+		{Kind: protocol.KindTool, Category: "web_search", Score: 0.5},
+		{Kind: protocol.KindMemory, Category: "single-session-recall", Score: 0.5},
+		{Kind: protocol.KindMemory, Category: "single-session-recall", Score: 0.5},
+	}
+	if se := Aggregate("run", flat).CompositeStderr; se != 0 {
+		t.Fatalf("zero-spread run should have 0 stderr, got %v", se)
+	}
+}
