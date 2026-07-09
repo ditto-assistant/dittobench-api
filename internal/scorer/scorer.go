@@ -271,9 +271,13 @@ const defaultAuditEvery = 5
 // JudgeConfig holds the judge model ids and the audit policy for a run. ModelB
 // is optional (""); when set, an audit slice of cases is cross-checked by both
 // judges so a judge-specific manipulation is caught by the de-correlated second
-// judge. Judging is temperature-0 deterministic, so literal k=3
-// self-consistency would be a no-op — a second *model* is the meaningful
-// de-correlation here.
+// judge. The judge is sent temperature 0 + top_p 1 + a fixed seed, which pins
+// its output against a serving stack that honors those knobs (a self-hosted
+// vLLM/Ollama gateway; see docs/judge-determinism.md). On a hosted, batched
+// model this is only approximate — batch composition and kernel routing can
+// still flip the argmax at token boundaries — so literal same-model k=3
+// self-consistency is not relied on for de-correlation; a second *model* is the
+// meaningful cross-check.
 type JudgeConfig struct {
 	Model      string
 	ModelB     string
