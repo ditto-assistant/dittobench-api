@@ -17,7 +17,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -26,11 +25,11 @@ import (
 	"os"
 	"sort"
 
-	"github.com/ditto-assistant/dittobench-api/pkg/catalog"
 	"github.com/ditto-assistant/dittobench-api/internal/datagen"
 	"github.com/ditto-assistant/dittobench-api/internal/gen"
 	"github.com/ditto-assistant/dittobench-api/internal/refharness"
 	"github.com/ditto-assistant/dittobench-api/internal/scorer"
+	"github.com/ditto-assistant/dittobench-api/pkg/catalog"
 	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
 )
 
@@ -109,11 +108,11 @@ func runOnce(seed int64, n int) (float64, map[string]float64) {
 	return mean, perCat
 }
 
-// memRunOnce builds the v2 memory suite for a seed (deterministically, nil LLM)
-// and scores it under the fixed reference-competence policy — a hermetic proxy
-// for structural memory_mean.
+// memRunOnce builds the v2 memory suite for a seed (deterministically) and
+// scores it under the fixed reference-competence policy — a hermetic proxy for
+// structural memory_mean.
 func memRunOnce(seed int64, nMem int) float64 {
-	suite := gen.GenerateMemorySuite(context.Background(), gen.NewRNG(seed), seed, nMem, 0, 1, 0, nil, "")
+	suite := gen.GenerateMemorySuite(gen.NewRNG(seed), seed, nMem, 1, 0)
 	if len(suite.Cases) == 0 {
 		return 0
 	}

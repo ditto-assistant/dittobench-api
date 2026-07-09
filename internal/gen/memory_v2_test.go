@@ -1,7 +1,6 @@
 package gen
 
 import (
-	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -10,11 +9,11 @@ import (
 )
 
 func TestGenerateMemoryV2Deterministic(t *testing.T) {
-	seedA, caseA, _, err := GenerateMemoryV2(context.Background(), NewRNG(5), 12345, 20, 0, nil, "")
+	seedA, caseA, _, err := GenerateMemoryV2(NewRNG(5), 12345, 20)
 	if err != nil {
 		t.Fatal(err)
 	}
-	seedB, caseB, _, err := GenerateMemoryV2(context.Background(), NewRNG(5), 12345, 20, 0, nil, "")
+	seedB, caseB, _, err := GenerateMemoryV2(NewRNG(5), 12345, 20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,7 +31,7 @@ func TestGenerateMemoryV2Deterministic(t *testing.T) {
 }
 
 func TestGenerateMemoryV2Shape(t *testing.T) {
-	seedReq, cases, _, err := GenerateMemoryV2(context.Background(), NewRNG(1), 999, 30, 0, nil, "")
+	seedReq, cases, _, err := GenerateMemoryV2(NewRNG(1), 999, 30)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +69,7 @@ func TestGenerateMemoryV2Shape(t *testing.T) {
 // can recover them), while abstention answers are the decline sentinel and are
 // NOT seeded.
 func TestGenerateMemoryV2AnswersAreSeeded(t *testing.T) {
-	seedReq, cases, _, err := GenerateMemoryV2(context.Background(), NewRNG(2), 42, 25, 0, nil, "")
+	seedReq, cases, _, err := GenerateMemoryV2(NewRNG(2), 42, 25)
 	if err != nil {
 		t.Fatal(err)
 	}

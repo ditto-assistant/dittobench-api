@@ -493,8 +493,8 @@ func (s *server) submitRunSize(w http.ResponseWriter, r *http.Request, req submi
 	runID := uuid.NewString()
 	s.store.Create(runID, "run_size", store.StatusQueued, seed, prof.Tools+prof.Mem)
 	s.store.SetRunSize(runID, req.RunSize)
-	log.Printf("run %s: run_size=%s seed=%d tools=%d mem=%d distractors=%d paraphrase=%.2f",
-		runID, req.RunSize, seed, prof.Tools, prof.Mem, prof.Distractors, prof.ParaphraseFrac)
+	log.Printf("run %s: run_size=%s seed=%d tools=%d mem=%d distractors=%d",
+		runID, req.RunSize, seed, prof.Tools, prof.Mem, prof.Distractors)
 
 	go s.runSizeJob(context.Background(), runID, req, prof, seed, llmClient, apiKey)
 
@@ -537,19 +537,18 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	// 2. generating — fresh, anti-cheat dataset (tools + memory haystack).
 	s.store.SetStage(runID, store.StatusGenerating, 0, total)
 	rng := gen.NewRNG(seed)
-	genModel := llm.GeneratorModel()
 	toolCases, toolPara := gen.GenerateTools(rng, seed, prof.Tools)
 	// v2 memory engine (bench_version 2): a fresh procedural persona universe
-	// per seed replaces the static LongMemEval fixture. The
-	// plan is a pure function of the master `seed`; realization + selection share
-	// the run rng. The suite lays cases out across seeding tiers (A prepared, B
-	// raw-pairs) and staged Tier-C waves.
-	memSuite := gen.GenerateMemorySuite(ctx, rng, seed, prof.Mem, prof.ParaphraseFrac, prof.Waves, prof.RawPairsFrac, llmClient, genModel)
+	// per seed replaces the static LongMemEval fixture. Generation is fully
+	// non-LLM and a pure function of the master `seed`; selection shares the run
+	// rng. The suite lays cases out across seeding tiers (A prepared, B raw-pairs)
+	// and staged Tier-C waves.
+	memSuite := gen.GenerateMemorySuite(rng, seed, prof.Mem, prof.Waves, prof.RawPairsFrac)
 	// Multi-graph isolation: seed a second persona under a different
 	// user_id and add cross-user isolation cases. The secondary graph is template-
-	// rendered (no generator tokens). Cases carry the user_id they must be answered
-	// under; they merge into the primary staged-case stream.
-	iso := gen.GenerateIsolation(ctx, rng, seed, prof.Mem, prof.Waves, prof.IsoCases)
+	// rendered. Cases carry the user_id they must be answered under; they merge
+	// into the primary staged-case stream.
+	iso := gen.GenerateIsolation(seed, prof.Mem, prof.Waves, prof.IsoCases)
 	memSuite.Cases = append(memSuite.Cases, iso.Cases...)
 	para := toolPara
 	para.Add(memSuite.Stats)
@@ -786,7 +785,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		IsolationCases:    len(iso.Cases),
 		ToolEfficiency:    scorer.ToolEfficiencyFactor(perCase),
 		Models: &protocol.ModelInfo{
-			Generator:  genModel,
+			Generator:  "", // generation is deterministic + non-LLM in v2
 			Judge:      judgeCfg.Model,
 			JudgeAudit: judgeCfg.ModelB,
 			Harness:    reportedHarnessModel(),

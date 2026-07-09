@@ -1,12 +1,11 @@
 package gen
 
 import (
-	"context"
 	"sort"
 	"testing"
 
-	"github.com/ditto-assistant/dittobench-api/pkg/toolexec"
 	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
+	"github.com/ditto-assistant/dittobench-api/pkg/toolexec"
 )
 
 // artifactFor assembles the full DatasetArtifact the pipeline hashes, from a
@@ -15,11 +14,10 @@ import (
 // layer. It mirrors runSizeJob's assembly so the reproducibility test exercises
 // every generator whose output the digest depends on — not memory cases alone.
 func artifactFor(seed int64, n int) DatasetArtifact {
-	ctx := context.Background()
 	r := NewRNG(seed)
 	toolCases, _ := GenerateTools(r, seed, n)
-	suite := GenerateMemorySuite(ctx, r, seed, n, 0, 2, 0.3, nil, "")
-	iso := GenerateIsolation(ctx, r, seed, n, 2, 4)
+	suite := GenerateMemorySuite(r, seed, n, 2, 0.3)
+	iso := GenerateIsolation(seed, n, 2, 4)
 	suite.Cases = append(suite.Cases, iso.Cases...)
 
 	flat := make([]ArtifactCase, 0, len(suite.Cases))

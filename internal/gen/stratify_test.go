@@ -1,7 +1,6 @@
 package gen
 
 import (
-	"context"
 	"fmt"
 	"testing"
 )
@@ -9,7 +8,7 @@ import (
 // typeMix counts memory cases by question_type.
 func typeMix(t *testing.T, seed int64, n int) map[string]int {
 	t.Helper()
-	_, cases, _, err := GenerateMemory(context.Background(), NewRNG(seed), n, 40, 0, nil, "m", "", "")
+	_, cases, _, err := GenerateMemory(NewRNG(seed), n, 40, "", "")
 	if err != nil {
 		t.Fatalf("GenerateMemory seed %d: %v", seed, err)
 	}

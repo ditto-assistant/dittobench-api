@@ -2,7 +2,6 @@ package gen
 
 import (
 	"math/rand"
-	"strings"
 
 	"github.com/ditto-assistant/dittobench-api/internal/datagen"
 	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
@@ -23,24 +22,4 @@ func GenerateTools(r *rand.Rand, seed int64, n int) ([]protocol.ToolCase, protoc
 	// prompt asks about is exactly the one the tool returns.
 	cases, _ := datagen.GenerateCasesWithFillers(r, seed, n)
 	return cases, protocol.ParaphraseStats{}
-}
-
-// sanitizeParaphrase trims model chatter (surrounding quotes/whitespace, leading
-// "Sure," etc.). Returns "" if the result looks degenerate so the caller keeps
-// the original.
-func sanitizeParaphrase(s string) string {
-	s = strings.TrimSpace(s)
-	// Strip surrounding matched quotes.
-	for _, q := range []string{`"`, "'", "`"} {
-		if strings.HasPrefix(s, q) && strings.HasSuffix(s, q) && len(s) >= 2 {
-			s = strings.TrimSpace(s[1 : len(s)-1])
-		}
-	}
-	// Drop an accidental code fence.
-	s = strings.Trim(s, "`")
-	s = strings.TrimSpace(s)
-	if len(s) < 2 || len(s) > 600 {
-		return ""
-	}
-	return s
 }
