@@ -50,7 +50,31 @@ So the private pipeline *imports* the `dittobench-api` module for those.
 calls. Imports `github.com/ditto-assistant/dittobench-api` for the shared
 packages.
 
-## CRITICAL FINDING (2026-07-09): generation is LLM-based + staged
+## RESOLVED (2026-07-09): generation is now non-LLM + deterministic
+
+The "generation is LLM-based" blocker below is **dissolved**. The datagen pivot
+made the whole generation path non-LLM and byte-reproducible from
+(seed, bench_version): `GenerateTools` uses datagen template variants, memory
+questions use seeded phrasing variants (`persona.askVariant`), and the LLM
+paraphrase pass was removed entirely (paraphrase.go / question_gap.go deleted).
+So `cmd/generate` now runs the REAL generator: it calls the exported
+`gen.GenerateDataset(seed, prof)` and returns the canonical `DatasetArtifact`
+(tool cases + staged memory waves + memory cases + fixture digests). Same seed →
+same `dataset_sha256` (smoke-verified). No OpenRouter client needed. The run path
+(`runSizeJob`) and the generate service share `gen.BuildArtifact`, so their bytes
+can't drift.
+
+**Staged waves are not a blocker either:** the artifact carries `MemoryWaves`
+(the staged Tier-C `SeedRequest`s) and each memory case's `RunAfterWave`, so the
+consuming run phase can drive the exact wave staging from the provided artifact.
+
+**Remaining for #46 (exec side):** rewire dittobench-api's `/v1/submit` to accept
+a PROVIDED `DatasetArtifact` (from the platform ticket) and drive its run/score
+loop from it, instead of generating. Keep `scorer`/`runner`/`sandbox`. Design
+fork to settle: keep the miner practice path (`/v1/dataset` + generate-and-score)
+alongside the new score-provided path, or split them.
+
+## CRITICAL FINDING (2026-07-09, now RESOLVED above): generation was LLM-based + staged
 
 Reading `runSizeJob` (the real full-benchmark path) surfaced two things that make
 the "generate a static dataset, ship it, score it" model non-trivial:
