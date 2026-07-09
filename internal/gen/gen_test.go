@@ -56,7 +56,7 @@ func TestFreshSeedUnique(t *testing.T) {
 
 func TestGenerateToolsNilLLM(t *testing.T) {
 	r := NewRNG(7)
-	cases, _ := GenerateTools(context.Background(), r, 7, 10, 0.5, nil, "model")
+	cases, _ := GenerateTools(r, 7, 10)
 	if len(cases) != 10 {
 		t.Fatalf("expected 10 cases, got %d", len(cases))
 	}
@@ -67,44 +67,11 @@ func TestGenerateToolsNilLLM(t *testing.T) {
 	}
 }
 
-func TestGenerateToolsParaphrasePreservesGroundTruth(t *testing.T) {
-	// frac=1 → every prompt rewritten; ground truth (expected_tools/behavior)
-	// must be unchanged vs the nil-LLM baseline.
-	base, _ := GenerateTools(context.Background(), NewRNG(99), 99, 12, 0, nil, "m")
-	llm := &upperLLM{}
-	para, _ := GenerateTools(context.Background(), NewRNG(99), 99, 12, 1.0, llm, "m")
-
-	if len(base) != len(para) {
-		t.Fatalf("length mismatch")
-	}
-	if llm.calls == 0 {
-		t.Fatal("paraphrase LLM was never called with frac=1")
-	}
-	changed := 0
-	for i := range base {
-		if base[i].ID != para[i].ID || base[i].Category != para[i].Category {
-			t.Fatalf("case %d identity changed", i)
-		}
-		// expected tools preserved
-		if len(base[i].ExpectedTools) != len(para[i].ExpectedTools) {
-			t.Fatalf("case %d expected tools changed", i)
-		}
-		for j := range base[i].ExpectedTools {
-			if base[i].ExpectedTools[j].Name != para[i].ExpectedTools[j].Name {
-				t.Fatalf("case %d tool %d changed", i, j)
-			}
-		}
-		if base[i].ExpectedBehavior != para[i].ExpectedBehavior {
-			t.Fatalf("case %d expected behavior changed", i)
-		}
-		if base[i].Prompt != para[i].Prompt {
-			changed++
-		}
-	}
-	if changed == 0 {
-		t.Fatal("frac=1 should have changed at least some prompts")
-	}
-}
+// GenerateTools no longer paraphrases (it is deterministic and LLM-free), so the
+// former ground-truth-preservation-across-paraphrase test was dropped. The
+// prompt surface variation now comes from datagen's template variants, and the
+// ground truth is templated in the same pass, so there is no separate rewrite
+// step that could drift from it.
 
 func TestSanitizeParaphrase(t *testing.T) {
 	if got := sanitizeParaphrase(`"hello there"`); got != "hello there" {

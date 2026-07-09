@@ -67,50 +67,24 @@ func TestPreservesEntity(t *testing.T) {
 	}
 }
 
-// TestGenerateToolsErrLLMFallsBackCounted: a persistent generator error must not
-// silently collapse to verbatim. Every prompt stays the template AND
-// every skip is counted as a retried fallback.
-func TestGenerateToolsErrLLMFallsBackCounted(t *testing.T) {
-	base, _ := GenerateTools(context.Background(), NewRNG(99), 99, 20, 0, nil, "m")
-	e := &errLLM{}
-	out, stats := GenerateTools(context.Background(), NewRNG(99), 99, 20, 1.0, e, "m")
+// GenerateTools is now LLM-free and deterministic (its prompts are template
+// phrasing variants chosen by the seeded rng), so the former tool-paraphrase
+// tests (retry/fallback/applied) were removed with the paraphrase pass. Its
+// determinism is covered by TestGenerateToolsDeterministic; the pair/question
+// paraphrase machinery below still backs the memory path.
 
-	if len(base) != len(out) {
-		t.Fatalf("case count changed: %d vs %d", len(base), len(out))
+// TestGenerateToolsDeterministic: the same seed yields byte-identical tool
+// prompts across runs, with no LLM involved.
+func TestGenerateToolsDeterministic(t *testing.T) {
+	a, _ := GenerateTools(NewRNG(99), 99, 20)
+	b, _ := GenerateTools(NewRNG(99), 99, 20)
+	if len(a) != len(b) {
+		t.Fatalf("case count differs across runs: %d vs %d", len(a), len(b))
 	}
-	for i := range base {
-		if base[i].Prompt != out[i].Prompt {
-			t.Fatalf("case %d prompt changed despite total LLM failure: %q -> %q", i, base[i].Prompt, out[i].Prompt)
+	for i := range a {
+		if a[i].Prompt != b[i].Prompt {
+			t.Fatalf("case %d prompt not deterministic: %q vs %q", i, a[i].Prompt, b[i].Prompt)
 		}
-	}
-	if stats.Attempted != 20 || stats.Fallback != 20 || stats.Applied != 0 || stats.Retried != 20 {
-		t.Fatalf("unexpected stats on total failure: %+v", stats)
-	}
-	if e.calls != 40 { // two calls per attempt (call + one retry)
-		t.Fatalf("expected 40 LLM calls (retry once each), got %d", e.calls)
-	}
-}
-
-// TestGenerateToolsRetrySucceeds: an error followed by a valid rewrite is
-// retried and, when the entity survives, applied — never lost to the transient.
-func TestGenerateToolsRetrySucceeds(t *testing.T) {
-	out, stats := GenerateTools(context.Background(), NewRNG(99), 99, 20, 1.0, &flakyUpper{}, "m")
-	if stats.Attempted != 20 || stats.Retried != 20 || stats.Applied != 20 || stats.Fallback != 0 {
-		t.Fatalf("expected all retried+applied, got %+v", stats)
-	}
-	if stats.Attempted != stats.Applied+stats.Fallback {
-		t.Fatalf("stats invariant broken: %+v", stats)
-	}
-	// uppercase actually changed the prompts (paraphrase took effect)
-	base, _ := GenerateTools(context.Background(), NewRNG(99), 99, 20, 0, nil, "m")
-	changed := 0
-	for i := range out {
-		if out[i].Prompt != base[i].Prompt {
-			changed++
-		}
-	}
-	if changed == 0 {
-		t.Fatal("expected retried paraphrases to change prompts")
 	}
 }
 

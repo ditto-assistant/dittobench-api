@@ -1,7 +1,6 @@
 package gen
 
 import (
-	"context"
 	"strings"
 	"testing"
 
@@ -17,7 +16,7 @@ import (
 // the served needle, penalizing a harness that reconciles the two.
 func TestResultUsagePromptCoupledToServedNeedle(t *testing.T) {
 	const seed = int64(123456789)
-	cases, _ := GenerateTools(context.Background(), NewRNG(seed), seed, 60, 0, nil, "")
+	cases, _ := GenerateTools(NewRNG(seed), seed, 60)
 	checked := 0
 	for _, c := range cases {
 		if !datagen.IsResultUsage(c.Category) {

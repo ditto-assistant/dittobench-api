@@ -538,7 +538,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	s.store.SetStage(runID, store.StatusGenerating, 0, total)
 	rng := gen.NewRNG(seed)
 	genModel := llm.GeneratorModel()
-	toolCases, toolPara := gen.GenerateTools(ctx, rng, seed, prof.Tools, prof.ParaphraseFrac, llmClient, genModel)
+	toolCases, toolPara := gen.GenerateTools(rng, seed, prof.Tools)
 	// v2 memory engine (bench_version 2): a fresh procedural persona universe
 	// per seed replaces the static LongMemEval fixture. The
 	// plan is a pure function of the master `seed`; realization + selection share

@@ -17,7 +17,7 @@ import (
 func artifactFor(seed int64, n int) DatasetArtifact {
 	ctx := context.Background()
 	r := NewRNG(seed)
-	toolCases, _ := GenerateTools(ctx, r, seed, n, 0, nil, "")
+	toolCases, _ := GenerateTools(r, seed, n)
 	suite := GenerateMemorySuite(ctx, r, seed, n, 0, 2, 0.3, nil, "")
 	iso := GenerateIsolation(ctx, r, seed, n, 2, 4)
 	suite.Cases = append(suite.Cases, iso.Cases...)

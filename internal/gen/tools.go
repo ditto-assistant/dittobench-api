@@ -1,7 +1,6 @@
 package gen
 
 import (
-	"context"
 	"math/rand"
 	"strings"
 
@@ -9,54 +8,21 @@ import (
 	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
 )
 
-const paraphraseSystem = "You rewrite a single user message to a chat assistant so the WORDING is different but the INTENT is identical. " +
-	"Preserve every concrete entity (names, topics, URLs, themes, tasks) exactly. " +
-	"Do not add or remove any request. Do not answer it. Keep it one short message, first person. " +
-	"Return ONLY the rewritten message, no quotes, no preamble."
-
-// GenerateTools builds n fresh tool-calling cases. It reuses datagen's templated
-// ground truth (so expected_tools / expected_behavior stay deterministic) and
-// then LLM-paraphrases a random `frac` of the prompts via the generator model so
-// the surface wording is novel every run. A nil llm (or frac<=0) skips
-// paraphrasing — used by cheap/offline paths and tests.
-//
-// Each attempted paraphrase retries once on LLM error and is verified before use
-// (the case's concrete entity must survive — see preservesEntity); a rewrite
-// that errors or drops the entity falls back to the templated prompt and is
-// counted, so a paraphrase collapse is visible in ParaphraseStats rather than a
-// silent verbatim skip.
-func GenerateTools(ctx context.Context, r *rand.Rand, seed int64, n int, frac float64, llm LLM, model string) ([]protocol.ToolCase, protocol.ParaphraseStats) {
+// GenerateTools builds n fresh tool-calling cases from datagen's templated
+// ground truth. Fully deterministic and LLM-free: each prompt is one of the
+// category's hand-written phrasing variants, chosen by the seeded rng inside
+// datagen (`cat.templates[r.Intn(len(...))]`), and expected_tools /
+// expected_behavior are templated. The surface anti-memorization variation is
+// the template-variant selection itself, not a post-hoc paraphrase pass, so a
+// given seed always yields the identical dataset. The zero ParaphraseStats is
+// kept so callers that aggregate stats need no change.
+func GenerateTools(r *rand.Rand, seed int64, n int) ([]protocol.ToolCase, protocol.ParaphraseStats) {
 	// Pass the run's master seed (not a fresh draw): the case IDs and each
 	// result-usage prompt's needle subject derive from it, and the mock endpoint
 	// serves/scores the needle from the SAME seed (BuildFixture), so the entity a
 	// prompt asks about is exactly the one the tool returns.
-	cases, fillers := datagen.GenerateCasesWithFillers(r, seed, n)
-	var stats protocol.ParaphraseStats
-	if llm == nil || frac <= 0 {
-		return cases, stats
-	}
-	for i := range cases {
-		if r.Float64() >= frac {
-			continue
-		}
-		stats.Attempted++
-		rewritten, retried, err := completeWithRetry(ctx, llm, model, paraphraseSystem, cases[i].Prompt)
-		if retried {
-			stats.Retried++
-		}
-		clean := ""
-		if err == nil {
-			clean = sanitizeParaphrase(rewritten)
-		}
-		// Accept only a non-degenerate rewrite that preserves the entity.
-		if clean == "" || (fillers[i] != "" && !preservesEntity(fillers[i], clean)) {
-			stats.Fallback++ // keep the templated prompt
-			continue
-		}
-		cases[i].Prompt = clean
-		stats.Applied++
-	}
-	return cases, stats
+	cases, _ := datagen.GenerateCasesWithFillers(r, seed, n)
+	return cases, protocol.ParaphraseStats{}
 }
 
 // sanitizeParaphrase trims model chatter (surrounding quotes/whitespace, leading
