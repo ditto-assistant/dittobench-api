@@ -6,9 +6,11 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/ditto-assistant/dittobench-api/internal/gen"
 )
 
-func getSample(t *testing.T, s *server, query string) (*httptest.ResponseRecorder, datasetSample) {
+func getSample(t *testing.T, s *server, query string) (*httptest.ResponseRecorder, gen.DatasetArtifact) {
 	t.Helper()
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/sample"+query, nil)
@@ -16,11 +18,11 @@ func getSample(t *testing.T, s *server, query string) (*httptest.ResponseRecorde
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d (body %s)", rr.Code, rr.Body.String())
 	}
-	var ds datasetSample
-	if err := json.Unmarshal(rr.Body.Bytes(), &ds); err != nil {
+	var art gen.DatasetArtifact
+	if err := json.Unmarshal(rr.Body.Bytes(), &art); err != nil {
 		t.Fatalf("decode: %v (body %s)", err, rr.Body.String())
 	}
-	return rr, ds
+	return rr, art
 }
 
 // TestSampleUsesPublicNegativeSeed pins the load-bearing anti-gaming guarantee:
@@ -30,60 +32,59 @@ func getSample(t *testing.T, s *server, query string) (*httptest.ResponseRecorde
 func TestSampleUsesPublicNegativeSeed(t *testing.T) {
 	s := &server{}
 	for i := 0; i <= maxSampleIndex; i++ {
-		_, ds := getSample(t, s, "?sample="+itoa(i))
-		if ds.Seed >= 0 {
-			t.Fatalf("sample %d seed %d is not negative (would risk colliding with a real seed)", i, ds.Seed)
+		_, art := getSample(t, s, "?sample="+itoa(i))
+		if art.Seed >= 0 {
+			t.Fatalf("sample %d seed %d is not negative (would risk colliding with a real seed)", i, art.Seed)
 		}
-		if ds.Sample != i {
-			t.Fatalf("sample index mismatch: got %d want %d", ds.Sample, i)
+		if art.Seed != publicSampleSeed(i) {
+			t.Fatalf("sample %d seed mismatch: got %d want %d", i, art.Seed, publicSampleSeed(i))
 		}
 	}
 }
 
-// TestSampleRedactsAnswerKey asserts the sample never carries grading data.
-func TestSampleRedactsAnswerKey(t *testing.T) {
+// TestSampleIncludesAnswerKeys asserts the sample is the FULL artifact, answer
+// keys included. The sampler is un-redacted on purpose: with the generator public
+// the full dataset is derivable anyway, so the transparency window shows the same
+// bytes a validator scores.
+func TestSampleIncludesAnswerKeys(t *testing.T) {
 	s := &server{}
-	rr, ds := getSample(t, s, "?run_size=full")
+	rr, art := getSample(t, s, "?run_size=full")
 	raw := rr.Body.String()
-	// Answer-key JSON fields that must never appear. ("memory_waves" is NOT
-	// listed: the sample exposes only the wave *count* as shape, never the seeded
-	// pairs — the actual haystack facts live under a "pairs" array we drop.)
-	for _, leaked := range []string{
-		"expected_tools", "expected_answer", "forbidden_answer",
-		"expected_behavior", "tool_fixtures", "\"pairs\"", "needle",
+	// The grading fields that redaction used to strip must now be present.
+	for _, want := range []string{
+		"expected_tools", "expected_answer", "tool_fixtures",
 	} {
-		if strings.Contains(raw, leaked) {
-			t.Fatalf("sample leaked answer-key field %q: %s", leaked, raw)
+		if !strings.Contains(raw, want) {
+			t.Fatalf("sample should carry answer-key field %q but did not: %s", want, raw)
 		}
 	}
-	// ...but the harness-visible shape IS present.
-	if len(ds.ToolCases) == 0 || len(ds.MemoryCases) == 0 {
-		t.Fatalf("expected tool + memory cases in the sample, got %d/%d", len(ds.ToolCases), len(ds.MemoryCases))
+	if len(art.ToolCases) == 0 || len(art.MemoryCases) == 0 {
+		t.Fatalf("expected tool + memory cases in the sample, got %d/%d", len(art.ToolCases), len(art.MemoryCases))
 	}
-	if ds.ToolCases[0].Prompt == "" {
-		t.Fatalf("expected a visible prompt on the first tool case")
+	if len(art.ToolFixtures) == 0 {
+		t.Fatal("expected tool fixtures (the served needle facts) in the full sample")
 	}
 }
 
-// TestSampleShapeCountsMatchProfile checks the shape summary reflects the full
-// profile (60 tool + 50 memory + 4 isolation), so the community sees real size.
-func TestSampleShapeCountsMatchProfile(t *testing.T) {
+// TestSampleShapeMatchesProfile checks the sample is a real full-profile dataset
+// (60 tool + 4 isolation cases), so the community sees the real size.
+func TestSampleShapeMatchesProfile(t *testing.T) {
 	s := &server{}
-	_, ds := getSample(t, s, "?run_size=full")
-	if ds.Shape.ToolCaseCount != len(ds.ToolCases) {
-		t.Fatalf("tool count mismatch: shape %d vs cases %d", ds.Shape.ToolCaseCount, len(ds.ToolCases))
+	_, art := getSample(t, s, "?run_size=full")
+	if len(art.ToolCases) != 60 {
+		t.Fatalf("full profile should have 60 tool cases, got %d", len(art.ToolCases))
 	}
-	if ds.Shape.ToolCaseCount != 60 {
-		t.Fatalf("full profile should have 60 tool cases, got %d", ds.Shape.ToolCaseCount)
+	iso := 0
+	for _, c := range art.MemoryCases {
+		if c.UserID != "" {
+			iso++
+		}
 	}
-	if ds.Shape.IsolationCases != 4 {
-		t.Fatalf("full profile should have 4 isolation cases, got %d", ds.Shape.IsolationCases)
+	if iso != 4 {
+		t.Fatalf("full profile should have 4 isolation cases, got %d", iso)
 	}
-	if ds.Shape.MemoryWaves < 1 {
-		t.Fatalf("expected at least one memory wave, got %d", ds.Shape.MemoryWaves)
-	}
-	if len(ds.Shape.ToolCategories) == 0 {
-		t.Fatalf("expected a tool-category histogram")
+	if len(art.MemoryWaves) < 1 {
+		t.Fatalf("expected at least one memory wave, got %d", len(art.MemoryWaves))
 	}
 }
 
@@ -124,15 +125,12 @@ func TestSampleRejectsBadInput(t *testing.T) {
 	}
 }
 
-// TestSampleDefaultsToSmall: no run_size defaults to the small profile.
+// TestSampleDefaultsToSmall: no run_size defaults to the small profile (6 tools).
 func TestSampleDefaultsToSmall(t *testing.T) {
 	s := &server{}
-	_, ds := getSample(t, s, "")
-	if ds.RunSize != "small" {
-		t.Fatalf("expected default run_size small, got %q", ds.RunSize)
-	}
-	if ds.Shape.ToolCaseCount != 6 {
-		t.Fatalf("small profile should have 6 tool cases, got %d", ds.Shape.ToolCaseCount)
+	_, art := getSample(t, s, "")
+	if len(art.ToolCases) != 6 {
+		t.Fatalf("small profile should have 6 tool cases, got %d", len(art.ToolCases))
 	}
 }
 

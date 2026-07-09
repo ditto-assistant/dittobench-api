@@ -73,18 +73,17 @@ the scorer going private, decide deliberately whether any publicly-reachable
 practice path should expose answers, or strip the oracle fields from it. Tracked
 as a task.
 
-Public dataset sampler (`GET /v1/sample`): a redacted, shape-only view of a
-**real** run-size `DatasetArtifact` (the artifact validators score, via
-`gen.GenerateDataset`), so the community can inspect the benchmark's shape and
-difficulty. Two structural guarantees: (1) it never accepts a caller seed — it
-derives the seed from a reserved **negative** namespace (`?sample=0..9`), disjoint
-from every non-negative per-submission seed, so a sample can never be a scored
-dataset nor be aimed at a future submission's not-yet-drawn seed; (2) the response
-carries only harness-visible prompts/questions plus aggregate shape counts
-(per-category/type histograms, wave + isolation counts) — `ExpectedTools`,
-`ExpectedAnswer`, `ForbiddenAnswer`, the seeded haystack pairs, and the tool
-needles are dropped by construction. No key required (generation is deterministic
-and LLM-free).
+Public dataset sampler (`GET /v1/sample`): a full, real run-size
+`DatasetArtifact` (the exact artifact validators score, via `gen.GenerateDataset`)
+from a reserved public seed, so the community can inspect the benchmark over HTTP
+without a Go toolchain. It is not redacted: with the generator public
+(dittobench-datagen) the full dataset for any seed is derivable anyway, so hiding
+answer keys here would add code without protecting anything. The one structural
+guarantee it keeps is that it never accepts a caller seed. It derives the seed
+from a reserved negative namespace (`?sample=0..9`), disjoint from every
+non-negative per-submission seed, so a sample can never be a scored dataset nor be
+aimed at a future submission's not-yet-drawn seed. No key required (generation is
+deterministic and LLM-free).
 
 ## Why this over the alternatives
 
