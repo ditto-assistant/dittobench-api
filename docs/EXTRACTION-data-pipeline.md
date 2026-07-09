@@ -50,6 +50,35 @@ So the private pipeline *imports* the `dittobench-api` module for those.
 calls. Imports `github.com/ditto-assistant/dittobench-api` for the shared
 packages.
 
+## CRITICAL FINDING (2026-07-09): generation is LLM-based + staged
+
+Reading `runSizeJob` (the real full-benchmark path) surfaced two things that make
+the "generate a static dataset, ship it, score it" model non-trivial:
+
+1. **There are two generators.** `datagen.Generate(seed,n)` (used by the practice
+   `/v1/dataset` + the simple `evaluate()` path) is a pure-ish function of the
+   seed. The **full-benchmark** generator is the `gen.*` profile pipeline in
+   `runSizeJob` (`gen.GenerateTools` + `gen.GenerateMemorySuite` +
+   `gen.GenerateIsolation`), and it is **LLM-based** (paraphrase + procedural
+   persona synthesis via `genModel`), so it needs an OpenRouter client, not just
+   a seed. The `cmd/generate` scaffold currently calls the SIMPLE `datagen.Generate`
+   — a placeholder; the platform's real generate service must run the `gen.*`
+   pipeline with an LLM client.
+2. **The memory suite is STAGED, not a static blob.** The suite lays cases across
+   seeding tiers (A prepared, B raw-pairs) and staged Tier-C waves; the run phase
+   interleaves seeding the harness (across waves) with querying it. So "hand the
+   validator one dataset and score once" does not cleanly hold for memory — the
+   generation and the run are coupled through the staged waves.
+
+**Design question this raises (needs a decision before the rewire):** does the
+platform ship the full pre-rendered artifact (`gen.DatasetArtifact` already hashes
+tool cases + memory waves + isolation + fixtures — a rendered, static form the
+validator replays), and dittobench-api's run phase consume that instead of
+generating? That is the natural seam (`DatasetArtifact` is designed for exactly
+this "pin exact bytes for a dispute re-score"), but the run loop's wave staging
+must be driven from the provided artifact rather than the live `gen.*` output.
+This is the crux of the dittobench-api rewire and wants a focused design pass.
+
 ## The cmd rewiring
 
 `cmd/dittobench-api/main.go` today generates AND scores. It uses
