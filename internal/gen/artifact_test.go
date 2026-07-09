@@ -5,7 +5,7 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/ditto-assistant/dittobench-api/internal/toolexec"
+	"github.com/ditto-assistant/dittobench-api/pkg/toolexec"
 	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
 )
 

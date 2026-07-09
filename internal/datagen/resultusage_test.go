@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ditto-assistant/dittobench-api/internal/toolexec"
+	"github.com/ditto-assistant/dittobench-api/pkg/toolexec"
 )
 
 // A result-usage case's prompt must reference the SAME needle subject the mock

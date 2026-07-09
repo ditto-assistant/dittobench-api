@@ -23,7 +23,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/ditto-assistant/dittobench-api/internal/catalog"
+	"github.com/ditto-assistant/dittobench-api/pkg/catalog"
 	"github.com/ditto-assistant/dittobench-api/internal/datagen"
 	"github.com/ditto-assistant/dittobench-api/internal/gen"
 	"github.com/ditto-assistant/dittobench-api/internal/llm"
@@ -33,7 +33,7 @@ import (
 	"github.com/ditto-assistant/dittobench-api/internal/sandbox"
 	"github.com/ditto-assistant/dittobench-api/internal/scorer"
 	"github.com/ditto-assistant/dittobench-api/internal/store"
-	"github.com/ditto-assistant/dittobench-api/internal/toolexec"
+	"github.com/ditto-assistant/dittobench-api/pkg/toolexec"
 	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
 )
 

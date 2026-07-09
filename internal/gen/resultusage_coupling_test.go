@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/ditto-assistant/dittobench-api/internal/datagen"
-	"github.com/ditto-assistant/dittobench-api/internal/toolexec"
+	"github.com/ditto-assistant/dittobench-api/pkg/toolexec"
 )
 
 // TestResultUsagePromptCoupledToServedNeedle pins the prompt/needle coupling:

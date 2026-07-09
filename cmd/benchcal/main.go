@@ -26,7 +26,7 @@ import (
 	"os"
 	"sort"
 
-	"github.com/ditto-assistant/dittobench-api/internal/catalog"
+	"github.com/ditto-assistant/dittobench-api/pkg/catalog"
 	"github.com/ditto-assistant/dittobench-api/internal/datagen"
 	"github.com/ditto-assistant/dittobench-api/internal/gen"
 	"github.com/ditto-assistant/dittobench-api/internal/refharness"

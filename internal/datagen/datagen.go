@@ -10,7 +10,7 @@ import (
 	"math/rand"
 	"strings"
 
-	"github.com/ditto-assistant/dittobench-api/internal/toolexec"
+	"github.com/ditto-assistant/dittobench-api/pkg/toolexec"
 	"github.com/ditto-assistant/dittobench-api/pkg/protocol"
 )
 
