@@ -5,9 +5,17 @@
 //
 // It talks to the OpenAI-compatible Chat Completions endpoint OpenRouter serves
 // at https://openrouter.ai/api/v1/chat/completions and reads OPENROUTER_API_KEY
-// from the environment. Model ids come from env with defaults:
+// from the environment. The base URL is overridable (LLM_BASE_URL) so the judge
+// can be pointed at a self-hosted OpenAI-compatible gateway (vLLM / Ollama) for
+// reproducible grading; see docs/judge-determinism.md. Model ids come from env
+// with defaults:
 //   - GENERATOR_MODEL (default "qwen/qwen3-32b")
 //   - SCORER_MODEL    (default "google/gemini-3.1-flash-lite")
+//
+// Every call is sent with temperature 0, a fixed seed, and top_p 1 so that,
+// against a serving stack that honors them, two validators grading the same
+// submission converge on the same verdict (the k=3 median only means something
+// if the judges agree).
 package llm
 
 import (
@@ -42,6 +50,17 @@ const (
 
 	endpoint = "https://openrouter.ai/api/v1/chat/completions"
 
+	// deterministicSeed is the fixed sampling seed sent on every request. It is a
+	// consensus constant, NOT configurable: every validator must send the same
+	// seed for their judges to reproduce each other's verdicts (the whole point
+	// of a fixed seed is cross-validator agreement, so an env override would
+	// defeat it). Temperature 0 alone is only approximately reproducible on a
+	// batched serving stack; seed + top_p 1 + temperature 0 against a stack that
+	// honors them (self-hosted vLLM/Ollama, LLM_BASE_URL) is what actually pins
+	// the output. A hosted multi-tenant model may ignore seed, so this is
+	// best-effort there and load-bearing only once the judge is self-hosted.
+	deterministicSeed = 42
+
 	// defaultMaxTokens caps the completion length of every call. Judges emit a
 	// short verdict and paraphrases a sentence or two, so this is generous
 	// headroom — its job is to stop a model being coerced into an unbounded /
@@ -59,6 +78,7 @@ const (
 // Client is a thin OpenRouter chat client. Safe for concurrent use.
 type Client struct {
 	apiKey    string
+	baseURL   string
 	http      *http.Client
 	maxTokens int
 	// budget is the per-client (== per-run) total-token ceiling; 0 disables it.
@@ -84,6 +104,7 @@ func New() (*Client, error) {
 func NewWithKey(key string) *Client {
 	return &Client{
 		apiKey:    key,
+		baseURL:   envStr("LLM_BASE_URL", endpoint),
 		http:      &http.Client{Timeout: 90 * time.Second},
 		maxTokens: envInt("LLM_MAX_TOKENS", defaultMaxTokens),
 		budget:    int64(envInt("LLM_RUN_TOKEN_BUDGET", int(defaultRunTokenBudget))),
@@ -110,6 +131,14 @@ func envInt(name string, def int) int {
 		return def
 	}
 	return n
+}
+
+// envStr reads a non-empty trimmed string env var, falling back to def.
+func envStr(name, def string) string {
+	if v := strings.TrimSpace(os.Getenv(name)); v != "" {
+		return v
+	}
+	return def
 }
 
 // GeneratorModel returns the generator model id (env GENERATOR_MODEL or default).
@@ -154,10 +183,16 @@ type chatMessage struct {
 }
 
 type chatRequest struct {
-	Model       string        `json:"model"`
-	Messages    []chatMessage `json:"messages"`
-	Temperature float64       `json:"temperature"`
-	MaxTokens   int           `json:"max_tokens,omitempty"`
+	Model    string        `json:"model"`
+	Messages []chatMessage `json:"messages"`
+	// Temperature/TopP/Seed are the determinism knobs, sent on every request.
+	// Temperature 0 + TopP 1 is greedy argmax over the full vocabulary; Seed
+	// pins the tiebreak. Always emitted (no omitempty) so the intent is explicit
+	// on the wire and a provider default can never silently reintroduce sampling.
+	Temperature float64 `json:"temperature"`
+	TopP        float64 `json:"top_p"`
+	Seed        int     `json:"seed"`
+	MaxTokens   int     `json:"max_tokens,omitempty"`
 }
 
 type chatResponse struct {
@@ -175,7 +210,10 @@ type chatResponse struct {
 }
 
 // Complete sends a single system+user turn and returns the assistant text.
-// Temperature is fixed at 0 for deterministic judging/paraphrase fidelity.
+// Temperature 0, top_p 1, and a fixed seed are sent on every call so judging is
+// reproducible against a serving stack that honors them. Temperature 0 by itself
+// is only approximately stable on a batched hosted model, so full reproducibility
+// requires a self-hosted judge (LLM_BASE_URL); see docs/judge-determinism.md.
 func (c *Client) Complete(ctx context.Context, model, system, user string) (string, error) {
 	if c == nil {
 		return "", fmt.Errorf("llm: nil client")
@@ -194,12 +232,19 @@ func (c *Client) Complete(ctx context.Context, model, system, user string) (stri
 	}
 	msgs = append(msgs, chatMessage{Role: "user", Content: user})
 
-	body, err := json.Marshal(chatRequest{Model: model, Messages: msgs, Temperature: 0, MaxTokens: c.maxTokens})
+	body, err := json.Marshal(chatRequest{
+		Model:       model,
+		Messages:    msgs,
+		Temperature: 0,
+		TopP:        1,
+		Seed:        deterministicSeed,
+		MaxTokens:   c.maxTokens,
+	})
 	if err != nil {
 		return "", fmt.Errorf("llm: marshal request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL, bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("llm: build request: %w", err)
 	}

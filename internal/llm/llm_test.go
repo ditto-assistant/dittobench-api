@@ -96,6 +96,46 @@ func TestComplete_SendsMaxTokens(t *testing.T) {
 	}
 }
 
+func TestComplete_SendsDeterminismKnobs(t *testing.T) {
+	var body map[string]any
+	srv := mockOpenRouter(t, 10, &body)
+	c := clientTo(srv.URL)
+
+	if _, err := c.Complete(context.Background(), "m", "sys", "hi"); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	// Every request must pin the sampler so two validators reproduce each other.
+	temp, ok := body["temperature"]
+	if !ok || temp.(float64) != 0 {
+		t.Fatalf("temperature = %v, want 0", body["temperature"])
+	}
+	topP, ok := body["top_p"]
+	if !ok || topP.(float64) != 1 {
+		t.Fatalf("top_p = %v, want 1", body["top_p"])
+	}
+	seed, ok := body["seed"]
+	if !ok || int(seed.(float64)) != deterministicSeed {
+		t.Fatalf("seed = %v, want %d", body["seed"], deterministicSeed)
+	}
+}
+
+func TestComplete_HonorsBaseURLOverride(t *testing.T) {
+	var body map[string]any
+	srv := mockOpenRouter(t, 10, &body)
+	// Point the judge at a self-hosted gateway via env, no transport rewrite.
+	t.Setenv("LLM_BASE_URL", srv.URL)
+	c := NewWithKey("test-key")
+	if c.baseURL != srv.URL {
+		t.Fatalf("baseURL = %q, want %q", c.baseURL, srv.URL)
+	}
+	if _, err := c.Complete(context.Background(), "m", "", "hi"); err != nil {
+		t.Fatalf("Complete against override URL: %v", err)
+	}
+	if body["seed"] == nil {
+		t.Fatal("request did not reach the overridden base URL")
+	}
+}
+
 func TestComplete_TokenBudgetAccumulatesAndTrips(t *testing.T) {
 	srv := mockOpenRouter(t, 100, nil)
 	c := clientTo(srv.URL)
