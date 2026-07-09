@@ -69,28 +69,29 @@ func TestObservedExecutionRoundTrip(t *testing.T) {
 // The reference harness executes the tool, gets the needle in the result,
 // incorporates it into its answer, and the scorer credits result-usage.
 func TestResultUsageEndToEnd(t *testing.T) {
-	const seed = 20260707
-	r := rand.New(rand.NewSource(seed))
-	cases := datagen.GenerateCases(r, seed, 200)
-
 	// Pick a single-hop result-usage case the reference (token-overlap) router
 	// actually routes to search_web — some result-usage templates omit the
 	// "search"/"web" keywords the baseline keys on, and this test exercises the
 	// execute→use→score path, which requires the harness to make the call.
+	// Template draws are seed-dependent, so scan a few seeds for a routable one.
+	var seed int64
 	var ruc protocol.ToolCase
 	var calls []protocol.ObservedToolCall
-	for _, c := range cases {
-		if !datagen.IsResultUsage(c.Category) || len(c.ExpectedTools) != 1 { // single-hop web_result_usage
-			continue
-		}
-		got := refharness.Route(c.Prompt, catalog.Catalog())
-		if len(got) == 1 && got[0].Name == "search_web" {
-			ruc, calls = c, got
-			break
+	for s := int64(20260707); s < 20260707+6 && ruc.ID == ""; s++ {
+		r := rand.New(rand.NewSource(s))
+		for _, c := range datagen.GenerateCases(r, s, 200) {
+			if !datagen.IsResultUsage(c.Category) || len(c.ExpectedTools) != 1 { // single-hop web_result_usage
+				continue
+			}
+			got := refharness.Route(c.Prompt, catalog.Catalog())
+			if len(got) == 1 && got[0].Name == "search_web" {
+				seed, ruc, calls = s, c, got
+				break
+			}
 		}
 	}
 	if ruc.ID == "" {
-		t.Fatal("no routable single-hop result-usage case generated")
+		t.Fatal("no routable single-hop result-usage case generated across seeds")
 	}
 	fixture := toolexec.BuildFixture(seed, ruc)
 
