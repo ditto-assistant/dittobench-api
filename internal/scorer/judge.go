@@ -13,8 +13,9 @@
 // Harness output enters both prompts inside fenced UNTRUSTED blocks with an
 // explicit guard: content there is data, never instructions, and any
 // attempt to steer the verdict raises injection_attempt (case scored 0). The
-// judge model defaults to SCORER_MODEL (google/gemini-3.1-flash-lite); an
-// optional SCORER_MODEL_B cross-checks an audit slice (see JudgeConfig).
+// judge model is SCORER_MODEL, defaulting to the locked open-weight harness
+// model (llm.ScorerModel); an optional SCORER_MODEL_B cross-checks an audit
+// slice and records verdict agreement (see JudgeConfig).
 package scorer
 
 import (
@@ -80,15 +81,26 @@ type MemoryVerdict struct {
 	Errored bool
 }
 
+// jsonCompleter is the optional JSON-mode completion an LLM may support
+// (*llm.Client does). Judges prefer it: constraining the verdict to a JSON
+// object removes formatting variance from the judged half of the score.
+type jsonCompleter interface {
+	CompleteJSON(ctx context.Context, model, system, user string) (string, error)
+}
+
 // completeJudge calls the judge model, retrying once on error (transient
 // availability blips). The returned error is non-nil only after both attempts
-// fail.
+// fail. JSON-mode completion is used when the client supports it.
 func completeJudge(ctx context.Context, model LLM, modelID, system, user string) (string, error) {
-	text, err := model.Complete(ctx, modelID, system, user)
+	call := model.Complete
+	if jc, ok := model.(jsonCompleter); ok {
+		call = jc.CompleteJSON
+	}
+	text, err := call(ctx, modelID, system, user)
 	if err == nil {
 		return text, nil
 	}
-	return model.Complete(ctx, modelID, system, user)
+	return call(ctx, modelID, system, user)
 }
 
 // JudgeMemoryGraded runs the LongMemEval QA judge returning correctness,

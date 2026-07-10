@@ -63,6 +63,12 @@ BYOK-spend concern both disappear on the locked path.
 | `HARNESS_PROVIDER` | `ollama` | the crate provider value pointing at the host gateway |
 | `HARNESS_GATEWAY_URL` | `http://host.docker.internal:11434` | the gateway base URL (`OLLAMA_BASE_URL`) |
 
+The judge follows the lock: `SCORER_MODEL` defaults to the locked
+`HARNESS_MODEL`, so bumping the locked model carries the judge with it and the
+whole scoring stack stays one frozen open-weight model. Point the judge at the
+same gateway with `LLM_BASE_URL` for reproducible verdicts; see
+`docs/judge-determinism.md`.
+
 ## Open item before flipping it on
 
 **Confirm the miner crate's provider contract for a local gateway.** The crate
