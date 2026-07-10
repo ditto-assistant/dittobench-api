@@ -59,9 +59,9 @@ func TestCapUnobserved(t *testing.T) {
 	if got := CapUnobserved(low); got.Score != 0.3 {
 		t.Fatalf("below-ceiling score must be unchanged, got %v", got.Score)
 	}
-	// The cap is applied to the final composite, so an unobserved observable case
-	// (full deterministic + full quality = 1.0) cannot beat an observed one.
-	capped := CapUnobserved(ComposeTool(protocol.CaseScore{ToolScore: 1.0}, 1.0))
+	// The cap is applied to the final score, so an unobserved observable case
+	// (perfect self-reported trajectory) cannot beat an observed one.
+	capped := CapUnobserved(FinishTool(protocol.CaseScore{ToolScore: 1.0}))
 	if capped.Score > UnobservedCeiling {
 		t.Fatalf("capped composite should not exceed ceiling, got %v", capped.Score)
 	}

@@ -7,12 +7,12 @@
 // IS the spread of dataset difficulty — the number we want tight.
 //
 // The headline metric is the stddev of `tool_mean` (the deterministic
-// tool-accuracy half — judge-independent, so it is the clean difficulty signal).
+// tool-accuracy half, the clean difficulty signal).
 // `--max-stddev` (default 0.03) gates pass/fail.
 //
 // A `--repeat-seed` noise-floor pass runs R evaluations at one PINNED seed; with
 // a deterministic harness that stddev should be ~0, confirming the measurement
-// isolates dataset difficulty rather than harness/judge noise.
+// isolates dataset difficulty rather than harness noise.
 //
 //	calibrate --runs 100 --harness http://localhost:9000          # direct (tool-only, no key)
 //	calibrate --runs 100 --run-size full --key sk-or-... --harness ...   # full SN118 pipeline

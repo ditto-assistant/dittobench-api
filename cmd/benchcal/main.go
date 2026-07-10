@@ -1,17 +1,16 @@
 // Command benchcal is the offline DittoBench calibration harness.
 //
-// It measures between-seed variance of the DETERMINISTIC tool suite — the clean,
-// judge-independent difficulty signal — by generating N datasets
-// (rotating seed) and scoring each against the deterministic reference routing
-// policy (internal/refharness) in-process. No Docker, no OpenRouter key: the
-// only thing that varies between runs is the dataset, so the spread of tool_mean
-// IS the spread of dataset difficulty. It reports overall + per-category mean and
-// stddev, plus a repeat-seed noise floor (which must be ~0 for a deterministic
-// harness), as JSON.
+// It measures between-seed variance of the DETERMINISTIC tool suite — the clean
+// difficulty signal — by generating N datasets (rotating seed) and scoring each
+// against the deterministic reference routing policy (internal/refharness)
+// in-process. No Docker, no key: the only thing that varies between runs is the
+// dataset, so the spread of tool_mean IS the spread of dataset difficulty. It
+// reports overall + per-category mean and stddev, plus a repeat-seed noise
+// floor (which must be ~0 for a deterministic harness), as JSON.
 //
-// The memory-suite / composite σ needs the live judge + a harness image; drive
-// that with cmd/calibrate --run-size full against a running API. benchcal covers
-// the deterministic half that can be measured hermetically and committed.
+// The memory-suite / composite σ under a real model needs a harness image;
+// drive that with cmd/calibrate --run-size full against a running API. benchcal
+// covers the half that can be measured hermetically and committed.
 //
 //	benchcal --runs 30 --n 90 --out docs/benchcal-toolsuite.json
 package main
@@ -171,28 +170,7 @@ func main() {
 	n := flag.Int("n", 90, "tool cases per run")
 	nMem := flag.Int("nmem", 50, "memory cases per run")
 	out := flag.String("out", "", "write the JSON report to this path (default stdout)")
-	judgeAuditSeeds := flag.Int("judge-audit", 0, "run the judge-adjacency audit over N persona seeds (needs OPENROUTER_API_KEY) instead of the variance calibration")
 	flag.Parse()
-
-	// Judge-adjacency audit mode: grade correct / near-miss / off-topic
-	// responses with the real judge and check accept + reject rates.
-	if *judgeAuditSeeds > 0 {
-		rep, err := judgeAudit(*judgeAuditSeeds)
-		if err != nil {
-			log.Fatalf("judge audit: %v", err)
-		}
-		printJudgeAudit(rep)
-		b, _ := json.MarshalIndent(rep, "", "  ")
-		if *out != "" {
-			if err := os.WriteFile(*out, append(b, '\n'), 0o644); err != nil {
-				log.Fatalf("write %s: %v", *out, err)
-			}
-		}
-		if !rep.Pass {
-			os.Exit(1)
-		}
-		return
-	}
 
 	rep := calibrate(*runs, *n, *nMem)
 	b, err := json.MarshalIndent(rep, "", "  ")

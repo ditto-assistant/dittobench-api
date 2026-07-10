@@ -1,16 +1,18 @@
-# DittoBench Off-Chain Practice API (hosted, BYOK)
+# DittoBench Off-Chain Practice API
 
 > **Hosted practice validator for Bittensor SN118 (the Ditto subnet).** It
-> rotates a **fresh anti-cheat dataset per submission** (paraphrased tool cases +
-> a freshly assembled LongMemEval memory haystack), seeds your harness, runs
-> every case, and scores it with an LLM judge — mirroring the on-chain run+score
+> generates a **fresh anti-cheat dataset per submission** (procedural tool
+> cases + a procedural persona memory haystack), seeds your harness, runs every
+> case, and scores it **deterministically** — mirroring the on-chain run+score
 > loop **without TAO or the blockchain** so miners can iterate.
 
 **Official practice endpoint:** `https://dittobench-api-22790208601.us-central1.run.app` (see below).
 
-**Bring Your Own Key (BYOK).** The hosted API stores no credentials — every
-scored submission carries **your** OpenRouter key, which the validator uses for
-the generator (paraphrase) and the LLM judge. See [BYOK usage](#byok-usage).
+**No API key needed.** Generation is non-LLM and scoring is judge-free (the
+deterministic grader in the public
+[`dittobench-datagen`](https://github.com/ditto-assistant/dittobench-datagen)
+module), so a practice run against a reachable `harness_url` requires no
+credentials at all. Your harness brings whatever model access it needs.
 
 On the live subnet, miners submit an agent harness and validators run it in a
 Docker sandbox, scoring it on **DittoBench**. This service reproduces that loop
@@ -20,10 +22,9 @@ identical, so you can't overfit or build a lookup table against the practice set
 ## Scope
 
 The hosted practice API covers **tool-calling correctness + memory recall + tool
-efficiency**, using a self-contained slim LongMemEval bundle baked into the
-service. Crate **building** is the on-chain
-validator's job (the hosted service has no Docker daemon) — to practice, expose
-a reachable harness and submit its URL.
+efficiency**. Crate **building** is the on-chain validator's job (the hosted
+service has no Docker daemon) — to practice, expose a reachable harness and
+submit its URL.
 
 | Dimension              | Off-chain practice (this repo) | On-chain validator |
 | ---------------------- | ------------------------------ | ------------------ |
@@ -34,26 +35,6 @@ a reachable harness and submit its URL.
 | Fresh anti-cheat data  | ✅                             | ✅                 |
 | Crate Docker build     | ❌ (use `harness_url`)         | ✅                 |
 | TAO / chain            | ❌                             | ✅                 |
-
-## BYOK usage
-
-The `run_size` practice flow needs an OpenRouter key (generator + judge). Send
-it **per request** — the server never stores it. Either:
-
-- request body: `"openrouter_key": "sk-or-..."`, or
-- header: `Authorization: Bearer sk-or-...`
-
-```sh
-curl -X POST https://dittobench-api-22790208601.us-central1.run.app/v1/submit \
-  -H 'Content-Type: application/json' \
-  -d '{"harness_url":"https://<your-reachable-harness>","run_size":"small",
-       "openrouter_key":"sk-or-..."}'
-# {"run_id":"...","status":"queued","poll":"/v1/runs/..."}
-```
-
-`harness_url` must be reachable from the hosted API (e.g. a deployed harness or
-a tunnel like `ngrok http 9000`). Locally you can also run this API yourself and
-point it at `http://localhost:9000` — see [Run it](#run-it).
 
 ## How it fits with the starter kit
 
@@ -67,7 +48,7 @@ point this API at its URL.
 miner harness (starter-kit)              this API (practice validator)
   POST /seed <───────────────────────────  install a fresh memory haystack
   POST /run  <───────────────────────────  run a fresh anti-cheat dataset
-  GET  /health                              health-check + judge + score
+  GET  /health                              health-check + score
 ```
 
 ## Run it
@@ -76,8 +57,8 @@ miner harness (starter-kit)              this API (practice validator)
 go run ./cmd/dittobench-api          # listens on :8000 (or $PORT; -port to change)
 ```
 
-The binary is self-contained (LongMemEval seeds are embedded). For a `run_size`
-practice run, supply a BYOK key per request (see [BYOK usage](#byok-usage)).
+The binary is self-contained: dataset generation, execution, and grading all
+run locally with no external services.
 
 ## Deploy (Cloud Run)
 
@@ -87,31 +68,24 @@ The service is stateless and self-contained, so a source deploy is enough:
 gcloud run deploy dittobench-api \
   --source . --project ditto-app-dev --region us-central1 \
   --allow-unauthenticated \
-  --memory 1Gi --cpu 1 --timeout 3600 \
-  --set-env-vars GENERATOR_MODEL=google/gemini-3.1-flash-lite,SCORER_MODEL=google/gemini-3.1-flash-lite
+  --memory 1Gi --cpu 1 --timeout 3600
 ```
-
-(`GENERATOR_MODEL`/`SCORER_MODEL` are configurable — the code default generator
-is `qwen/qwen3-32b` and the code default judge is the locked open-weight
-harness model (see `docs/judge-determinism.md`); the hosted practice deploy
-above pins both to the cheaper `gemini-3.1-flash-lite` validated end-to-end.
-Real scoring hosts run the judge self-hosted for reproducibility.)
 
 **CI/CD** (`.github/workflows/ci.yml`): every PR runs `build` / `vet` / `test`;
 a **merge to `main` auto-deploys** to Cloud Run. CI authenticates to GCP via the
 org's Workload Identity Federation (the same provider/SA the backend uses) — no
 secrets stored in the repo.
 
-No secrets are configured on the service — miners bring their own OpenRouter key
-per request (BYOK). The repo stays **private**; the deployed URL is public so
-miners can practice. The `git_url` Docker-build path is intentionally inert here
-(Cloud Run has no Docker daemon).
+No secrets are configured on the service and none are accepted per request for
+practice. The repo stays **private**; the deployed URL is public so miners can
+practice. The `git_url` Docker-build path is intentionally inert here (Cloud Run
+has no Docker daemon).
 
 > **The on-chain scoring path runs this same binary elsewhere.** The Cloud Run
 > deployment above is the *practice* endpoint (`harness_url` only). The subnet
 > validator co-locates a second instance on a **Docker-capable host** (a VM, not
-> Cloud Run) so the `git_url` / `tarball_url` build-and-score path (mode B) is
-> live there — that is the deployment miners are actually graded on.
+> Cloud Run) so the `git_url` / `tarball_url` build-and-score path is live
+> there — that is the deployment miners are actually graded on.
 
 ## Security (public endpoint hardening)
 
@@ -152,7 +126,7 @@ curl localhost:8000/v1/catalog
 
 ### `POST /v1/submit`
 Generate a **fresh random dataset (rotating seed)**, run the harness over it,
-score, store, and return. Two modes:
+score, store, and return. Modes:
 
 **Direct** — you run your own harness, the API just scores it (synchronous):
 ```sh
@@ -164,9 +138,9 @@ curl -X POST localhost:8000/v1/submit \
 
 **Sandbox** — the API builds your submission in Docker and runs it, closer to
 the on-chain validator (asynchronous; build is slow). Returns `202` + a
-`run_id`; poll `GET /v1/runs/{id}` for status (`queued → building → running →
-scoring → done`/`failed`). `env` is forwarded to the container (model + keys
-the harness reads):
+`run_id`; poll `GET /v1/runs/{id}`. Under the model lock the container reaches
+only the locked gateway; on the legacy path `env` is forwarded to the container
+(model + keys the harness reads):
 ```sh
 curl -X POST localhost:8000/v1/submit \
   -H 'Content-Type: application/json' \
@@ -174,63 +148,37 @@ curl -X POST localhost:8000/v1/submit \
        "env":{"OPENROUTER_API_KEY":"sk-or-...","DITTOBENCH_MODEL":"openai/gpt-5.4-nano"}}'
 # {"run_id":"...","status":"queued","poll":"/v1/runs/..."}
 ```
+
 **Full pipeline (`run_size`)** — the complete SN118 evaluation: generate a
-**fresh anti-cheat dataset** (paraphrased tool cases + a freshly assembled
-LongMemEval memory haystack), push the haystack to the harness's `POST /seed`,
-run every tool + memory case, score with the deterministic tool-accuracy half
-**plus an LLM judge** (tool response-quality + memory yes/no), and aggregate.
-Requires a **BYOK OpenRouter key** per request (see [BYOK usage](#byok-usage)).
-Target a reachable `harness_url` (hosted), or `git_url` for the Docker-build path
-(local/on-chain only). Asynchronous; returns `202` + a `run_id`. Poll
-`GET /v1/runs/{id}` for
+fresh anti-cheat dataset (procedural tool cases + persona memory haystack),
+push the haystack to the harness's `POST /seed`, run every tool + memory case,
+grade deterministically, and aggregate. No key needed. Target a reachable
+`harness_url` (hosted), or `git_url` for the Docker-build path (local/on-chain
+only). Asynchronous; returns `202` + a `run_id`. Poll `GET /v1/runs/{id}` for
 `queued → building → generating → seeding → running → scoring → done`/`failed`,
 with live `progress` + `partial` per-case scores.
 
 ```sh
-# Hosted (BYOK): point at a reachable harness.
 curl -X POST https://dittobench-api-22790208601.us-central1.run.app/v1/submit \
   -H 'Content-Type: application/json' \
-  -d '{"harness_url":"https://<your-harness>","run_size":"small",
-       "openrouter_key":"sk-or-..."}'   # small | medium | full ; "seed":N pins the dataset
+  -d '{"harness_url":"https://<your-harness>","run_size":"small"}'
+  # small | medium | full ; "seed":N pins the dataset
 # {"run_id":"...","status":"queued","poll":"/v1/runs/..."}
 ```
 
-| run_size | tool cases | memory cases | distractor pairs | paraphrase frac |
-| -------- | ---------- | ------------ | ---------------- | --------------- |
-| small    | 6          | 6            | 20               | 0.3             |
-| medium   | 20         | 20           | 100              | 0.5             |
-| full     | 60         | 50           | 300              | 0.7             |
+| run_size | tool cases | memory cases | seeding waves | raw-pairs frac | isolation |
+| -------- | ---------- | ------------ | ------------- | -------------- | --------- |
+| small    | 6          | 6            | 1             | 0              | 0         |
+| medium   | 20         | 20           | 2             | 0.3            | 2         |
+| full     | 60         | 50           | 2             | 0.35           | 4         |
 
-`small` is intentionally cheap (few LLM calls) for fast iteration.
+**Config** for the `run_size` path (all optional):
 
-**Key + config** for the `run_size` path:
-
-| Source                | Default                         | Purpose                                       |
-| --------------------- | ------------------------------- | --------------------------------------------- |
-| `openrouter_key` (req)| _(required, BYOK)_              | generator + judge (per request; never stored) |
-| `GENERATOR_MODEL` env | `qwen/qwen3-32b`                | paraphrases tool prompts + memory pairs       |
-| `SCORER_MODEL` env    | _(the locked harness model)_    | LLM judge (tool quality + memory yes/no)      |
-| `SCORER_MODEL_B` env  | _(unset)_                       | optional second judge; audit-slice cross-check + disagreement logging |
-| `LLM_RESPONSE_FORMAT` env | _(on iff `LLM_BASE_URL` set)_ | judge JSON mode (`json_object` / `off`)       |
-| `DITTOBENCH_SEED_DIR` env | _(embedded bundle)_         | override LongMemEval seeds with on-disk copies |
-| `DITTOBENCH_ORACLE` env   | _(embedded bundle)_         | override the oracle with an on-disk copy       |
-
-The judge defaults to the same frozen open-weight model the v2 lock scores every
-harness against, so the exact judge is a public, reproducible fact. Same-family
-self-preference bias is not a ranking concern under the lock (every miner runs
-the identical harness model, so the bias is a constant offset), and most of the
-score is programmatic anyway (tool trajectory/args, result-usage needle,
-isolation leak, injection payload); only the LLM-judged half is exposed.
-Without the lock (legacy BYOK, where miners pick their own harness model), keep
-`SCORER_MODEL` distinct from the harness model; when the harness model is known
-(operator sets `DITTOBENCH_HARNESS_MODEL`) the run warns if it matches the
-judge. `SCORER_MODEL_B` adds a de-correlated second judge on an audit slice and
-logs A/B verdict disagreement per run.
-
-The LongMemEval corpus ships **embedded** in the binary (a slim, text-only
-bundle under `internal/gen/seeddata/`, ~18 MB, embeddings stripped) so the
-service is self-contained — no external files or `DITTOBENCH_*` env needed. Set
-those env vars only to point at the full on-disk assets for local development.
+| Source                  | Default            | Purpose                                              |
+| ----------------------- | ------------------ | ---------------------------------------------------- |
+| `openrouter_key` (body) | _(unset)_          | legacy Docker path only: forwarded to the crate's agent when the model lock is off |
+| `DITTOBENCH_MODEL_LOCK` | `false`            | score every harness against the locked model (docs/model-lock.md) |
+| `HARNESS_MODEL` env     | `qwen/qwen3-32b`   | the locked model id (must name what the gateway serves) |
 
 ### Crate build (on-chain only)
 
@@ -251,15 +199,19 @@ curl localhost:8000/v1/runs/<run_id>
 
 ## Scoring
 
-**Tool cases** (both modes): per case, `matched / total_expected` minus `0.1`
-per unexpected extra call (unless the case allows extras), clamped to `[0, 1]`;
-a no-expected-tool case scores `1.0` only if the harness called nothing. In the
-full `run_size` pipeline each tool case also earns an LLM response-quality half
-(`0.5·accuracy + 0.5·quality`).
+Scoring is fully deterministic: a pure function of (dataset, transcript),
+reproducible by anyone from the public `dittobench-datagen` module. See
+`docs/judge-determinism.md` for the full grading rules.
 
-**Memory cases** (`run_size` only): graded credit `0.7·correctness +
-0.3·grounding`, resolved by a deterministic answer match where possible and an
-LLM judge otherwise.
+**Tool cases**: deterministic trajectory + argument accuracy
+(0.4 name-F1 + 0.4 arg-F1 + 0.2 order and extra-call discipline), scored on the
+validator-observed trajectory (Phase C); an observable case the harness didn't
+execute through the tool endpoint is capped at 0.5. Result-usage cases also
+require the served needle value in the answer.
+
+**Memory cases** (`run_size` only): per-`answer_kind` deterministic grading
+(value, number, list, ordered list, duration, reversal, decline) with
+distractor zeroing, over the response's answer slot with prose fallback.
 
 **Composite**: the mean tool score in direct mode; in the full pipeline
 `0.5·tool_mean + 0.5·memory_mean`, then multiplied by an observed tool-efficiency
@@ -295,6 +247,10 @@ not penalized.
 ## See also
 
 - `PROTOCOL.md` — the shared wire contract (dataset, `/run`, score report).
+- `docs/judge-determinism.md` — why scoring is judge-free and how each case
+  kind is graded.
+- `docs/model-lock.md` — the locked harness model and gateway backends
+  (local Ollama/vLLM or `cmd/model-relay` fronting Chutes).
 
 ---
 Proprietary — Ditto Assistant.

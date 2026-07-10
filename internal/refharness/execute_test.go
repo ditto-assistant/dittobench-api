@@ -143,7 +143,7 @@ func TestUnobservedObservableCaseCapped(t *testing.T) {
 	// Perfect self-report, but nothing observed.
 	self := protocol.RunResponse{FinalText: "ok", ToolCalls: []protocol.ObservedToolCall{{Name: "search_web"}}}
 	cs := scorer.ScoreToolCaseObserved(c, self, true, nil)
-	cs = scorer.ComposeTool(cs, 1.0)
+	cs = scorer.FinishTool(cs)
 	cs = scorer.CapUnobserved(cs)
 	if cs.Score > scorer.UnobservedCeiling {
 		t.Fatalf("unobserved observable case must be capped at %v, got %v", scorer.UnobservedCeiling, cs.Score)

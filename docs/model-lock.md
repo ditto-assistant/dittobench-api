@@ -59,15 +59,30 @@ BYOK-spend concern both disappear on the locked path.
 | Env | Default | Effect |
 |-----|---------|--------|
 | `DITTOBENCH_MODEL_LOCK` | `false` | master switch for the lock |
-| `HARNESS_MODEL` | `qwen/qwen2.5-72b-instruct` | the locked model id (must match what the gateway serves) |
+| `HARNESS_MODEL` | `qwen/qwen3-32b` | the locked model id (must match what the gateway serves) |
 | `HARNESS_PROVIDER` | `ollama` | the crate provider value pointing at the host gateway |
 | `HARNESS_GATEWAY_URL` | `http://host.docker.internal:11434` | the gateway base URL (`OLLAMA_BASE_URL`) |
 
-The judge follows the lock: `SCORER_MODEL` defaults to the locked
-`HARNESS_MODEL`, so bumping the locked model carries the judge with it and the
-whole scoring stack stays one frozen open-weight model. Point the judge at the
-same gateway with `LLM_BASE_URL` for reproducible verdicts; see
-`docs/judge-determinism.md`.
+Scoring is judge-free (see `docs/judge-determinism.md`), so the locked model is
+the ONLY model in a run. The locked keys also cover the Chutes and OpenAI
+provider selectors (`CHUTES_API_KEY`, `CHUTES_BASE_URL`, `OPENAI_API_KEY`,
+`OPENAI_BASE_URL`), so a crate that supports those providers cannot route
+around the lock either.
+
+## Gateway backends
+
+The gateway can be anything OpenAI-compatible that serves exactly the locked
+model:
+
+- Local Ollama or vLLM on the validator's GPUs. Qwen3-32B at Q4_K_M is about
+  20 GB, one 24 GB card.
+- `cmd/model-relay` fronting Chutes, for a GPU-less validator. The relay
+  terminates the sandbox's requests locally, forces the model field to the
+  locked id, injects the operator's Chutes key, and forwards upstream
+  (`Qwen/Qwen3-32B-TEE`, hardware-attested TEE serving). The sandbox never
+  holds the key and cannot choose the model, so the lock's semantics are
+  unchanged. The egress allowlist then admits only the relay's upstream from
+  the relay process, nothing from the sandbox.
 
 ## Open item before flipping it on
 
