@@ -6,15 +6,12 @@ import (
 	"github.com/ditto-assistant/dittobench-datagen/protocol"
 )
 
-func TestComposeTool(t *testing.T) {
-	cs := protocol.CaseScore{ToolScore: 1.0, Kind: protocol.KindTool}
-	cs = ComposeTool(cs, 0.6)
-	// 0.5*1.0 + 0.5*0.6 = 0.8
+func TestFinishTool(t *testing.T) {
+	cs := protocol.CaseScore{ToolScore: 0.8, Kind: protocol.KindTool}
+	cs = FinishTool(cs)
+	// Judge-free: the deterministic trajectory accuracy is the score.
 	if cs.Score != 0.8 {
-		t.Fatalf("expected composite 0.8, got %v", cs.Score)
-	}
-	if cs.Quality != 0.6 {
-		t.Fatalf("expected quality 0.6, got %v", cs.Quality)
+		t.Fatalf("expected score 0.8, got %v", cs.Score)
 	}
 }
 

@@ -538,15 +538,15 @@ func (s *server) submitRunSize(w http.ResponseWriter, r *http.Request, req submi
 			return
 		}
 	}
-	// An OpenRouter key is REQUIRED for run_size: the validator uses it for the
-	// generator (paraphrase) + judge, and (Docker path) forwards it to the
-	// crate's agent. BYOK — from the request body, Bearer header, or env.
+	// Scoring is judge-free (fully deterministic), so the validator itself needs
+	// no LLM key. A key is only forwarded to the crate's agent on the legacy
+	// pre-lock Docker path; under the model lock the sandbox reaches only the
+	// gateway and no key exists anywhere in the run.
 	apiKey := resolveOpenRouterKey(r, req)
-	if apiKey == "" {
-		writeError(w, http.StatusBadRequest, "an OpenRouter key is required for run_size submissions (send \"openrouter_key\" in the body or an Authorization: Bearer header)")
+	if apiKey == "" && (req.GitURL != "" || req.TarballURL != "") && !modelLockEnabled() {
+		writeError(w, http.StatusBadRequest, "the legacy (no model lock) Docker path forwards an OpenRouter key to the crate's agent; send \"openrouter_key\" or enable DITTOBENCH_MODEL_LOCK")
 		return
 	}
-	llmClient := llm.NewWithKey(apiKey)
 
 	// Bound concurrent in-flight runs so a burst can't exhaust the instance.
 	select {
@@ -563,7 +563,7 @@ func (s *server) submitRunSize(w http.ResponseWriter, r *http.Request, req submi
 	log.Printf("run %s: run_size=%s seed=%d tools=%d mem=%d",
 		runID, req.RunSize, seed, prof.Tools, prof.Mem)
 
-	go s.runSizeJob(context.Background(), runID, req, prof, seed, llmClient, apiKey)
+	go s.runSizeJob(context.Background(), runID, req, prof, seed, apiKey)
 
 	writeJSON(w, http.StatusAccepted, acceptedResponse{
 		RunID:  runID,
@@ -573,8 +573,9 @@ func (s *server) submitRunSize(w http.ResponseWriter, r *http.Request, req submi
 }
 
 // runSizeJob is the full SN118 pipeline: building → generating → seeding →
-// running (per-case judge, appending partials) → scoring → done.
-func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest, prof gen.Profile, seed int64, llmClient *llm.Client, apiKey string) {
+// running (appending partials) → scoring → done. Every stage is deterministic;
+// the only LLM in the loop is the locked model the harness itself talks to.
+func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest, prof gen.Profile, seed int64, apiKey string) {
 	defer func() { <-s.runSlots }() // release the concurrency slot
 	defer func() {
 		if rec := recover(); rec != nil {
@@ -684,26 +685,8 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		return
 	}
 
-	// Tools + judge setup.
 	tools := catalog.Catalog()
-	judgeCfg := scorer.JudgeConfig{Model: llm.ScorerModel(), ModelB: llm.ScorerModelB()}
 	perCase := make([]protocol.CaseScore, 0, total)
-	judgeAttempts, judgeErrors := 0, 0
-	judgeAudited, judgeDisagreed := 0, 0
-	countJudge := func(o scorer.JudgeOutcome) {
-		if o.Attempted {
-			judgeAttempts++
-			if o.Errored {
-				judgeErrors++
-			}
-		}
-		if o.Audited {
-			judgeAudited++
-			if o.Disagreed {
-				judgeDisagreed++
-			}
-		}
-	}
 
 	// Phase C observed execution: stand up the validator's mock tool
 	// endpoint. It serves deterministic, seed-derived results for external-world
@@ -735,22 +718,14 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		resp, runErr := runner.RunCase(ctx, harnessURL, c.ID, c.Prompt, tools, runner.CaseOptions{ToolEndpoint: toolEndpoint})
 		observed := toolSrv.Observed(c.ID)
 		cs := scorer.ScoreToolCaseObserved(c, resp, runErr == nil, observed)
-		injected := false
 		if datagen.IsResultUsage(c.Category) {
-			// Result-usage: deterministic — trajectory + whether the answer
-			// carried the served needle value. No LLM quality judge (the needle is a
-			// fabricated value only the executed tool could reveal).
+			// Result-usage: trajectory + whether the answer carried the served
+			// needle value (a fabricated value only the executed tool could reveal).
 			cs = scorer.ComposeResultUsage(cs, resp.FinalText, toolFixtures[i].NeedleValue())
 		} else {
-			quality, inj, jo := scorer.GradeToolQuality(ctx, llmClient, judgeCfg, c.ID, c.Prompt, cs.Called, c.ExpectedBehavior, resp.FinalText)
-			countJudge(jo)
-			cs = scorer.ComposeTool(cs, quality)
-			injected = inj
+			cs = scorer.FinishTool(cs)
 		}
 		switch {
-		case injected:
-			cs.Score, cs.Injection = 0, true
-			cs.Notes = append(cs.Notes, "judge flagged prompt-injection attempt (case scored 0)")
 		case len(observed) > 0:
 			observedTool++
 		case toolexec.Observable(c):
@@ -802,22 +777,10 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 				uid = wave.UserID
 			}
 			resp, _ := runner.RunCase(ctx, harnessURL, mc.ID, mc.Question, tools, runner.CaseOptions{ToolEndpoint: toolEndpoint, UserID: uid})
-			cs, jo := scorer.GradeMemory(ctx, llmClient, judgeCfg, mc, resp)
-			countJudge(jo)
+			cs := scorer.GradeMemory(mc, resp)
 			perCase = append(perCase, cs)
 			s.store.AppendPartial(runID, cs)
 		}
-	}
-
-	// Run-level LLM-availability gate: a persistent judge outage would
-	// otherwise record a deflated but validly-signed score (every judged case
-	// scored 0). If a majority of the judge calls that were actually attempted
-	// failed (after their per-call retry), fail the RUN as infrastructure error
-	// rather than persisting garbage.
-	if judgeAttempts > 0 && judgeErrors*2 >= judgeAttempts {
-		s.store.Fail(runID, fmt.Sprintf("judge LLM unavailable: %d/%d judge calls failed; run aborted (no score recorded)", judgeErrors, judgeAttempts))
-		log.Printf("run %s aborted: judge LLM unavailable (%d/%d judge calls failed)", runID, judgeErrors, judgeAttempts)
-		return
 	}
 
 	// 6. scoring — aggregate + finish.
@@ -836,9 +799,6 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		DatasetSHA256:     datasetHash,
 		Paraphrase:        &para,
 		InjectionAttempts: injections,
-		Tokens:            llmClient.Spent(),
-		JudgeAudited:      judgeAudited,
-		JudgeDisagreed:    judgeDisagreed,
 		ToolMean:          report.ToolMean,
 		MemoryMean:        report.MemoryMean,
 		SeedingWaves:      memSuite.SeedingWaves,
@@ -847,11 +807,10 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		CappedToolCases:   cappedTool,
 		IsolationCases:    len(iso.Cases),
 		ToolEfficiency:    scorer.ToolEfficiencyFactor(perCase),
+		// Generation and grading are both deterministic and non-LLM; the only
+		// model in a run is the locked one the harness talks to.
 		Models: &protocol.ModelInfo{
-			Generator:  "", // generation is deterministic + non-LLM in v2
-			Judge:      judgeCfg.Model,
-			JudgeAudit: judgeCfg.ModelB,
-			Harness:    reportedHarnessModel(),
+			Harness: reportedHarnessModel(),
 		},
 		PerCategory: report.PerCategory,
 	}
@@ -865,33 +824,11 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		report.Details.CalibrationN = cn
 	}
 	if injections > 0 {
-		log.Printf("run %s: %d judge-injection attempt(s) flagged", runID, injections)
-	}
-	// Residual judge-disagreement measurement: when the SCORER_MODEL_B audit
-	// slice ran, log how often the two judges disagreed. This is the live signal
-	// for how much judge noise the k=3 median is exposed to; it should trend to
-	// ~0 once the judge is self-hosted (docs/judge-determinism.md).
-	if judgeAudited > 0 {
-		log.Printf("run %s: judge audit slice: %d/%d disagreement(s) (judge=%s audit=%s)",
-			runID, judgeDisagreed, judgeAudited, judgeCfg.Model, judgeCfg.ModelB)
-	}
-	// Self-preference guard: an LLM judge tends to over-score responses from its own
-	// model family. We can only observe the harness model when the operator forces
-	// it (DITTOBENCH_HARNESS_MODEL); when we can, warn if it matches the judge so the
-	// operator picks a distinct judge. (Programmatic scoring — tool trajectory,
-	// needle, isolation, injection — is unaffected; only the LLM-judged half is.)
-	// Exception: judge == the locked harness model with the model lock ON is the
-	// deliberate frozen-judge configuration, not an accident. Every miner's
-	// harness runs the identical model there, so same-family bias is a constant
-	// offset that cannot reorder the KOTH ranking; SCORER_MODEL_B stays the
-	// de-correlated cross-check.
-	deliberateSameModel := modelLockEnabled() && sameModelFamily(judgeCfg.Model, llm.HarnessModel())
-	if hm := reportedHarnessModel(); hm != "" && sameModelFamily(hm, judgeCfg.Model) && !deliberateSameModel {
-		log.Printf("run %s: WARNING self-preference risk — judge model %q matches the harness model %q; use a distinct judge model (SCORER_MODEL) to avoid single-model-judge bias", runID, judgeCfg.Model, hm)
+		log.Printf("run %s: %d injection-compliance case(s) flagged", runID, injections)
 	}
 	s.store.Finish(runID, report)
-	log.Printf("run %s done: bench_version=%d composite=%.3f tool_mean=%.3f memory_mean=%.3f observed=%d capped=%d tokens=%d",
-		runID, protocol.BenchVersion, report.Composite, report.ToolMean, report.MemoryMean, observedTool, cappedTool, llmClient.Spent())
+	log.Printf("run %s done: bench_version=%d composite=%.3f tool_mean=%.3f memory_mean=%.3f observed=%d capped=%d",
+		runID, protocol.BenchVersion, report.Composite, report.ToolMean, report.MemoryMean, observedTool, cappedTool)
 }
 
 // startToolServer stands up the Phase C mock tool-execution endpoint on an
@@ -993,25 +930,14 @@ func pinnedOrFreshSeed(pinned int64) int64 {
 	return gen.FreshSeed()
 }
 
-// sameModelFamily reports whether two model ids name the same underlying model,
-// tolerant of provider prefixes and version suffixes: "openai/gpt-4o" and
-// "gpt-4o-2024-11" both reduce to "gpt-4o". Used only for the self-preference
-// warning, so a conservative prefix match on the normalized base is enough.
-func sameModelFamily(a, b string) bool {
-	na, nb := modelBase(a), modelBase(b)
-	if na == "" || nb == "" {
-		return false
+// copyEnv copies the named env vars into dst when set and non-blank (the
+// legacy-path operator passthrough for the crate's provider settings).
+func copyEnv(dst map[string]string, names ...string) {
+	for _, name := range names {
+		if v := strings.TrimSpace(os.Getenv(name)); v != "" {
+			dst[name] = v
+		}
 	}
-	return na == nb || strings.HasPrefix(na, nb) || strings.HasPrefix(nb, na)
-}
-
-// modelBase strips a provider prefix ("vendor/model" → "model") and lowercases.
-func modelBase(m string) string {
-	m = strings.ToLower(strings.TrimSpace(m))
-	if i := strings.LastIndex(m, "/"); i >= 0 {
-		m = m[i+1:]
-	}
-	return m
 }
 
 // envBool reports whether an env var is set to a truthy value.
@@ -1032,10 +958,10 @@ func envOr(name, def string) string {
 }
 
 // reportedHarnessModel returns the harness chat model this run scored against,
-// for RunDetails.Models.Harness (advisory transparency + the self-preference
-// guard). With the model lock on it is the locked model (llm.HarnessModel);
-// otherwise it is the operator escape-hatch DITTOBENCH_HARNESS_MODEL, or "" when
-// the harness used its own default (the server does not observe that choice).
+// for RunDetails.Models.Harness (advisory transparency). With the model lock on
+// it is the locked model (llm.HarnessModel); otherwise it is the operator
+// escape-hatch DITTOBENCH_HARNESS_MODEL, or "" when the harness used its own
+// default (the server does not observe that choice).
 func reportedHarnessModel() string {
 	if modelLockEnabled() {
 		return llm.HarnessModel()
@@ -1052,34 +978,41 @@ func modelLockEnabled() bool { return envBool("DITTOBENCH_MODEL_LOCK") }
 
 // lockedEnvKeys are the sandbox env vars the model lock owns. When the lock is
 // on, a caller-supplied req.Env may not set any of these — otherwise a miner
-// could route around the locked model (point at OpenRouter, swap the model id,
-// or redirect the gateway URL).
+// could route around the locked model (point at OpenRouter, Chutes, or any
+// OpenAI-compatible host, swap the model id, or redirect the gateway URL).
+// Every provider selector any supported crate honors must be listed here.
 var lockedEnvKeys = map[string]bool{
 	"OPENROUTER_API_KEY":  true,
 	"DITTOBENCH_PROVIDER": true,
 	"DITTOBENCH_MODEL":    true,
 	"OLLAMA_BASE_URL":     true,
+	"CHUTES_API_KEY":      true,
+	"CHUTES_BASE_URL":     true,
+	"OPENAI_API_KEY":      true,
+	"OPENAI_BASE_URL":     true,
 }
 
 // harnessSandboxEnv builds the env for the miner sandbox container.
 //
 // With the v2 model lock ON (DITTOBENCH_MODEL_LOCK): the harness is scored
-// against ONE locked open-weight model (llm.HarnessModel, Qwen2.5 by default)
-// served by the host gateway. No OpenRouter key is forwarded — the sandbox
+// against ONE locked open-weight model (llm.HarnessModel) served by the host
+// gateway. No OpenRouter key is forwarded — the sandbox
 // cannot reach OpenRouter (dropped from the egress allowlist), so model choice
 // is not an attack surface and the median-of-3 validators' scores are
 // comparable. The locked provider/model/gateway are applied AFTER the
 // caller-supplied env and the caller's attempts to set any lockedEnvKey are
 // dropped, so req.Env can never override the lock.
 //
-// With the lock OFF (legacy/pre-lock BYOK): forward the OpenRouter key + provider
-// so the crate's agent makes its own LLM calls, honoring the
-// DITTOBENCH_HARNESS_MODEL operator escape-hatch.
+// With the lock OFF (legacy/pre-lock BYOK): forward the OpenRouter key +
+// provider so the crate's agent makes its own LLM calls, honoring the
+// DITTOBENCH_HARNESS_MODEL escape-hatch and the operator's Chutes/OpenAI
+// provider settings (DITTOBENCH_PROVIDER, CHUTES_*, OPENAI_*).
 //
 // The provider string + gateway URL are env-configurable (HARNESS_PROVIDER,
 // HARNESS_GATEWAY_URL) because they must match what the miner crate honors and
-// the provisioned gateway serves; the defaults target an OpenAI-compatible
-// Ollama gateway on the host.
+// the provisioned gateway serves. The defaults target an OpenAI-compatible
+// gateway on the host: a local Ollama/vLLM, or cmd/model-relay fronting Chutes
+// for a GPU-less validator.
 func harnessSandboxEnv(apiKey string, reqEnv map[string]string) map[string]string {
 	gateway := envOr("HARNESS_GATEWAY_URL", "http://host.docker.internal:11434")
 	env := map[string]string{
@@ -1089,10 +1022,12 @@ func harnessSandboxEnv(apiKey string, reqEnv map[string]string) map[string]strin
 	if !lock {
 		// Legacy BYOK path.
 		env["OPENROUTER_API_KEY"] = apiKey
-		env["DITTOBENCH_PROVIDER"] = "openrouter"
+		env["DITTOBENCH_PROVIDER"] = envOr("DITTOBENCH_PROVIDER", "openrouter")
 		if m := strings.TrimSpace(os.Getenv("DITTOBENCH_HARNESS_MODEL")); m != "" {
 			env["DITTOBENCH_MODEL"] = m
 		}
+		copyEnv(env, "CHUTES_API_KEY", "CHUTES_BASE_URL", "OPENAI_API_KEY", "OPENAI_BASE_URL",
+			"DITTOBENCH_EMBEDDER", "DITTOBENCH_MAX_TOKENS", "DITTOBENCH_MAX_TURNS")
 	}
 	for k, v := range reqEnv {
 		if lock && lockedEnvKeys[k] {

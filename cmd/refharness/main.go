@@ -48,8 +48,8 @@ func main() {
 }
 
 // handleSeed is a no-op store: it accepts the haystack and echoes the counts.
-// The reference policy holds no memory, so memory cases score by the judge as
-// not-recalled — fine for the tool-only direct path and a stable floor for full.
+// The reference policy holds no memory, so memory cases grade as not-recalled —
+// fine for the tool-only direct path and a stable floor for full.
 func handleSeed(w http.ResponseWriter, r *http.Request) {
 	var req protocol.SeedRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {

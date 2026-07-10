@@ -6,6 +6,8 @@ import "testing"
 // are forwarded and caller-supplied env is honored (pre-lock BYOK behavior).
 func TestHarnessSandboxEnvLegacy(t *testing.T) {
 	t.Setenv("DITTOBENCH_MODEL_LOCK", "")
+	t.Setenv("DITTOBENCH_PROVIDER", "")
+	t.Setenv("CHUTES_API_KEY", "")
 	env := harnessSandboxEnv("sk-test-key", map[string]string{"FOO": "bar"})
 	if env["OPENROUTER_API_KEY"] != "sk-test-key" {
 		t.Fatalf("legacy path must forward the OpenRouter key, got %q", env["OPENROUTER_API_KEY"])
@@ -15,6 +17,22 @@ func TestHarnessSandboxEnvLegacy(t *testing.T) {
 	}
 	if env["FOO"] != "bar" {
 		t.Fatalf("caller env should pass through when unlocked, got %q", env["FOO"])
+	}
+}
+
+// TestHarnessSandboxEnvLegacyChutes: with the lock off, the operator can point
+// the crate at Chutes; the provider selection and Chutes settings pass through.
+func TestHarnessSandboxEnvLegacyChutes(t *testing.T) {
+	t.Setenv("DITTOBENCH_MODEL_LOCK", "")
+	t.Setenv("DITTOBENCH_PROVIDER", "chutes")
+	t.Setenv("CHUTES_API_KEY", "cpk-operator")
+	t.Setenv("CHUTES_BASE_URL", "https://llm.chutes.ai/v1")
+	env := harnessSandboxEnv("", nil)
+	if env["DITTOBENCH_PROVIDER"] != "chutes" {
+		t.Fatalf("provider = %q, want chutes", env["DITTOBENCH_PROVIDER"])
+	}
+	if env["CHUTES_API_KEY"] != "cpk-operator" || env["CHUTES_BASE_URL"] != "https://llm.chutes.ai/v1" {
+		t.Fatalf("Chutes settings must pass through on the legacy path: %v", env)
 	}
 }
 
@@ -46,11 +64,17 @@ func TestHarnessSandboxEnvLockCannotBeOverridden(t *testing.T) {
 		"DITTOBENCH_MODEL":    "openai/gpt-4o",
 		"DITTOBENCH_PROVIDER": "openrouter",
 		"OLLAMA_BASE_URL":     "http://attacker.example/v1",
+		"CHUTES_API_KEY":      "cpk-attacker",
+		"CHUTES_BASE_URL":     "http://attacker.example/v1",
+		"OPENAI_API_KEY":      "sk-attacker",
+		"OPENAI_BASE_URL":     "http://attacker.example/v1",
 		"BENIGN":              "ok", // non-locked keys still pass through
 	}
 	env := harnessSandboxEnv("sk-server", hostile)
-	if _, ok := env["OPENROUTER_API_KEY"]; ok {
-		t.Fatal("req.Env must not be able to inject an OpenRouter key under lock")
+	for _, k := range []string{"OPENROUTER_API_KEY", "CHUTES_API_KEY", "CHUTES_BASE_URL", "OPENAI_API_KEY", "OPENAI_BASE_URL"} {
+		if _, ok := env[k]; ok {
+			t.Fatalf("req.Env must not be able to set %s under lock", k)
+		}
 	}
 	if env["DITTOBENCH_MODEL"] != "qwen/qwen2.5-72b-instruct" {
 		t.Fatalf("req.Env overrode the locked model: %q", env["DITTOBENCH_MODEL"])

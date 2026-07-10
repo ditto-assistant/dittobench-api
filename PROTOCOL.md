@@ -81,7 +81,13 @@ The validator sends one `RunRequest` per case; the harness returns a
   ],
   "prompt_tokens": 320,
   "output_tokens": 64,
-  "latency_ms": 42          // ignored — the validator measures latency itself
+  "latency_ms": 42,         // ignored — the validator measures latency itself
+  "answer": "Lisbon",       // optional: the bare value final_text asserts.
+                            // The deterministic grader matches this slot when
+                            // present and falls back to final_text containment.
+  "abstain": false          // optional: a grounded decline (the asked fact is
+                            // not in memory). Correct on needle-absent cases;
+                            // abstaining on an answerable case scores 0.
 }
 ```
 
@@ -188,6 +194,13 @@ penalizes overshooting the expected call budget on correctly-answered cases.
 > This local scope is tool-calling accuracy + efficiency; latency is measured and
 > reported but advisory. Memory recall and the memory/tool composite are scored by
 > the full `run_size` pipeline (and the on-chain validator), not here.
+
+Memory cases (full pipeline) are graded deterministically per `answer_kind`
+(value, number, list, ordered list, duration, reversal, decline) against the
+response's `answer` slot with `final_text` fallback, with distractor and
+forbidden-value zeroing. There is no LLM judge anywhere in scoring; the grader
+is the public `dittobench-datagen/grade` package, so any published transcript
+can be re-graded offline. See `docs/judge-determinism.md`.
 
 ## Anti-copy signals
 
