@@ -12,11 +12,28 @@ import (
 func TestModelDefaults(t *testing.T) {
 	t.Setenv("GENERATOR_MODEL", "")
 	t.Setenv("SCORER_MODEL", "")
+	t.Setenv("HARNESS_MODEL", "")
 	if got := GeneratorModel(); got != defaultGeneratorModel {
 		t.Fatalf("generator default: got %q want %q", got, defaultGeneratorModel)
 	}
-	if got := ScorerModel(); got != defaultScorerModel {
-		t.Fatalf("scorer default: got %q want %q", got, defaultScorerModel)
+	// The judge defaults to the locked harness model: one frozen open-weight
+	// model, one source constant, no drift between the two.
+	if got := ScorerModel(); got != defaultHarnessModel {
+		t.Fatalf("scorer default: got %q want %q (the locked harness model)", got, defaultHarnessModel)
+	}
+}
+
+func TestScorerModelTracksLockedHarnessModel(t *testing.T) {
+	// Bumping the locked model (HARNESS_MODEL) must carry the judge with it
+	// unless the operator pins a distinct judge via SCORER_MODEL.
+	t.Setenv("SCORER_MODEL", "")
+	t.Setenv("HARNESS_MODEL", "qwen/qwen3-next")
+	if got := ScorerModel(); got != "qwen/qwen3-next" {
+		t.Fatalf("scorer should follow HARNESS_MODEL: got %q", got)
+	}
+	t.Setenv("SCORER_MODEL", "acme/dedicated-judge")
+	if got := ScorerModel(); got != "acme/dedicated-judge" {
+		t.Fatalf("explicit SCORER_MODEL must win: got %q", got)
 	}
 }
 
@@ -133,6 +150,82 @@ func TestComplete_HonorsBaseURLOverride(t *testing.T) {
 	}
 	if body["seed"] == nil {
 		t.Fatal("request did not reach the overridden base URL")
+	}
+}
+
+func TestCompleteJSON_ResponseFormat(t *testing.T) {
+	// Self-hosted gateway (LLM_BASE_URL set): JSON mode defaults on, so judge
+	// calls carry response_format json_object; plain Complete never does.
+	var body map[string]any
+	srv := mockOpenRouter(t, 10, &body)
+	t.Setenv("LLM_BASE_URL", srv.URL)
+	t.Setenv("LLM_RESPONSE_FORMAT", "")
+	c := NewWithKey("test-key")
+
+	if _, err := c.CompleteJSON(context.Background(), "m", "sys", "hi"); err != nil {
+		t.Fatalf("CompleteJSON: %v", err)
+	}
+	rf, ok := body["response_format"].(map[string]any)
+	if !ok || rf["type"] != "json_object" {
+		t.Fatalf("response_format = %v, want {type: json_object}", body["response_format"])
+	}
+	// The determinism knobs must still be pinned on JSON-mode calls.
+	if body["temperature"].(float64) != 0 || body["top_p"].(float64) != 1 || int(body["seed"].(float64)) != deterministicSeed {
+		t.Fatalf("determinism knobs missing on JSON-mode call: %v", body)
+	}
+
+	body = nil
+	if _, err := c.Complete(context.Background(), "m", "sys", "hi"); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if _, present := body["response_format"]; present {
+		t.Fatal("plain Complete must never send response_format (generator calls are free text)")
+	}
+}
+
+func TestCompleteJSON_HostedDefaultOmitsResponseFormat(t *testing.T) {
+	// Hosted default (no LLM_BASE_URL): the stack may reject response_format,
+	// so JSON mode is off and CompleteJSON degrades to a plain call.
+	t.Setenv("LLM_BASE_URL", "")
+	t.Setenv("LLM_RESPONSE_FORMAT", "")
+	var body map[string]any
+	srv := mockOpenRouter(t, 10, &body)
+	c := NewWithKey("test-key")
+	c.http.Transport = rewriteHost{target: srv.URL}
+
+	if _, err := c.CompleteJSON(context.Background(), "m", "sys", "hi"); err != nil {
+		t.Fatalf("CompleteJSON: %v", err)
+	}
+	if _, present := body["response_format"]; present {
+		t.Fatal("hosted default must omit response_format unless LLM_RESPONSE_FORMAT forces it")
+	}
+}
+
+func TestCompleteJSON_EnvOverride(t *testing.T) {
+	// LLM_RESPONSE_FORMAT wins in both directions over the LLM_BASE_URL default.
+	var body map[string]any
+	srv := mockOpenRouter(t, 10, &body)
+
+	t.Setenv("LLM_BASE_URL", "")
+	t.Setenv("LLM_RESPONSE_FORMAT", "json_object")
+	c := NewWithKey("test-key")
+	c.http.Transport = rewriteHost{target: srv.URL}
+	if _, err := c.CompleteJSON(context.Background(), "m", "", "hi"); err != nil {
+		t.Fatalf("CompleteJSON: %v", err)
+	}
+	if _, present := body["response_format"]; !present {
+		t.Fatal("LLM_RESPONSE_FORMAT=json_object must force JSON mode on")
+	}
+
+	t.Setenv("LLM_BASE_URL", srv.URL)
+	t.Setenv("LLM_RESPONSE_FORMAT", "off")
+	c = NewWithKey("test-key")
+	body = nil
+	if _, err := c.CompleteJSON(context.Background(), "m", "", "hi"); err != nil {
+		t.Fatalf("CompleteJSON: %v", err)
+	}
+	if _, present := body["response_format"]; present {
+		t.Fatal("LLM_RESPONSE_FORMAT=off must suppress JSON mode even self-hosted")
 	}
 }
 

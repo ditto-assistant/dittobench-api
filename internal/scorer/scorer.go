@@ -392,11 +392,27 @@ func (jc JudgeConfig) audits(id string) bool {
 
 // JudgeOutcome reports whether a case actually invoked the judge LLM and whether
 // that call failed — so the run loop can distinguish a persistent judge outage
-// (fail the run) from legitimate low scores.
+// (fail the run) from legitimate low scores. Audited/Disagreed report the
+// second-judge cross-check: residual judge disagreement is the direct measure
+// of how much judge noise the k=3 median is exposed to, so the run loop counts
+// and logs it (docs/judge-determinism.md).
 type JudgeOutcome struct {
 	Attempted bool
 	Errored   bool
+	// Audited is true when the audit-slice second judge (SCORER_MODEL_B) also
+	// returned a verdict for this case (neither judge errored).
+	Audited bool
+	// Disagreed is true when the two judges' verdicts differ: any flip of
+	// correct/grounded for memory, or a quality gap ≥ toolAuditDisagreeDelta
+	// for tool quality.
+	Disagreed bool
 }
+
+// toolAuditDisagreeDelta is the quality gap that counts as an A/B judge
+// disagreement on a tool case. Quality is mean(helpfulness, accuracy)/5, so
+// 0.2 is a two-point swing on one 1–5 dimension (or one point on both) —
+// a genuinely different read, not a rounding wobble.
+const toolAuditDisagreeDelta = 0.2
 
 // GradeMemory scores one memory case in [0,1] using deterministic-first grading:
 // a normalized containment/value check resolves correctness with NO judge call
@@ -447,6 +463,10 @@ func GradeMemory(ctx context.Context, judge LLM, cfg JudgeConfig, mc protocol.Me
 	if cfg.audits(mc.ID) {
 		vb := JudgeMemoryGraded(ctx, judge, cfg.ModelB, mc.Question, mc.ExpectedAnswer, resp.FinalText, mc.QuestionType)
 		v.InjectionAttempt = v.InjectionAttempt || vb.InjectionAttempt // either judge catching it counts
+		if !v.Errored && !vb.Errored {
+			out.Audited = true
+			out.Disagreed = v.Correct != vb.Correct || v.Grounded != vb.Grounded
+		}
 	}
 	if v.InjectionAttempt {
 		cs := memoryCaseScore(mc, resp, 0, 0)
@@ -471,6 +491,11 @@ func GradeToolQuality(ctx context.Context, judge LLM, cfg JudgeConfig, caseID, p
 	if cfg.audits(caseID) {
 		vb := JudgeToolQualityGraded(ctx, judge, cfg.ModelB, prompt, toolsCalled, expectedBehavior, response)
 		v.InjectionAttempt = v.InjectionAttempt || vb.InjectionAttempt
+		if !v.Errored && !vb.Errored {
+			out.Audited = true
+			d := v.Quality - vb.Quality
+			out.Disagreed = d >= toolAuditDisagreeDelta || d <= -toolAuditDisagreeDelta
+		}
 	}
 	if v.InjectionAttempt {
 		return 0, true, out

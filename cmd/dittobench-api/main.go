@@ -689,11 +689,18 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	judgeCfg := scorer.JudgeConfig{Model: llm.ScorerModel(), ModelB: llm.ScorerModelB()}
 	perCase := make([]protocol.CaseScore, 0, total)
 	judgeAttempts, judgeErrors := 0, 0
+	judgeAudited, judgeDisagreed := 0, 0
 	countJudge := func(o scorer.JudgeOutcome) {
 		if o.Attempted {
 			judgeAttempts++
 			if o.Errored {
 				judgeErrors++
+			}
+		}
+		if o.Audited {
+			judgeAudited++
+			if o.Disagreed {
+				judgeDisagreed++
 			}
 		}
 	}
@@ -830,6 +837,8 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		Paraphrase:        &para,
 		InjectionAttempts: injections,
 		Tokens:            llmClient.Spent(),
+		JudgeAudited:      judgeAudited,
+		JudgeDisagreed:    judgeDisagreed,
 		ToolMean:          report.ToolMean,
 		MemoryMean:        report.MemoryMean,
 		SeedingWaves:      memSuite.SeedingWaves,
@@ -858,12 +867,26 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	if injections > 0 {
 		log.Printf("run %s: %d judge-injection attempt(s) flagged", runID, injections)
 	}
+	// Residual judge-disagreement measurement: when the SCORER_MODEL_B audit
+	// slice ran, log how often the two judges disagreed. This is the live signal
+	// for how much judge noise the k=3 median is exposed to; it should trend to
+	// ~0 once the judge is self-hosted (docs/judge-determinism.md).
+	if judgeAudited > 0 {
+		log.Printf("run %s: judge audit slice: %d/%d disagreement(s) (judge=%s audit=%s)",
+			runID, judgeDisagreed, judgeAudited, judgeCfg.Model, judgeCfg.ModelB)
+	}
 	// Self-preference guard: an LLM judge tends to over-score responses from its own
 	// model family. We can only observe the harness model when the operator forces
 	// it (DITTOBENCH_HARNESS_MODEL); when we can, warn if it matches the judge so the
 	// operator picks a distinct judge. (Programmatic scoring — tool trajectory,
 	// needle, isolation, injection — is unaffected; only the LLM-judged half is.)
-	if hm := reportedHarnessModel(); hm != "" && sameModelFamily(hm, judgeCfg.Model) {
+	// Exception: judge == the locked harness model with the model lock ON is the
+	// deliberate frozen-judge configuration, not an accident. Every miner's
+	// harness runs the identical model there, so same-family bias is a constant
+	// offset that cannot reorder the KOTH ranking; SCORER_MODEL_B stays the
+	// de-correlated cross-check.
+	deliberateSameModel := modelLockEnabled() && sameModelFamily(judgeCfg.Model, llm.HarnessModel())
+	if hm := reportedHarnessModel(); hm != "" && sameModelFamily(hm, judgeCfg.Model) && !deliberateSameModel {
 		log.Printf("run %s: WARNING self-preference risk — judge model %q matches the harness model %q; use a distinct judge model (SCORER_MODEL) to avoid single-model-judge bias", runID, judgeCfg.Model, hm)
 	}
 	s.store.Finish(runID, report)

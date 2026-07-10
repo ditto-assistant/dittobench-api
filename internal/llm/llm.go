@@ -10,7 +10,7 @@
 // reproducible grading; see docs/judge-determinism.md. Model ids come from env
 // with defaults:
 //   - GENERATOR_MODEL (default "qwen/qwen3-32b")
-//   - SCORER_MODEL    (default "google/gemini-3.1-flash-lite")
+//   - SCORER_MODEL    (default: the locked harness model, see ScorerModel)
 //
 // Every call is sent with temperature 0, a fixed seed, and top_p 1 so that,
 // against a serving stack that honors them, two validators grading the same
@@ -37,7 +37,6 @@ const (
 	EnvAPIKey = "OPENROUTER_API_KEY"
 
 	defaultGeneratorModel = "qwen/qwen3-32b"
-	defaultScorerModel    = "google/gemini-3.1-flash-lite"
 
 	// defaultHarnessModel is the v2 locked open-weight model every miner harness
 	// is scored against. Locking the harness to ONE open-weight model shrinks the
@@ -81,6 +80,14 @@ type Client struct {
 	baseURL   string
 	http      *http.Client
 	maxTokens int
+	// jsonMode enables response_format {"type":"json_object"} on CompleteJSON
+	// calls (the judges). Constraining the judge to a JSON object removes
+	// formatting variance from the verdict, one less place a token-level flip
+	// can change a score. Defaults on for a self-hosted gateway (LLM_BASE_URL
+	// set: vLLM and Ollama's OpenAI-compatible endpoints both support it) and
+	// off for the hosted default, which may reject the field; override either
+	// way with LLM_RESPONSE_FORMAT=json_object|off.
+	jsonMode bool
 	// budget is the per-client (== per-run) total-token ceiling; 0 disables it.
 	// spent accumulates usage.total_tokens across calls and is checked before
 	// each request so a run fails cleanly instead of burning unbounded spend.
@@ -108,7 +115,22 @@ func NewWithKey(key string) *Client {
 		http:      &http.Client{Timeout: 90 * time.Second},
 		maxTokens: envInt("LLM_MAX_TOKENS", defaultMaxTokens),
 		budget:    int64(envInt("LLM_RUN_TOKEN_BUDGET", int(defaultRunTokenBudget))),
+		jsonMode:  jsonModeEnabled(),
 	}
+}
+
+// jsonModeEnabled resolves the judge JSON-mode policy: LLM_RESPONSE_FORMAT
+// wins when set ("json_object"/"on"/"1" force it, "off"/"0" suppress it);
+// otherwise it follows LLM_BASE_URL — on for a self-hosted gateway, off for
+// the hosted default.
+func jsonModeEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("LLM_RESPONSE_FORMAT"))) {
+	case "json_object", "json", "on", "1", "true":
+		return true
+	case "off", "0", "false", "none":
+		return false
+	}
+	return strings.TrimSpace(os.Getenv("LLM_BASE_URL")) != ""
 }
 
 // Spent reports the total tokens this client has consumed so far (for logging).
@@ -149,12 +171,19 @@ func GeneratorModel() string {
 	return defaultGeneratorModel
 }
 
-// ScorerModel returns the judge model id (env SCORER_MODEL or default).
+// ScorerModel returns the judge model id (env SCORER_MODEL), defaulting to the
+// locked harness model (HarnessModel) so the judge is the same frozen
+// open-weight model the harness runs against — a public, reproducible fact
+// with no closed-model version drift. Same-family self-preference bias is not
+// a ranking concern here: under the model lock every miner's harness runs the
+// identical model, so any judge bias toward its own family is a constant
+// offset across miners and KOTH compares only relative scores. The
+// de-correlated cross-check is SCORER_MODEL_B on the audit slice.
 func ScorerModel() string {
 	if m := strings.TrimSpace(os.Getenv("SCORER_MODEL")); m != "" {
 		return m
 	}
-	return defaultScorerModel
+	return HarnessModel()
 }
 
 // ScorerModelB returns the OPTIONAL second judge model id (env SCORER_MODEL_B),
@@ -193,6 +222,13 @@ type chatRequest struct {
 	TopP        float64 `json:"top_p"`
 	Seed        int     `json:"seed"`
 	MaxTokens   int     `json:"max_tokens,omitempty"`
+	// ResponseFormat constrains the completion to a JSON object (judge calls in
+	// JSON mode only); nil omits the field for stacks that don't support it.
+	ResponseFormat *responseFormat `json:"response_format,omitempty"`
+}
+
+type responseFormat struct {
+	Type string `json:"type"`
 }
 
 type chatResponse struct {
@@ -215,6 +251,19 @@ type chatResponse struct {
 // is only approximately stable on a batched hosted model, so full reproducibility
 // requires a self-hosted judge (LLM_BASE_URL); see docs/judge-determinism.md.
 func (c *Client) Complete(ctx context.Context, model, system, user string) (string, error) {
+	return c.complete(ctx, model, system, user, false)
+}
+
+// CompleteJSON is Complete for calls whose reply must be a JSON object (the
+// judges). When the client's JSON mode is enabled it additionally sends
+// response_format {"type":"json_object"}, constraining the verdict to exactly
+// a JSON object and removing formatting variance; with JSON mode off it is
+// identical to Complete, so it is always safe to call.
+func (c *Client) CompleteJSON(ctx context.Context, model, system, user string) (string, error) {
+	return c.complete(ctx, model, system, user, true)
+}
+
+func (c *Client) complete(ctx context.Context, model, system, user string, wantJSON bool) (string, error) {
 	if c == nil {
 		return "", fmt.Errorf("llm: nil client")
 	}
@@ -232,14 +281,18 @@ func (c *Client) Complete(ctx context.Context, model, system, user string) (stri
 	}
 	msgs = append(msgs, chatMessage{Role: "user", Content: user})
 
-	body, err := json.Marshal(chatRequest{
+	creq := chatRequest{
 		Model:       model,
 		Messages:    msgs,
 		Temperature: 0,
 		TopP:        1,
 		Seed:        deterministicSeed,
 		MaxTokens:   c.maxTokens,
-	})
+	}
+	if wantJSON && c.jsonMode {
+		creq.ResponseFormat = &responseFormat{Type: "json_object"}
+	}
+	body, err := json.Marshal(creq)
 	if err != nil {
 		return "", fmt.Errorf("llm: marshal request: %w", err)
 	}
