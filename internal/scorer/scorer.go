@@ -293,6 +293,34 @@ func MetamorphicConsistency(perCase []protocol.CaseScore) *float64 {
 	return &v
 }
 
+// metamorphicMaxPenalty is the deepest the metamorphic-consistency factor can
+// drop the composite (matches effMaxPenalty; accuracy stays dominant).
+const metamorphicMaxPenalty = 0.15
+
+// MetamorphicConsistencyFactor is the run's phrasing-robustness multiplier for
+// the composite (anti-gaming addendum N2: promote invariance twins from an
+// advisory fingerprint to a first-class score). It penalizes ONLY split twin
+// groups: a group where the harness got at least one phrasing right and at
+// least one reworded phrasing of the SAME fact wrong. That split is the
+// template-matcher signature the survey targets (SCORE/PromptEval/CheckList
+// INV): a grounded reader answers every sibling alike, a pattern-matcher rides
+// one surface and fails the rest.
+//
+// A uniformly-wrong group is not a brittleness signal (accuracy already
+// penalizes it), and a uniformly-correct group is ideal, so both leave the
+// factor at 1.0; only the split fraction bites. The reported advisory
+// metamorphic_consistency rate is exactly 1 - splitRate, so the applied factor
+// is a pure function of that already-published value and stays auditable
+// without a new wire field. Returns 1.0 (no effect) when no twin groups ran.
+func MetamorphicConsistencyFactor(perCase []protocol.CaseScore) float64 {
+	rate := MetamorphicConsistency(perCase)
+	if rate == nil {
+		return 1.0
+	}
+	split := 1.0 - *rate // fraction of twin groups the harness answered inconsistently
+	return round6(1.0 - metamorphicMaxPenalty*split)
+}
+
 // CalibrationBrier returns the mean Brier score over cases whose harness
 // reported a confidence (Ideas #6): mean((confidence - outcome)^2) where outcome
 // is 1 for a correct case and 0 otherwise. Lower is better; a well-calibrated
@@ -455,6 +483,11 @@ func Aggregate(runID string, perCase []protocol.CaseScore) protocol.ScoreReport 
 	// be bought back with easy recall, so a harness that does not genuinely
 	// retrieve in-context this run is capped hard.
 	composite = round6(composite * CanaryIntegrityFactor(perCase))
+	// Phrasing-robustness factor (N2): a bounded penalty for answering invariance
+	// twins of the same fact inconsistently across surface rewordings. Applied to
+	// the composite only, like efficiency and canary — tool_mean, memory_mean, and
+	// per_category stay pure accuracy. 1.0 (no effect) when no twin groups ran.
+	composite = round6(composite * MetamorphicConsistencyFactor(perCase))
 
 	perCat := make([]protocol.CategoryStat, 0, len(catOrder))
 	for _, cat := range catOrder {

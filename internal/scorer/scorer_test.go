@@ -157,6 +157,60 @@ func TestMetamorphicConsistency(t *testing.T) {
 	}
 }
 
+func TestMetamorphicConsistencyFactor(t *testing.T) {
+	tw := func(g string, correct bool) protocol.CaseScore {
+		return protocol.CaseScore{Kind: protocol.KindMemory, TwinGroup: g, Correct: correct}
+	}
+	// No twin groups: no effect.
+	if f := MetamorphicConsistencyFactor([]protocol.CaseScore{{Kind: protocol.KindMemory, Correct: true}}); f != 1.0 {
+		t.Fatalf("no twins should not penalize, got %v", f)
+	}
+	// A uniformly-correct group and a uniformly-wrong group are both consistent:
+	// only split groups bite, so the factor stays 1.0.
+	consistent := []protocol.CaseScore{
+		tw("g1", true), tw("g1", true),
+		tw("g2", false), tw("g2", false),
+	}
+	if f := MetamorphicConsistencyFactor(consistent); f != 1.0 {
+		t.Fatalf("consistent groups (incl. all-wrong) should not penalize, got %v", f)
+	}
+	// Every group split: full penalty.
+	allSplit := []protocol.CaseScore{
+		tw("g1", true), tw("g1", false),
+		tw("g2", true), tw("g2", false),
+	}
+	if f := MetamorphicConsistencyFactor(allSplit); f != round6(1.0-metamorphicMaxPenalty) {
+		t.Fatalf("fully-split should apply the full penalty %v, got %v", 1.0-metamorphicMaxPenalty, f)
+	}
+	// Half the groups split: half the penalty.
+	halfSplit := []protocol.CaseScore{
+		tw("g1", true), tw("g1", true), // consistent
+		tw("g2", true), tw("g2", false), // split
+	}
+	if f := MetamorphicConsistencyFactor(halfSplit); f != round6(1.0-metamorphicMaxPenalty*0.5) {
+		t.Fatalf("half-split should apply half the penalty, got %v", f)
+	}
+}
+
+// TestAggregateFoldsMetamorphicFactor pins that a split twin group actually
+// lowers the composite through Aggregate (N2 wiring), not just in isolation.
+func TestAggregateFoldsMetamorphicFactor(t *testing.T) {
+	mc := func(g string, score float64, correct bool) protocol.CaseScore {
+		return protocol.CaseScore{Kind: protocol.KindMemory, Category: "single-session-recall", Score: score, TwinGroup: g, Correct: correct}
+	}
+	// One consistent group and one split group; memory mean is 0.75.
+	perCase := []protocol.CaseScore{
+		mc("g1", 1.0, true), mc("g1", 1.0, true),
+		mc("g2", 1.0, true), mc("g2", 0.0, false),
+	}
+	rep := Aggregate("run", perCase)
+	// memMean 0.75, one of two groups split -> factor 1 - 0.15*0.5 = 0.925.
+	want := round6(0.75 * round6(1.0-metamorphicMaxPenalty*0.5))
+	if rep.Composite != want {
+		t.Fatalf("composite should fold the metamorphic factor: got %v want %v", rep.Composite, want)
+	}
+}
+
 func TestCalibrationBrier(t *testing.T) {
 	c := func(v float64) *float64 { return &v }
 	// Perfectly calibrated extremes: confident+correct and unconfident+wrong → 0.
