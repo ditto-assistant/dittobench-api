@@ -1,5 +1,21 @@
 # DittoBench v2 Scoring: Decision and Plan
 
+Status: DEPRECATED (2026-07-10), superseded by the one-validator-type model.
+Kept for history only.
+
+Superseding decision: there is no central scorer and no weights-only
+validator. One validator type carries two duties: score when the platform
+leases a ticket (distributed k=3, median), and set weights every interval
+from the signed public ledger. The judge-free rework removed this brief's
+premise: the generator, answer keys, and grader are public in
+dittobench-datagen, so there is nothing secret to centralize around. Current
+description: ditto-subnet docs/VALIDATOR-BRIEF.md and
+docs/RUNNING-A-VALIDATOR.md.
+
+Original text below, unedited.
+
+---
+
 Status: decided (2026-07-08)
 Audience: subnet architecture, tokenomics/community, validator ops
 Decision: independent weight-setting over centrally-computed scores

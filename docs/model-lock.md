@@ -16,10 +16,10 @@ If each validator scores a harness against whatever model the harness chooses:
 2. **Model choice is an attack surface.** A miner can route to a bigger model, a
    model the judge shares a family with (self-preference), or a provider quirk.
 
-Locking to one open-weight model removes both. v2 starts with the **Qwen2.5
-family** (strong open-weight tool-calling). "Open weight" also means the exact
-scoring model is itself a public, reproducible fact — part of the auditability
-goal (see the scoring-decentralization brief).
+Locking to one open-weight model removes both. The lock is **Qwen3-32B**
+(strong open-weight tool-calling; Chutes serves it as `Qwen/Qwen3-32B-TEE`).
+"Open weight" also means the exact scoring model is itself a public,
+reproducible fact — part of the auditability goal.
 
 ## The lock is the network, not an env var
 
