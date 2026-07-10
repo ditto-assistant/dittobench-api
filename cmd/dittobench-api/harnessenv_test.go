@@ -53,6 +53,33 @@ func TestHarnessSandboxEnvLockedForcesModel(t *testing.T) {
 	}
 }
 
+// TestHarnessSandboxEnvLockedChutesRelay: with the lock on and the relay as
+// the gateway, chat routes to the relay via the chutes provider while
+// embeddings keep hitting the local Ollama, and no real key enters the sandbox.
+func TestHarnessSandboxEnvLockedChutesRelay(t *testing.T) {
+	t.Setenv("DITTOBENCH_MODEL_LOCK", "1")
+	t.Setenv("HARNESS_MODEL", "Qwen/Qwen3-32B-TEE")
+	t.Setenv("HARNESS_PROVIDER", "chutes")
+	t.Setenv("HARNESS_GATEWAY_URL", "http://host.docker.internal:11435")
+	t.Setenv("HARNESS_EMBED_URL", "http://host.docker.internal:11434")
+	env := harnessSandboxEnv("sk-secret", nil)
+	if env["DITTOBENCH_PROVIDER"] != "chutes" || env["DITTOBENCH_MODEL"] != "Qwen/Qwen3-32B-TEE" {
+		t.Fatalf("locked chutes provider/model wrong: %v", env)
+	}
+	if env["CHUTES_BASE_URL"] != "http://host.docker.internal:11435" {
+		t.Fatalf("chat must route to the relay: %q", env["CHUTES_BASE_URL"])
+	}
+	if env["OLLAMA_BASE_URL"] != "http://host.docker.internal:11434" {
+		t.Fatalf("embeddings must keep hitting local Ollama: %q", env["OLLAMA_BASE_URL"])
+	}
+	if env["CHUTES_API_KEY"] != "relay" {
+		t.Fatalf("sandbox must hold only the placeholder key, got %q", env["CHUTES_API_KEY"])
+	}
+	if _, ok := env["OPENROUTER_API_KEY"]; ok {
+		t.Fatal("locked path must not forward the OpenRouter key")
+	}
+}
+
 // TestHarnessSandboxEnvLockCannotBeOverridden pins the security-critical
 // invariant: a malicious req.Env cannot escape the locked model by setting the
 // OpenRouter key, swapping the model id, or redirecting the gateway.

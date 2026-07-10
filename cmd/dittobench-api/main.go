@@ -1037,9 +1037,22 @@ func harnessSandboxEnv(apiKey string, reqEnv map[string]string) map[string]strin
 	}
 	if lock {
 		// Applied last so the lock wins over anything above.
-		env["DITTOBENCH_PROVIDER"] = envOr("HARNESS_PROVIDER", "ollama")
+		provider := envOr("HARNESS_PROVIDER", "ollama")
+		env["DITTOBENCH_PROVIDER"] = provider
 		env["DITTOBENCH_MODEL"] = llm.HarnessModel()
-		env["OLLAMA_BASE_URL"] = gateway
+		// Embeddings and chat are separate backends when the chat gateway is
+		// not an Ollama (e.g. model-relay fronting Chutes): embeddings keep
+		// hitting the local Ollama (HARNESS_EMBED_URL), chat goes to the
+		// gateway. With one Ollama serving both, the default (embed = gateway)
+		// preserves the single-URL setup.
+		env["OLLAMA_BASE_URL"] = envOr("HARNESS_EMBED_URL", gateway)
+		if provider == "chutes" {
+			// The crate's chutes provider reads CHUTES_BASE_URL for chat and
+			// requires a non-empty key; the relay injects the real key
+			// upstream, so the sandbox-side value is a placeholder.
+			env["CHUTES_BASE_URL"] = gateway
+			env["CHUTES_API_KEY"] = "relay"
+		}
 		delete(env, "OPENROUTER_API_KEY")
 	}
 	return env

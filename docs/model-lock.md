@@ -60,8 +60,9 @@ BYOK-spend concern both disappear on the locked path.
 |-----|---------|--------|
 | `DITTOBENCH_MODEL_LOCK` | `false` | master switch for the lock |
 | `HARNESS_MODEL` | `qwen/qwen3-32b` | the locked model id (must match what the gateway serves) |
-| `HARNESS_PROVIDER` | `ollama` | the crate provider value pointing at the host gateway |
-| `HARNESS_GATEWAY_URL` | `http://host.docker.internal:11434` | the gateway base URL (`OLLAMA_BASE_URL`) |
+| `HARNESS_PROVIDER` | `ollama` | the crate provider value pointing at the host gateway (`chutes` for the relay) |
+| `HARNESS_GATEWAY_URL` | `http://host.docker.internal:11434` | the CHAT gateway base URL |
+| `HARNESS_EMBED_URL` | _(the gateway URL)_ | the embeddings Ollama, when it differs from the chat gateway (relay setups) |
 
 Scoring is judge-free (see `docs/judge-determinism.md`), so the locked model is
 the ONLY model in a run. The locked keys also cover the Chutes and OpenAI
