@@ -44,11 +44,33 @@ Every request from `internal/llm.Client.Complete` carries, on the wire:
 All three are always emitted (no `omitempty`) so intent is explicit and a default
 can never reintroduce sampling.
 
+Judge calls additionally send `response_format: {"type":"json_object"}` when
+JSON mode is on, constraining the verdict to exactly a JSON object and removing
+formatting variance (one less place a token-level flip can change a score).
+JSON mode defaults on when `LLM_BASE_URL` is set (vLLM and Ollama's
+OpenAI-compatible endpoints both support it) and off on the hosted default,
+which may reject the field; `LLM_RESPONSE_FORMAT=json_object|off` overrides
+either way. Generator calls are free text and never send it
+(`llm.Client.CompleteJSON` vs `Complete`).
+
+## Which model judges
+
+`SCORER_MODEL` defaults to the locked open-weight harness model
+(`llm.ScorerModel` falls back to `llm.HarnessModel`, `qwen/qwen2.5-72b-instruct`
+for v2): one frozen model, one source constant, no closed-model version drift.
+The exact judge is a public, reproducible fact. Same-family self-preference
+bias does not threaten the ranking under the model lock, because every miner's
+harness runs the identical model and a uniform bias is a constant offset; the
+de-correlated cross-check is `SCORER_MODEL_B` on the audit slice. Without the
+lock (legacy BYOK), pick a judge from a different family than the harness
+model; the run warns when they match.
+
 ## Why temperature 0 is necessary but not sufficient
 
 Temperature 0 makes decoding greedy, but greedy is only reproducible if the logits
-are bit-identical run to run. On a hosted, multi-tenant, continuously batched model
-(the current default, `google/gemini-3.1-flash-lite` via OpenRouter) they are not:
+are bit-identical run to run. On a hosted, multi-tenant, continuously batched
+serving stack (any model reached via OpenRouter, including the hosted practice
+deploy's `gemini-3.1-flash-lite` override) they are not:
 batch composition, kernel and hardware routing, and silent model-version bumps all
 perturb the logits enough to flip the argmax at a near-tie token boundary. The
 hosted route may also ignore `seed` entirely. So on the hosted default the knobs
@@ -87,26 +109,37 @@ reproducible judge. Use vLLM if throughput demands it, with eager mode and fixed
 batching. Run the same locked open-weight model the harness is locked to, or a
 dedicated judge model, so the exact judge is a public, reproducible fact.
 
-## Further hardening (not yet implemented)
+## Residual-disagreement measurement
 
-JSON-schema or structured output. The judge is prompted to emit JSON and parsed by
-a tolerant hand parser (`internal/scorer/judge.go`). Adding `response_format`
-(OpenAI and vLLM `guided_json`, Ollama `format`) would constrain the judge to
-exactly the verdict fields, remove formatting variance, and narrow the token set at
-each position. This is gated on confirming the serving stack supports it, since the
-hosted default may reject an unknown `response_format`.
+When `SCORER_MODEL_B` is set, the audit slice (~1 in 5 judged cases) runs both
+judges and records whether they agreed: any correct/grounded flip counts as a
+memory disagreement, and a quality gap of ≥ 0.2 (a two-point swing on one 1–5
+dimension) counts as a tool disagreement (`scorer.JudgeOutcome`,
+`toolAuditDisagreeDelta`). The run loop logs `judge audit slice: X/Y
+disagreement(s)` per run. This is the live measure of the judge noise the k=3
+median is exposed to; it should trend to ~0 once the judge is self-hosted, and
+a persistent nonzero rate on a pinned stack means the rubric (not the serving)
+is the noise source. An errored second judge is an outage, not a disagreement,
+and is excluded. The counts ride the wire as `RunDetails.judge_audited` /
+`judge_disagreed` (dittobench-datagen ≥ v0.3.0), so the platform and the public
+leaderboard can display per-run judge agreement alongside the score.
+
+## Further hardening (not yet implemented)
 
 Wider deterministic rubric. Convert borderline judged cases into stable
 exact-matches with alias and normalization checks before the judge fallback (the
 `scorer.go` memory-miss path), which shrinks the judged surface further.
 
-Residual-disagreement measurement. Use the `SCORER_MODEL_B` audit slice to log
-verdict agreement across two runs or two validators, and confirm the residual k=3
-disagreement is actually gone once the judge is self-hosted.
+JSON *schema* (beyond JSON mode). `json_object` constrains the shape, not the
+fields. vLLM `guided_json` / Ollama `format` with the exact verdict schema would
+also narrow the token set at each position.
 
 ## Bottom line
 
-`temperature 0 + top_p 1 + seed` is now on every judge request, so the judge is
-reproducible the moment it runs on a serving stack that honors those knobs. On the
-hosted default it is best-effort. The determinism guarantee is realized by
-self-hosting the judge (`LLM_BASE_URL`) on a pinned vLLM or Ollama stack.
+`temperature 0 + top_p 1 + seed` is on every judge request, judge calls run in
+JSON mode on a self-hosted stack, and the default judge is the locked
+open-weight harness model. The judge is therefore a frozen, public artifact that
+is reproducible the moment it runs on a serving stack that honors those knobs
+(self-hosted `LLM_BASE_URL` on a pinned vLLM or Ollama). Routed through a
+hosted provider it is best-effort, and the `SCORER_MODEL_B` disagreement log
+tells you how far from deterministic it actually is.

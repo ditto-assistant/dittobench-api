@@ -92,8 +92,10 @@ gcloud run deploy dittobench-api \
 ```
 
 (`GENERATOR_MODEL`/`SCORER_MODEL` are configurable — the code default generator
-is `qwen/qwen3-32b`; the deploy above pins both to the cheaper
-`gemini-3.1-flash-lite` validated end-to-end.)
+is `qwen/qwen3-32b` and the code default judge is the locked open-weight
+harness model (see `docs/judge-determinism.md`); the hosted practice deploy
+above pins both to the cheaper `gemini-3.1-flash-lite` validated end-to-end.
+Real scoring hosts run the judge self-hosted for reproducibility.)
 
 **CI/CD** (`.github/workflows/ci.yml`): every PR runs `build` / `vet` / `test`;
 a **merge to `main` auto-deploys** to Cloud Run. CI authenticates to GCP via the
@@ -207,18 +209,23 @@ curl -X POST https://dittobench-api-22790208601.us-central1.run.app/v1/submit \
 | --------------------- | ------------------------------- | --------------------------------------------- |
 | `openrouter_key` (req)| _(required, BYOK)_              | generator + judge (per request; never stored) |
 | `GENERATOR_MODEL` env | `qwen/qwen3-32b`                | paraphrases tool prompts + memory pairs       |
-| `SCORER_MODEL` env    | `google/gemini-3.1-flash-lite`  | LLM judge (tool quality + memory yes/no)      |
-| `SCORER_MODEL_B` env  | _(unset)_                       | optional second judge; audit-slice cross-check |
+| `SCORER_MODEL` env    | _(the locked harness model)_    | LLM judge (tool quality + memory yes/no)      |
+| `SCORER_MODEL_B` env  | _(unset)_                       | optional second judge; audit-slice cross-check + disagreement logging |
+| `LLM_RESPONSE_FORMAT` env | _(on iff `LLM_BASE_URL` set)_ | judge JSON mode (`json_object` / `off`)       |
 | `DITTOBENCH_SEED_DIR` env | _(embedded bundle)_         | override LongMemEval seeds with on-disk copies |
 | `DITTOBENCH_ORACLE` env   | _(embedded bundle)_         | override the oracle with an on-disk copy       |
 
-Keep `SCORER_MODEL` distinct from the miner's harness model: an LLM judge tends
-to over-score responses from its own model family. Most of the score is
-programmatic (tool trajectory/args, result-usage needle, isolation leak,
-injection payload) and so is unaffected; only the LLM-judged half is exposed to
-this bias. When the harness model is known (operator sets `DITTOBENCH_HARNESS_MODEL`),
-the run warns if it matches the judge. `SCORER_MODEL_B` adds a de-correlated
-second judge on an audit slice.
+The judge defaults to the same frozen open-weight model the v2 lock scores every
+harness against, so the exact judge is a public, reproducible fact. Same-family
+self-preference bias is not a ranking concern under the lock (every miner runs
+the identical harness model, so the bias is a constant offset), and most of the
+score is programmatic anyway (tool trajectory/args, result-usage needle,
+isolation leak, injection payload); only the LLM-judged half is exposed.
+Without the lock (legacy BYOK, where miners pick their own harness model), keep
+`SCORER_MODEL` distinct from the harness model; when the harness model is known
+(operator sets `DITTOBENCH_HARNESS_MODEL`) the run warns if it matches the
+judge. `SCORER_MODEL_B` adds a de-correlated second judge on an audit slice and
+logs A/B verdict disagreement per run.
 
 The LongMemEval corpus ships **embedded** in the binary (a slim, text-only
 bundle under `internal/gen/seeddata/`, ~18 MB, embeddings stripped) so the
