@@ -23,7 +23,7 @@ func TestRelayPinsModelAndKey(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	rl := &relay{upstream: upstream.URL, apiKey: "relay-key", model: "locked/model", client: &http.Client{Timeout: 5 * time.Second}}
+	rl := &relay{upstream: upstream.URL, apiKey: "relay-key", model: "locked/model", thinking: false, client: &http.Client{Timeout: 5 * time.Second}}
 	srv := httptest.NewServer(http.HandlerFunc(rl.handle))
 	defer srv.Close()
 
@@ -49,6 +49,38 @@ func TestRelayPinsModelAndKey(t *testing.T) {
 	}
 	if got["messages"] == nil {
 		t.Fatal("messages must pass through")
+	}
+	// Thinking is locked: even a request that asked for it gets the relay's mode.
+	ctk, ok := got["chat_template_kwargs"].(map[string]any)
+	if !ok || ctk["enable_thinking"] != false {
+		t.Fatalf("thinking not locked off: %v", got["chat_template_kwargs"])
+	}
+}
+
+// TestRelayLocksThinkingOverSandboxChoice: a sandbox-supplied
+// chat_template_kwargs cannot re-enable thinking.
+func TestRelayLocksThinkingOverSandboxChoice(t *testing.T) {
+	var got map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[]}`))
+	}))
+	defer upstream.Close()
+	rl := &relay{upstream: upstream.URL, apiKey: "k", model: "m", thinking: false, client: &http.Client{Timeout: 5 * time.Second}}
+	srv := httptest.NewServer(http.HandlerFunc(rl.handle))
+	defer srv.Close()
+
+	body := `{"model":"m","chat_template_kwargs":{"enable_thinking":true,"custom":"kept"},"messages":[]}`
+	if _, err := http.Post(srv.URL, "application/json", strings.NewReader(body)); err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	ctk := got["chat_template_kwargs"].(map[string]any)
+	if ctk["enable_thinking"] != false {
+		t.Fatalf("sandbox re-enabled thinking: %v", ctk)
+	}
+	if ctk["custom"] != "kept" {
+		t.Fatalf("unrelated kwargs must pass through: %v", ctk)
 	}
 }
 

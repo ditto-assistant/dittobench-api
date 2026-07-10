@@ -17,6 +17,11 @@
 //   - RELAY_MODEL         the model id to force (default: the upstream form of
 //     the locked model must be set explicitly, since gateway names differ
 //     from canonical ids; required)
+//   - RELAY_THINKING      "true" or "false" (default false). Locked like the
+//     model field: every request gets chat_template_kwargs.enable_thinking
+//     set to this value, so a hybrid-reasoning model (Qwen3) runs in ONE mode
+//     fleet-wide instead of whatever the sandbox or serving default picks.
+//     Thinking off keeps replies inside per-case budgets and cuts variance.
 //   - PORT                listen port (default 11434, the gateway port the
 //     sandbox already expects)
 package main
@@ -41,6 +46,7 @@ type relay struct {
 	upstream string
 	apiKey   string
 	model    string
+	thinking bool
 	client   *http.Client
 }
 
@@ -49,6 +55,7 @@ func main() {
 		upstream: envOr("RELAY_UPSTREAM_URL", defaultUpstream),
 		apiKey:   strings.TrimSpace(os.Getenv("RELAY_API_KEY")),
 		model:    strings.TrimSpace(os.Getenv("RELAY_MODEL")),
+		thinking: strings.EqualFold(envOr("RELAY_THINKING", "false"), "true"),
 		client:   &http.Client{Timeout: 300 * time.Second},
 	}
 	if r.apiKey == "" || r.model == "" {
@@ -80,10 +87,16 @@ func (r *relay) handle(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	// The pin: whatever the sandbox asked for, the upstream sees the locked
-	// model and a non-streaming request (one JSON body back, nothing to parse
-	// incrementally).
+	// model, a non-streaming request (one JSON body back), and one locked
+	// thinking mode (a hybrid-reasoning model must not pick per request).
 	body["model"] = r.model
 	body["stream"] = false
+	ctk, _ := body["chat_template_kwargs"].(map[string]any)
+	if ctk == nil {
+		ctk = map[string]any{}
+	}
+	ctk["enable_thinking"] = r.thinking
+	body["chat_template_kwargs"] = ctk
 	out, err := json.Marshal(body)
 	if err != nil {
 		http.Error(w, "marshal body", http.StatusInternalServerError)
