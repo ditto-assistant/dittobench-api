@@ -806,6 +806,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		ObservedToolCases: observedTool,
 		CappedToolCases:   cappedTool,
 		IsolationCases:    len(iso.Cases),
+		LifecycleCases:    memSuite.LifecycleCases,
 		ToolEfficiency:    scorer.ToolEfficiencyFactor(perCase),
 		// Generation and grading are both deterministic and non-LLM; the only
 		// model in a run is the locked one the harness talks to.
