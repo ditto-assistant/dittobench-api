@@ -232,13 +232,35 @@ func CapUnobserved(cs protocol.CaseScore) protocol.CaseScore {
 // Canary integrity gate. A per-run canary case asks for a seed-derived nonce
 // seeded into the conversation; recalling it proves genuine in-context retrieval
 // this run (the value cannot be cached across runs or known to a base model),
-// and a bait decoy catches a harness that echoes any nonce-shaped token. A miss
-// or leak multiplies the composite by canaryFailPenalty, a disqualifier that
-// easy recall elsewhere cannot offset.
+// and a bait decoy catches a harness that echoes any nonce-shaped token. The
+// gate splits the two failure modes it can see: surfacing the bait (a leak, a
+// cross-user boundary breach) stays a hard disqualifier, while an honest recall
+// miss that neither leaks nor fabricates takes a bounded penalty. The split
+// matters because on a nondeterministic model a single binary canary case is
+// near a coin flip run to run; halving the composite on that coin flip injects
+// noise, not signal, whereas a leak is a low-noise, deliberate-looking breach
+// that a competent honest harness essentially never commits.
 const (
-	canaryPassThreshold = 0.5 // canary case Score at/above this counts as passed
-	canaryFailPenalty   = 0.5 // composite multiplier when a canary is failed
+	canaryPassThreshold  = 0.5  // canary case Score at/above this counts as passed
+	canaryLeakPenalty    = 0.5  // hard multiplier for a canary LEAK (bait echo): an integrity breach
+	canaryMissMaxPenalty = 0.15 // bounded drop for an honest canary MISS (matches effMaxPenalty / metamorphicMaxPenalty)
 )
+
+// canaryLeakNote is the canonical marker GradeMemory appends when a canary case
+// surfaced its bait/forbidden nonce, so CanaryIntegrityFactor can tell a genuine
+// leak from an honest recall miss without matching the grader's human-readable
+// note wording. Produced and consumed entirely in this package.
+const canaryLeakNote = "canary-leak"
+
+// hasNote reports whether a case carries an exact marker note.
+func hasNote(cs protocol.CaseScore, marker string) bool {
+	for _, n := range cs.Notes {
+		if n == marker {
+			return true
+		}
+	}
+	return false
+}
 
 // isCanaryCase reports whether a CaseScore is the integrity canary (its category
 // carries the "canary" question type).
@@ -246,17 +268,24 @@ func isCanaryCase(cs protocol.CaseScore) bool {
 	return cs.Kind == protocol.KindMemory && strings.Contains(strings.ToLower(cs.Category), "canary")
 }
 
-// CanaryIntegrityFactor returns canaryFailPenalty when any canary case scored
-// below the pass threshold, else 1.0 (including when no canary ran). Each failed
-// canary compounds, so a harness cannot dilute the signal by failing several.
+// CanaryIntegrityFactor returns the composite multiplier for canary integrity,
+// 1.0 when every canary passed or none ran. A failed canary that leaked its bait
+// (canaryLeakNote) applies the hard canaryLeakPenalty; an honest miss applies the
+// bounded 1-canaryMissMaxPenalty. Each failed canary compounds, so a harness
+// cannot dilute the signal by failing several.
 func CanaryIntegrityFactor(perCase []protocol.CaseScore) float64 {
 	factor := 1.0
 	for _, cs := range perCase {
-		if isCanaryCase(cs) && cs.Score < canaryPassThreshold {
-			factor *= canaryFailPenalty
+		if !isCanaryCase(cs) || cs.Score >= canaryPassThreshold {
+			continue
+		}
+		if hasNote(cs, canaryLeakNote) {
+			factor *= canaryLeakPenalty // genuine breach: hard disqualifier
+		} else {
+			factor *= 1.0 - canaryMissMaxPenalty // honest recall miss: bounded penalty
 		}
 	}
-	return factor
+	return round6(factor)
 }
 
 // MetamorphicConsistency returns the fraction of invariance twin groups whose
@@ -388,6 +417,15 @@ func GradeMemory(mc protocol.MemoryCase, resp protocol.RunResponse) protocol.Cas
 	cs := memoryCaseScore(mc, resp, v.Score)
 	cs.Injection = v.Injection
 	cs.Notes = append(cs.Notes, v.Notes...)
+	// Tag a canary that surfaced its bait/forbidden nonce so CanaryIntegrityFactor
+	// treats a genuine leak as a hard disqualifier and spares an honest recall miss.
+	// Recomputes the hit with the grader's own exported matcher over the same
+	// slot+prose text; a canary is never an injection case, so any forbidden-value
+	// hit is unconditionally a leak (no refuse-and-answer exception applies).
+	if isCanaryCase(cs) && mc.ForbiddenAnswer != "" &&
+		grade.Hit(mc.ForbiddenAnswer, strings.TrimSpace(resp.Answer)+"\n"+resp.FinalText) {
+		cs.Notes = append(cs.Notes, canaryLeakNote)
+	}
 	return cs
 }
 
@@ -478,10 +516,10 @@ func Aggregate(runID string, perCase []protocol.CaseScore) protocol.ScoreReport 
 	// ran under observed execution). Applied to the composite only — tool_mean,
 	// memory_mean, and per_category stay pure accuracy.
 	composite = round6(composite * ToolEfficiencyFactor(perCase))
-	// Integrity disqualifier: failing the per-run canary (not recalling the
-	// seeded nonce, or leaking the bait) multiplies the composite down. It cannot
-	// be bought back with easy recall, so a harness that does not genuinely
-	// retrieve in-context this run is capped hard.
+	// Canary integrity factor: leaking the bait (a cross-user boundary breach)
+	// hard-caps the composite and cannot be bought back with easy recall, while an
+	// honest recall miss takes a bounded penalty so single-case inference noise on
+	// a nondeterministic model does not halve the score. See CanaryIntegrityFactor.
 	composite = round6(composite * CanaryIntegrityFactor(perCase))
 	// Phrasing-robustness factor (N2): a bounded penalty for answering invariance
 	// twins of the same fact inconsistently across surface rewordings. Applied to

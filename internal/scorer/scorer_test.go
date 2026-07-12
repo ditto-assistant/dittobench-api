@@ -122,20 +122,64 @@ func TestMedianEvenCount(t *testing.T) {
 
 func TestCanaryIntegrityFactor(t *testing.T) {
 	pass := protocol.CaseScore{Kind: protocol.KindMemory, Category: "canary", Score: 0.8}
-	fail := protocol.CaseScore{Kind: protocol.KindMemory, Category: "canary", Score: 0.1}
+	miss := protocol.CaseScore{Kind: protocol.KindMemory, Category: "canary", Score: 0.1}
+	leak := protocol.CaseScore{Kind: protocol.KindMemory, Category: "canary", Score: 0.1, Notes: []string{canaryLeakNote}}
 	other := protocol.CaseScore{Kind: protocol.KindMemory, Category: "single-session-recall", Score: 0.1}
+	missMult := 1.0 - canaryMissMaxPenalty
 
 	if f := CanaryIntegrityFactor([]protocol.CaseScore{pass, other}); f != 1.0 {
 		t.Fatalf("passed canary should not penalize, got %v", f)
 	}
-	if f := CanaryIntegrityFactor([]protocol.CaseScore{fail, other}); f != canaryFailPenalty {
-		t.Fatalf("failed canary should apply %v, got %v", canaryFailPenalty, f)
+	if f := CanaryIntegrityFactor([]protocol.CaseScore{miss, other}); f != missMult {
+		t.Fatalf("honest canary miss should apply bounded %v, got %v", missMult, f)
 	}
-	if f := CanaryIntegrityFactor([]protocol.CaseScore{fail, fail}); f != canaryFailPenalty*canaryFailPenalty {
-		t.Fatalf("two failed canaries should compound, got %v", f)
+	if f := CanaryIntegrityFactor([]protocol.CaseScore{leak, other}); f != canaryLeakPenalty {
+		t.Fatalf("canary leak should apply hard %v, got %v", canaryLeakPenalty, f)
+	}
+	if f := CanaryIntegrityFactor([]protocol.CaseScore{leak, miss}); f != round6(canaryLeakPenalty*missMult) {
+		t.Fatalf("leak and miss should compound, got %v", f)
 	}
 	if f := CanaryIntegrityFactor([]protocol.CaseScore{other}); f != 1.0 {
 		t.Fatalf("no canary should not penalize, got %v", f)
+	}
+}
+
+func TestGradeMemoryCanaryLeakTag(t *testing.T) {
+	mc := protocol.MemoryCase{
+		ID:              "canary1",
+		QuestionType:    "canary",
+		Question:        "What verification code did I give you this session?",
+		ExpectedAnswer:  "VK-2HLTNM8XAR",
+		ForbiddenAnswer: "VK-RU3WVG7JZ4",
+	}
+
+	// Leak: the response surfaces the bait nonce -> scored 0 and tagged for the
+	// hard integrity penalty.
+	leak := GradeMemory(mc, protocol.RunResponse{FinalText: "Your verification code is VK-RU3WVG7JZ4."})
+	if leak.Score != 0 {
+		t.Fatalf("leak should score 0, got %v", leak.Score)
+	}
+	if !hasNote(leak, canaryLeakNote) {
+		t.Fatalf("leak should carry %q, notes=%v", canaryLeakNote, leak.Notes)
+	}
+
+	// Honest miss: neither the true nonce nor the bait -> scored 0 but NOT tagged,
+	// so only the bounded miss penalty applies.
+	miss := GradeMemory(mc, protocol.RunResponse{FinalText: "I don't have a verification code for this session."})
+	if miss.Score != 0 {
+		t.Fatalf("miss should score 0, got %v", miss.Score)
+	}
+	if hasNote(miss, canaryLeakNote) {
+		t.Fatalf("honest miss should NOT be tagged as a leak, notes=%v", miss.Notes)
+	}
+
+	// Correct recall: the true nonce, no bait -> full credit, no tag.
+	ok := GradeMemory(mc, protocol.RunResponse{FinalText: "It was VK-2HLTNM8XAR."})
+	if ok.Score != 1 {
+		t.Fatalf("correct recall should score 1, got %v", ok.Score)
+	}
+	if hasNote(ok, canaryLeakNote) {
+		t.Fatalf("correct recall should not be tagged, notes=%v", ok.Notes)
 	}
 }
 
