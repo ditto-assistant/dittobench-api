@@ -35,9 +35,12 @@ jobs:
   # push to main the deploy job builds+pushes the image anyway, so this is
   # PR-only to avoid a redundant build there.
   docker-build:
-    name: docker image builds
+    name: docker image builds (${{ matrix.target }})
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [runtime, sandbox]
     steps:
       - uses: actions/checkout@v4
       - name: Set up Docker Buildx
@@ -46,6 +49,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          target: ${{ matrix.target }}
           push: false
           load: false
 

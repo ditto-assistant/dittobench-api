@@ -18,8 +18,20 @@ RUN CGO_ENABLED=1 GOOS=linux go build \
     -ldflags="-s -w -extldflags '-static'" \
     -o /out/dittobench-api ./cmd/dittobench-api
 
+# ---- validator sandbox runtime ----
+# This opt-in target runs the API beside a host Docker daemon. The binary shells
+# out to both git and docker when it materializes and runs miner submissions.
+# Keep the ordinary runtime below as the default target for hosted practice.
+FROM docker:28.3.3-cli-alpine3.22 AS sandbox
+RUN apk add --no-cache git
+COPY --from=build /out/dittobench-api /dittobench-api
+ENV HOME=/tmp
+USER 65532:65532
+EXPOSE 8000
+ENTRYPOINT ["/dittobench-api", "-port", "8000"]
+
 # ---- runtime stage ----
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM gcr.io/distroless/static-debian12:nonroot AS runtime
 COPY --from=build /out/dittobench-api /dittobench-api
 EXPOSE 8000
 ENTRYPOINT ["/dittobench-api", "-port", "8000"]
