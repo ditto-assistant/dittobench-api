@@ -555,6 +555,17 @@ func Aggregate(runID string, perCase []protocol.CaseScore) protocol.ScoreReport 
 	case memN > 0:
 		compositeStderr = seMem
 	}
+	// Scale the SE by the same gate factors the composite carries, so this is the
+	// SE of the *gated* composite the KOTH ledger compares, not of the ungated
+	// mean. The gates are pure multipliers on the mean (composite = gate*mean),
+	// so SE(gate*mean) = gate*SE(mean). Without this, whenever a gate < 1 the
+	// reported SE overstates the final composite's uncertainty and widens the
+	// dethrone band too far. The factors are the same pure functions of perCase
+	// applied to the composite above.
+	gate := ToolEfficiencyFactor(perCase) *
+		CanaryIntegrityFactor(perCase) *
+		MetamorphicConsistencyFactor(perCase)
+	compositeStderr *= gate
 
 	return protocol.ScoreReport{
 		RunID:           runID,
