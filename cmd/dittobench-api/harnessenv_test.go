@@ -1,70 +1,37 @@
 package main
 
-import "testing"
+import (
+	"testing"
 
-// TestHarnessSandboxEnvLegacy: with the lock off, the OpenRouter key + provider
-// are forwarded and caller-supplied env is honored (pre-lock BYOK behavior).
-func TestHarnessSandboxEnvLegacy(t *testing.T) {
-	t.Setenv("DITTOBENCH_MODEL_LOCK", "")
-	t.Setenv("DITTOBENCH_PROVIDER", "")
-	t.Setenv("CHUTES_API_KEY", "")
-	env := harnessSandboxEnv("sk-test-key", map[string]string{"FOO": "bar"})
-	if env["OPENROUTER_API_KEY"] != "sk-test-key" {
-		t.Fatalf("legacy path must forward the OpenRouter key, got %q", env["OPENROUTER_API_KEY"])
-	}
-	if env["DITTOBENCH_PROVIDER"] != "openrouter" {
-		t.Fatalf("legacy provider = %q, want openrouter", env["DITTOBENCH_PROVIDER"])
-	}
-	if env["FOO"] != "bar" {
-		t.Fatalf("caller env should pass through when unlocked, got %q", env["FOO"])
-	}
-}
+	"github.com/ditto-assistant/dittobench-api/internal/llm"
+)
 
-// TestHarnessSandboxEnvLegacyChutes: with the lock off, the operator can point
-// the crate at Chutes; the provider selection and Chutes settings pass through.
-func TestHarnessSandboxEnvLegacyChutes(t *testing.T) {
-	t.Setenv("DITTOBENCH_MODEL_LOCK", "")
-	t.Setenv("DITTOBENCH_PROVIDER", "chutes")
-	t.Setenv("CHUTES_API_KEY", "cpk-operator")
-	t.Setenv("CHUTES_BASE_URL", "https://llm.chutes.ai/v1")
-	env := harnessSandboxEnv("", nil)
-	if env["DITTOBENCH_PROVIDER"] != "chutes" {
-		t.Fatalf("provider = %q, want chutes", env["DITTOBENCH_PROVIDER"])
-	}
-	if env["CHUTES_API_KEY"] != "cpk-operator" || env["CHUTES_BASE_URL"] != "https://llm.chutes.ai/v1" {
-		t.Fatalf("Chutes settings must pass through on the legacy path: %v", env)
-	}
-}
-
-// TestHarnessSandboxEnvLockedForcesModel: with the lock on, the locked model +
-// provider are forced and no OpenRouter key is forwarded.
-func TestHarnessSandboxEnvLockedForcesModel(t *testing.T) {
-	t.Setenv("DITTOBENCH_MODEL_LOCK", "1")
+// TestHarnessSandboxEnvForcesModel: the frozen model + provider are forced and
+// no OpenRouter key is forwarded. HARNESS_MODEL is set to a bogus id to prove
+// the frozen model wins (it is not env-tunable).
+func TestHarnessSandboxEnvForcesModel(t *testing.T) {
 	t.Setenv("HARNESS_MODEL", "qwen/qwen2.5-72b-instruct")
-	env := harnessSandboxEnv("sk-secret", nil)
+	env := harnessSandboxEnv(nil)
 	if _, ok := env["OPENROUTER_API_KEY"]; ok {
 		t.Fatal("locked path must NOT forward the OpenRouter key")
 	}
-	if env["DITTOBENCH_MODEL"] != "qwen/qwen2.5-72b-instruct" {
-		t.Fatalf("locked model = %q, want the Qwen2.5 lock", env["DITTOBENCH_MODEL"])
+	if env["DITTOBENCH_MODEL"] != llm.LockedHarnessModel {
+		t.Fatalf("locked model = %q, want the frozen %q", env["DITTOBENCH_MODEL"], llm.LockedHarnessModel)
 	}
-	if env["DITTOBENCH_PROVIDER"] != "ollama" {
-		t.Fatalf("locked provider = %q, want the gateway provider", env["DITTOBENCH_PROVIDER"])
+	if env["DITTOBENCH_PROVIDER"] != lockedProvider {
+		t.Fatalf("locked provider = %q, want the frozen %q", env["DITTOBENCH_PROVIDER"], lockedProvider)
 	}
 }
 
-// TestHarnessSandboxEnvLockedChutesRelay: with the lock on and the relay as
-// the gateway, chat routes to the relay via the chutes provider while
-// embeddings keep hitting the local Ollama, and no real key enters the sandbox.
-func TestHarnessSandboxEnvLockedChutesRelay(t *testing.T) {
-	t.Setenv("DITTOBENCH_MODEL_LOCK", "1")
-	t.Setenv("HARNESS_MODEL", "Qwen/Qwen3-32B-TEE")
-	t.Setenv("HARNESS_PROVIDER", "chutes")
+// TestHarnessSandboxEnvRelayRouting: chat routes to the chat gateway via the
+// frozen chutes provider while embeddings keep hitting the local Ollama, and no
+// real key enters the sandbox.
+func TestHarnessSandboxEnvRelayRouting(t *testing.T) {
 	t.Setenv("HARNESS_GATEWAY_URL", "http://host.docker.internal:11435")
 	t.Setenv("HARNESS_EMBED_URL", "http://host.docker.internal:11434")
-	env := harnessSandboxEnv("sk-secret", nil)
-	if env["DITTOBENCH_PROVIDER"] != "chutes" || env["DITTOBENCH_MODEL"] != "Qwen/Qwen3-32B-TEE" {
-		t.Fatalf("locked chutes provider/model wrong: %v", env)
+	env := harnessSandboxEnv(nil)
+	if env["DITTOBENCH_PROVIDER"] != lockedProvider || env["DITTOBENCH_MODEL"] != llm.LockedHarnessModel {
+		t.Fatalf("locked provider/model wrong: %v", env)
 	}
 	if env["CHUTES_BASE_URL"] != "http://host.docker.internal:11435" {
 		t.Fatalf("chat must route to the relay: %q", env["CHUTES_BASE_URL"])
@@ -84,8 +51,6 @@ func TestHarnessSandboxEnvLockedChutesRelay(t *testing.T) {
 // invariant: a malicious req.Env cannot escape the locked model by setting the
 // OpenRouter key, swapping the model id, or redirecting the gateway.
 func TestHarnessSandboxEnvLockCannotBeOverridden(t *testing.T) {
-	t.Setenv("DITTOBENCH_MODEL_LOCK", "1")
-	t.Setenv("HARNESS_MODEL", "qwen/qwen2.5-72b-instruct")
 	hostile := map[string]string{
 		"OPENROUTER_API_KEY":  "sk-attacker",
 		"DITTOBENCH_MODEL":    "openai/gpt-4o",
@@ -97,16 +62,26 @@ func TestHarnessSandboxEnvLockCannotBeOverridden(t *testing.T) {
 		"OPENAI_BASE_URL":     "http://attacker.example/v1",
 		"BENIGN":              "ok", // non-locked keys still pass through
 	}
-	env := harnessSandboxEnv("sk-server", hostile)
-	for _, k := range []string{"OPENROUTER_API_KEY", "CHUTES_API_KEY", "CHUTES_BASE_URL", "OPENAI_API_KEY", "OPENAI_BASE_URL"} {
+	env := harnessSandboxEnv(hostile)
+	// Keys with no locked value must be dropped entirely; the OpenAI + OpenRouter
+	// selectors are never set on the locked path.
+	for _, k := range []string{"OPENROUTER_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL"} {
 		if _, ok := env[k]; ok {
 			t.Fatalf("req.Env must not be able to set %s under lock", k)
 		}
 	}
-	if env["DITTOBENCH_MODEL"] != "qwen/qwen2.5-72b-instruct" {
+	// The chutes selectors are set by the lock, so the attacker's values must be
+	// overwritten with the locked placeholder / gateway, never survive.
+	if env["CHUTES_API_KEY"] != "relay" {
+		t.Fatalf("req.Env kept a real Chutes key under lock: %q", env["CHUTES_API_KEY"])
+	}
+	if env["CHUTES_BASE_URL"] == "http://attacker.example/v1" {
+		t.Fatal("req.Env redirected the chat gateway under lock")
+	}
+	if env["DITTOBENCH_MODEL"] != llm.LockedHarnessModel {
 		t.Fatalf("req.Env overrode the locked model: %q", env["DITTOBENCH_MODEL"])
 	}
-	if env["DITTOBENCH_PROVIDER"] != "ollama" {
+	if env["DITTOBENCH_PROVIDER"] != lockedProvider {
 		t.Fatalf("req.Env overrode the locked provider: %q", env["DITTOBENCH_PROVIDER"])
 	}
 	if env["OLLAMA_BASE_URL"] == "http://attacker.example/v1" {

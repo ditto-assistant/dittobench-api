@@ -30,6 +30,20 @@ USER 65532:65532
 EXPOSE 8000
 ENTRYPOINT ["/dittobench-api", "-port", "8000"]
 
+# ---- model-relay ----
+# The model-pinning gateway (cmd/model-relay). A GPU-less validator runs it beside
+# the scorer to front Chutes: it forces the frozen model and thinking mode and
+# keeps the Chutes key out of the sandbox. Pure Go (no cgo), so a static build.
+FROM build AS relay-build
+RUN CGO_ENABLED=0 GOOS=linux go build \
+    -ldflags="-s -w" \
+    -o /out/model-relay ./cmd/model-relay
+
+FROM gcr.io/distroless/static-debian12:nonroot AS relay
+COPY --from=relay-build /out/model-relay /model-relay
+EXPOSE 11435
+ENTRYPOINT ["/model-relay"]
+
 # ---- runtime stage ----
 FROM gcr.io/distroless/static-debian12:nonroot AS runtime
 COPY --from=build /out/dittobench-api /dittobench-api

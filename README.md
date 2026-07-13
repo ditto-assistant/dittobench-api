@@ -152,14 +152,13 @@ curl -X POST localhost:8000/v1/submit \
 
 **Sandbox**: the engine builds your submission in Docker and runs it, matching
 the on-chain path (asynchronous; the build is slow). Returns `202` and a
-`run_id`; poll `GET /v1/runs/{id}`. Under the model lock the container reaches
-only the locked gateway; on the legacy path `env` is forwarded to the container
-(the model and keys the harness reads):
+`run_id`; poll `GET /v1/runs/{id}`. The container reaches only the locked gateway;
+any model or provider key in `env` is dropped, so you cannot route around the
+locked model:
 ```sh
 curl -X POST localhost:8000/v1/submit \
   -H 'Content-Type: application/json' \
-  -d '{"git_url":"https://github.com/<you>/<harness>","git_ref":"main","n":30,
-       "env":{"OPENROUTER_API_KEY":"sk-or-...","DITTOBENCH_MODEL":"openai/gpt-5.4-nano"}}'
+  -d '{"git_url":"https://github.com/<you>/<harness>","git_ref":"main","n":30}'
 # {"run_id":"...","status":"queued","poll":"/v1/runs/..."}
 ```
 
@@ -190,9 +189,12 @@ Config for the `run_size` path (all optional):
 
 | Source                  | Default            | Purpose                                              |
 | ----------------------- | ------------------ | ---------------------------------------------------- |
-| `openrouter_key` (body) | unset              | legacy Docker path only: forwarded to the crate's agent when the model lock is off |
-| `DITTOBENCH_MODEL_LOCK` | `false`            | score every harness against the locked model (`docs/model-lock.md`) |
-| `HARNESS_MODEL` env     | `qwen/qwen3-32b`   | the locked model id (must name what the gateway serves) |
+| `HARNESS_GATEWAY_URL` env | `http://host.docker.internal:11434` | the chat gateway serving the locked model |
+| `HARNESS_EMBED_URL` env | _(the gateway URL)_ | the embeddings Ollama, when it differs from the chat gateway |
+
+The locked model is scored against every harness; its id and provider are frozen
+in code (`internal/llm`, `cmd/dittobench-api`), not env-tunable
+(`docs/model-lock.md`).
 
 ### Crate build (on-chain only)
 
@@ -277,8 +279,8 @@ caller-supplied harness URLs, so it guards against abuse:
 - `PROTOCOL.md`: the shared wire contract (dataset, `/run`, score report).
 - `docs/judge-determinism.md`: why scoring is judge-free and how each case kind
   is graded.
-- `docs/model-lock.md`: the locked harness model and gateway backends (local
-  Ollama or vLLM, or `cmd/model-relay` fronting Chutes).
+- `docs/model-lock.md`: the locked harness model and the gateway
+  (`cmd/model-relay` fronting Chutes).
 
 ## License
 

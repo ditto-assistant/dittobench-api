@@ -14,8 +14,8 @@
 // a deterministic harness that stddev should be ~0, confirming the measurement
 // isolates dataset difficulty rather than harness noise.
 //
-//	calibrate --runs 100 --harness http://localhost:9000          # direct (tool-only, no key)
-//	calibrate --runs 100 --run-size full --harness ...   # full pipeline (--key is legacy, only with the model lock off)
+//	calibrate --runs 100 --harness http://localhost:9000   # direct (tool-only)
+//	calibrate --runs 100 --run-size full --harness ...      # full pipeline
 package main
 
 import (
@@ -45,13 +45,12 @@ func main() {
 	runs := flag.Int("runs", 100, "number of runs (rotating seed each)")
 	n := flag.Int("n", 30, "tool cases per run (direct path only)")
 	runSize := flag.String("run-size", "", "small|medium|full for the full pipeline; empty = direct path")
-	key := flag.String("key", os.Getenv("OPENROUTER_API_KEY"), "OpenRouter key (run_size only; never logged)")
 	repeatSeed := flag.Int64("repeat-seed", 0, "if non-zero, also run --repeats evals at this pinned seed (noise floor)")
 	repeats := flag.Int("repeats", 10, "repeats for the --repeat-seed noise-floor pass")
 	maxStddev := flag.Float64("max-stddev", 0.03, "pass/fail gate on stddev(tool_mean)")
 	flag.Parse()
 
-	c := &client{api: *api, harness: *harness, n: *n, runSize: *runSize, key: *key}
+	c := &client{api: *api, harness: *harness, n: *n, runSize: *runSize}
 	ctx := context.Background()
 
 	log.Printf("calibrate: %d runs against %s (run_size=%q n=%d)", *runs, *harness, *runSize, *n)
@@ -114,22 +113,20 @@ func report(label string, ss []sample) {
 type client struct {
 	api, harness string
 	n            int
-	runSize, key string
+	runSize      string
 }
 
 type submitReq struct {
-	HarnessURL    string `json:"harness_url"`
-	N             int    `json:"n,omitempty"`
-	RunSize       string `json:"run_size,omitempty"`
-	Seed          int64  `json:"seed,omitempty"`
-	OpenRouterKey string `json:"openrouter_key,omitempty"`
+	HarnessURL string `json:"harness_url"`
+	N          int    `json:"n,omitempty"`
+	RunSize    string `json:"run_size,omitempty"`
+	Seed       int64  `json:"seed,omitempty"`
 }
 
 func (c *client) run(ctx context.Context, seed int64) (sample, error) {
 	body := submitReq{HarnessURL: c.harness, Seed: seed}
 	if c.runSize != "" {
 		body.RunSize = c.runSize
-		body.OpenRouterKey = c.key
 	} else {
 		body.N = c.n
 	}
