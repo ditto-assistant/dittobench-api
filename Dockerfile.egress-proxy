@@ -1,4 +1,4 @@
-# Allowlisting egress proxy for the untrusted-miner sandbox network (C-ISO).
+# Allowlisting egress proxy for the untrusted-miner sandbox network.
 # Pure-Go, no cgo — a tiny static binary in a distroless base. See
 # docs/sandbox-egress-hardening.md.
 FROM golang:1.25-alpine AS build
