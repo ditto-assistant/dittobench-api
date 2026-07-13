@@ -1,26 +1,24 @@
 # Harness model lock (v2)
 
-Status: the current validation setup enforces the lock. Every miner harness is
-scored against ONE locked open-weight model, Qwen3-32B, served in a Trusted
-Execution Environment via `cmd/model-relay` fronting Chutes
-(`Qwen/Qwen3-32B-TEE`). The `DITTOBENCH_MODEL_LOCK` switch ships off by default
-in code and is set on for the deployed validators. Decision by Nick + Dan
-(2026-07-09): a single locked model limits the exploit surface.
+Every miner harness is scored against one locked open-weight model, Qwen3-32B,
+served in a Trusted Execution Environment (TEE) via `cmd/model-relay` fronting
+Chutes (`Qwen/Qwen3-32B-TEE`). The `DITTOBENCH_MODEL_LOCK` switch ships off by
+default in code and is set on for scored validators. A single locked model
+limits the exploit surface.
 
 ## Why
 
 If each validator scores a harness against whatever model the harness chooses:
 
-1. Scores are not comparable. Median-of-3 (three distinct validators scoring
-   one submission, platform takes the median) only means something if the three
-   ran the same model. Different models => noise the median cannot remove.
-2. Model choice is an attack surface. A miner can route to a bigger model, a
-   model the judge shares a family with (self-preference), or a provider quirk.
+1. Scores are not comparable. The median of three independent validators scoring
+   one submission only means something if the three ran the same model. Different
+   models add noise the median cannot remove.
+2. Model choice is an attack surface. A miner can route to a bigger model or
+   exploit a provider quirk to lift its score without improving the harness.
 
-Locking to one open-weight model removes both. The lock is Qwen3-32B (strong
-open-weight tool-calling; Chutes serves it in a TEE as `Qwen/Qwen3-32B-TEE`).
-Open weight also means the exact scoring model is a public, reproducible fact,
-part of the auditability goal.
+Locking to one open-weight model removes both. The lock is Qwen3-32B, served by
+Chutes in a TEE as `Qwen/Qwen3-32B-TEE`. Open weight also means the exact scoring
+model is a public, reproducible fact, part of the auditability goal.
 
 ## The lock is the network, not an env var
 
@@ -30,8 +28,8 @@ which an adversarial harness can ignore. The enforceable lock has two parts:
 1. Serve the locked model on the host gateway. An OpenAI-compatible endpoint
    (Ollama/vLLM) on the host serves the locked Qwen3-32B model. The sandbox already
    reaches the host gateway at `OLLAMA_BASE_URL=http://host.docker.internal:11434`
-   via the `NO_PROXY` bypass (today it serves embeddings only; the lock adds the
-   chat model).
+   via the `NO_PROXY` bypass (the same bypass carries embeddings; the lock routes
+   the chat model through it too).
 2. Hard-drop openrouter.ai from the egress allowlist. With
    `EGRESS_PROXY_ALLOW` no longer listing openrouter, and the host firewall
    dropping all forward egress except the proxy + host gateway
@@ -76,18 +74,13 @@ harden the container itself. The container config is env-driven
 `DITTOBENCH_SANDBOX_HARDEN`); the proxy allowlist and firewall are provisioned
 on the validator host.
 
-## In-repo plumbing (landed)
+## Enforcement in the engine
 
-- `internal/llm.HarnessModel()`: the model-routing indirection. Returns the
-  locked model id (`HARNESS_MODEL` env or the Qwen3-32B default). ONE place to bump
-  for v3.
-- `cmd/dittobench-api` `harnessSandboxEnv(apiKey, reqEnv)`: builds the sandbox
-  env. Under the lock it forces provider/model/gateway and drops the OpenRouter
-  key; the locked keys (`lockedEnvKeys`) are applied AFTER the caller-supplied
-  `req.Env` and any caller attempt to set them is discarded, so `req.Env` can
-  never override the lock. `RunDetails.Models.Harness` reports the locked model.
-- Gated by `DITTOBENCH_MODEL_LOCK` (default off in code, on for the deployed
-  validators). The locked path is a single switch; with it off, nothing changes.
+Under the lock the engine forces the provider, model, and gateway on the sandbox
+and drops any caller-supplied model or key. The locked values are applied after
+the request's own environment, so a request cannot override them, and the run
+details report the model that actually served the run. All of it is gated by
+`DITTOBENCH_MODEL_LOCK`; with the switch off, nothing changes.
 
 ## Config surface
 
@@ -123,12 +116,10 @@ model:
 ## Local-gateway alternative (GPU validators)
 
 A validator can serve the locked model on its own GPUs instead of the Chutes
-relay. Open item for that path: confirm the miner crate's provider contract for
-a local gateway. The crate (the miner SDK, outside this repo) must honor
-`DITTOBENCH_PROVIDER=<gateway>` + `OLLAMA_BASE_URL`/base-url to route chat at the
-host gateway. The deployed relay path uses `DITTOBENCH_PROVIDER=chutes`; a local
-gateway needs the crate's OpenAI-compatible provider string verified and
-`HARNESS_PROVIDER` set to match.
+relay. The crate honors `DITTOBENCH_PROVIDER=<gateway>` plus the gateway base URL
+to route chat at the host gateway. The deployed relay path uses
+`DITTOBENCH_PROVIDER=chutes`; a local gateway sets `HARNESS_PROVIDER` to the
+matching OpenAI-compatible provider string.
 
 Setup:
 

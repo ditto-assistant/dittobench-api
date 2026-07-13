@@ -2,7 +2,8 @@
 
 Reference-harness scores under the locked model, for tracking benchmark
 difficulty across `bench_version` and as the target a miner submission must beat.
-Regenerate with `scratchpad/baseline_qwen.py` (24 distinct seeds, `run_size=full`).
+Regenerated over 24 distinct seeds at `run_size=full`; the offline calibrator is
+`cmd/benchcal`.
 
 ## Run 1: bench_version 2, v0.7.0
 
@@ -70,8 +71,8 @@ sit either side).
 
 A 0.000 here is a real reference-harness gap, not a broken case: the model never
 selects the calendar-create tool though `calendar_create_event` is offered every
-run (`calendar_search` scores 0.85, so the tool path works; the model just does
-not invoke create).
+run (`calendar_search` scores 0.85, so the tool path works; the model does not
+invoke create).
 
 | category | mean | SE | n |
 | --- | --- | --- | --- |

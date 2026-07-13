@@ -9,7 +9,7 @@ All payloads are JSON over HTTP.
 ## Dataset
 
 The validator generates a `Dataset` of tool-calling cases. The harness never
-receives expected answers — only the prompt and the tool catalog.
+receives expected answers, only the prompt and the tool catalog.
 
 ```jsonc
 // Dataset
@@ -58,8 +58,8 @@ The validator sends one `RunRequest` per case; the harness returns a
   "system_prompt": "You are Ditto, ...",
   "user_input": "What's the latest on quantum computing?",
   "tools": [ /* ToolDefinition */ ],
-  "tool_endpoint": "http://host.docker.internal:49port/tool", // optional (observed tool execution) — see below
-  "user_id": "miner"                                          // optional — memory graph to answer from
+  "tool_endpoint": "http://host.docker.internal:49207/tool", // optional (observed tool execution); see below
+  "user_id": "miner"                                         // optional: memory graph to answer from
 }
 ```
 
@@ -81,7 +81,7 @@ The validator sends one `RunRequest` per case; the harness returns a
   ],
   "prompt_tokens": 320,
   "output_tokens": 64,
-  "latency_ms": 42,         // ignored — the validator measures latency itself
+  "latency_ms": 42,         // ignored; the validator measures latency itself
   "answer": "Lisbon",       // optional: the bare value final_text asserts.
                             // The deterministic grader matches this slot when
                             // present and falls back to final_text containment.
@@ -101,16 +101,16 @@ The validator sends one `RunRequest` per case; the harness returns a
 Two optional `RunRequest` fields let the validator **observe** what a harness
 actually does, instead of trusting its self-reported `tool_calls`.
 
-**`tool_endpoint`** — a validator-served mock tool-execution URL. A harness that
+**`tool_endpoint`**: a validator-served mock tool-execution URL. A harness that
 supports observed execution should EXECUTE each non-memory catalog tool call by
 POSTing a `ToolExecRequest` to this URL and using the returned
 `ToolExecResponse.result`, rather than stubbing the tool locally. Doing so lets
 the validator (a) score the **observed** trajectory (self-report is untrusted),
-and (b) check that the answer **incorporates the returned content** — some cases
+and (b) check that the answer **incorporates the returned content**: some cases
 ask for a value that exists *only* in the served result (a fabricated per-seed
 number), so it cannot be answered without executing the tool. **Memory tools**
 (`search_memories`, `search_subjects`, `fetch_memories`,
-`search_memories_in_subjects`) are NOT served here — answer those from your own
+`search_memories_in_subjects`) are NOT served here; answer those from your own
 seeded memory. The field is **additive-optional**: a harness that ignores it
 still scores, but selection-only and at a **capped ceiling (0.5)** on the
 categories the endpoint would have served.
@@ -126,7 +126,7 @@ categories the endpoint would have served.
 { "error": "tool not available via this endpoint: search_memories" }
 ```
 
-**`user_id`** — the memory graph the case must be answered from. The haystack is
+**`user_id`**: the memory graph the case must be answered from. The haystack is
 seeded per user (`SeedRequest.user_id`); some runs seed a **second** persona
 under a different `user_id`, and isolation cases query one user while the other
 holds a conflicting value. A harness must answer only from the requested user's
@@ -150,7 +150,7 @@ After running every case, the validator produces a `ScoreReport`.
   "n": 30,
   "per_case": [ /* CaseScore */ ],
   // Advisory anti-copy metadata (omitted on the local harness_url path). An
-  // AST-level shingle MinHash sketch of the built crate — the *shape* of the
+  // AST-level shingle MinHash sketch of the built crate: the *shape* of the
   // parse tree, never identifier/literal text, so it survives renaming +
   // reformatting. The validator forwards it, UNSIGNED, to the platform's
   // anti-copy gate as one signal among several (see "Anti-copy signals"
@@ -205,24 +205,23 @@ can be re-graded offline. See `docs/judge-determinism.md`.
 ## Anti-copy signals
 
 On-chain, the platform runs a duplicate-detection gate that compares each
-uploaded crate against other miners' eligible submissions across several
-dimensions (exact bytes, normalized source, lexical + structural fingerprints,
-prompt/strategy text, and a semantic code-embedding). None of it runs in this
-practice API, and none of it affects a score. This validator only **contributes
-two inputs** to that gate, both carried out-of-band and never folded into the
+uploaded crate against other miners' eligible submissions across exact bytes,
+normalized source, and lexical and structural fingerprints. None of it runs in
+this practice API, and none of it affects a score. This validator contributes
+two inputs to that gate, both carried out-of-band and never folded into the
 composite:
 
-- **`structural_fingerprint`** — the AST-shape MinHash sketch above, forwarded
+- **`structural_fingerprint`**: the AST-shape MinHash sketch above, forwarded
   UNSIGNED with the `ScoreReport`. It is the parse-tree shape only (no
   identifier or literal text), so reformatting and renaming do not change it.
-- **Observed tool-call trajectory** — the ordered sequence of observed tool
+- **Observed tool-call trajectory**: the ordered sequence of observed tool
   **names** per case (`CaseScore.called`), captured when a harness executes
   through `tool_endpoint` (see *Observed tool execution* above). Because it is
   what the agent *did* at runtime, not source text, it is a copy signal a
   source-level edit cannot forge; the platform's behavioral check compares these
   name-sequences on a shared dataset seed. Each call's full `(name, args, hop)`
-  is recorded server-side during execution, but the forwarded score report
-  currently carries the per-case name order only (`called`), not the arguments.
+  is recorded server-side during execution; the forwarded score report carries
+  the per-case name order (`called`), not the arguments.
 
 The gate holds exact/near-exact copies for review (the earlier upload wins by
 first-seen) and requires agreement across independent signals before flagging

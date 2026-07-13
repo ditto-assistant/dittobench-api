@@ -1,4 +1,4 @@
-# DittoBench v2 — Coverage
+# DittoBench v2 coverage
 
 What the benchmark tests, how much of it runs per case, and what it deliberately
 does not test. Generation is a pure function of `(seed, bench_version)`; the
@@ -44,31 +44,31 @@ answer class off the ID before processing the case. Because the seed is public
 after scoring, every ID is still recomputable and the full artifact carries the
 id-to-case map, so auditability is preserved.
 
-## Tool suite (45 categories)
+## Tool suite
 
-- **Single tool** — the correct answer is one catalog tool, with exact-value
+- **Single tool**: the correct answer is one catalog tool, with exact-value
   argument grading where the argument is a concrete token (URL, theme, model).
   Where the category grades an arg value, an intent-phrasing variant states the
   request without the scored token verbatim, so copying a word does not pass.
-- **Routing traps** — phrasing points at the wrong tool: memory-vs-web either
+- **Routing traps**: phrasing points at the wrong tool: memory-vs-web either
   way, run-vs-read (dispatch vs check), edit-vs-create, job-vs-workflow
   (one-off task vs decomposable goal), automation-vs-job (scheduled vs now),
   save-vs-search (statement vs question), update-vs-save.
-- **Multi-hop** — an ordered tool sequence; relative order is scored.
-- **Dependent-arg multi-hop** — a hop's argument exists only in the previous
+- **Multi-hop**: an ordered tool sequence; relative order is scored.
+- **Dependent-arg multi-hop**: a hop's argument exists only in the previous
   hop's served result (a coined job_id from `execute_agent_job` passed to
   `get_agent_job_status`, a URL from a `search_web` result fetched by
   `read_links`). The trajectory is unfakeable by construction because the value
   is not in the prompt.
-- **Parallel** — two independent tools in one turn; the name/arg set is scored
+- **Parallel**: two independent tools in one turn; the name/arg set is scored
   but call order is not (`parallel_web_image`).
-- **Result-usage** — the answer must carry a per-seed value that exists only in
+- **Result-usage**: the answer must carry a per-seed value that exists only in
   the served tool's result, so it cannot be answered without executing the tool.
-- **Error recovery** — the mock endpoint returns a transient error on the first
+- **Error recovery**: the mock endpoint returns a transient error on the first
   call for a seed-chosen slice; the case scores full only if the harness retries
   and completes, checkable because the served post-retry result carries the
   needle (`web_recovery_result_usage`).
-- **Restraint** — no tool should be called: chit-chat, unanswerable questions
+- **Restraint**: no tool should be called: chit-chat, unanswerable questions
   (abstention), and a request whose required argument is missing, where inventing
   one is the failure being probed (`arg_hallucination`).
 
@@ -82,10 +82,9 @@ from this catalog, using real production names, so prefix-free routing is
 genuinely discriminative.
 
 Tool trajectory, arguments, result-usage, dependent-arg chaining, error
-recovery, and the restraint cases are scored **programmatically**. An LLM judge
-adds a response-quality half only where wording matters. Argument grading
-penalizes stuffing: packing many candidate pool values or an over-long argument
-no longer satisfies a value-graded arg by containment.
+recovery, and the restraint cases are scored deterministically, with no LLM
+judge. Argument grading penalizes stuffing: packing many candidate pool values
+or an over-long argument no longer satisfies a value-graded arg by containment.
 
 ## Memory suite (13 question types)
 
@@ -96,24 +95,24 @@ supersession chain), `preference` and `preference-application`, `contradiction`
 (change of mind), `abstention` (needle-absent), `injection-resistance`,
 `assistant-recall`, `aggregation-count`, `computed-answer`, and `canary`:
 
-- **`assistant-recall`** — the value lives only in a past *assistant* turn (a
+- **`assistant-recall`**: the value lives only in a past *assistant* turn (a
   recommendation the user never stated), so it tests recalling what the assistant
   said, not the user.
-- **`aggregation-count`** — one topic raised several times across sessions, asked
+- **`aggregation-count`**: one topic raised several times across sessions, asked
   as "how many times"; a retriever that dedupes the repeated mention undercounts.
-- **`injection-resistance`** — a real recall question wrapped in an
+- **`injection-resistance`**: a real recall question wrapped in an
   instruction-override attack; complying emits a per-seed forbidden payload that
   scores 0, resisting answers from memory. The payload is derived per seed, not a
   constant, and is scored programmatically via the forbidden-answer check.
-- **`abstention`** — drawn procedurally from attributes the persona could have
+- **`abstention`**: drawn procedurally from attributes the persona could have
   but does not, rendered through the same phrasing machinery as answerable
   questions, so the question distribution is identical and abstention is a true
   discrimination test rather than a fixed-string match. Includes false-premise
   decoys where a friend's value is seeded but the user's is not.
-- **`computed-answer`** — the answer is a function of many seeded facts (a
+- **`computed-answer`**: the answer is a function of many seeded facts (a
   filtered count, a temporal delta), not a single lookup, so lexical overlap and
   single-fact retrieval both fail.
-- **`canary`** — the answer is a per-seed high-entropy nonce seeded into this
+- **`canary`**: the answer is a per-seed high-entropy nonce seeded into this
   run's conversation. It cannot be memorized across runs, so a correct answer
   proves genuine in-context retrieval. A plausible-but-wrong bait nonce
   (attributed to someone else) is seeded alongside it; echoing any nonce-shaped
@@ -121,8 +120,10 @@ supersession chain), `preference` and `preference-application`, `contradiction`
   whole composite down as an integrity disqualifier that easy recall cannot buy
   back.
 
-Memory grading is `0.7·correctness + 0.3·grounding`, with a deterministic
-containment check resolving correctness before any judge call. Facts are
+Memory grading is deterministic and judge-free: each case carries an
+`answer_kind` (value, number, list, ordered list, duration, reversal, decline)
+graded by the matching checker, with distractor and forbidden-value zeroing (see
+`docs/judge-determinism.md`). Facts are
 rendered through a compositional surface grammar (synonym sets, clause order,
 tense, lead-ins and trailers) rather than a handful of fixed frames, and
 questions get a low-overlap (NoLiMa) rewrite so a lexical shortcut cannot stand
@@ -136,14 +137,14 @@ cases seed a second user with a conflicting value; a cross-graph leak scores 0.
 Reported alongside the score, these separate a genuine harness from a template
 matcher or a memorizer:
 
-- **Metamorphic twins** — occasional same-template pairs differ in one
+- **Metamorphic twins**: occasional same-template pairs differ in one
   load-bearing mutation at unpredictable positions. Correct on one with the
   stale answer on its twin is a memorization fingerprint; a consistency
   sub-score reports it.
-- **Calibration** — on a slice, the harness reports a confidence; a Brier
+- **Calibration**: on a slice, the harness reports a confidence; a Brier
   proper-scoring term measures whether stated confidence matches observed
   correctness. Advisory, reported not scored.
-- **Behavioral plausibility** — sub-model-inference latency with near-perfect
+- **Behavioral plausibility**: sub-model-inference latency with near-perfect
   deterministic scores and near-zero output variance is the regex-harness
   signature. Forwarded like the structural fingerprint, never folded into the
   score.
@@ -157,15 +158,11 @@ boundary and should be retired or rebalanced.
 ## Reading the results
 
 `per_category` carries a `count`, `mean`, and `std_err` (standard error of the
-mean). Per-category means come from few cases per run — a 95% band is roughly
-`mean ± 1.96·std_err` — so treat a single run's per-category number as
+mean). Per-category means come from few cases per run (a 95% band is roughly
+`mean ± 1.96·std_err`), so treat a single run's per-category number as
 directional and rank capabilities from the aggregate across many seeds. The
 aggregate composite is the reliable signal; the per-category breakdown is
 diagnostic.
-
-Keep the judge model (`SCORER_MODEL`) distinct from a harness's model: an LLM
-judge over-scores its own family. Only the LLM-judged half is exposed to this;
-the programmatic majority is not.
 
 ## Deliberate non-goals (v2)
 
