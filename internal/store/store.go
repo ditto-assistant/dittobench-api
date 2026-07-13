@@ -102,14 +102,6 @@ func (s *Store) SetRunSize(runID, runSize string) {
 	s.Update(runID, func(j *Job) { j.RunSize = runSize })
 }
 
-// SetProgress updates the coarse stage/done/total progress (and Status to the
-// matching stage if it names a known lifecycle state).
-func (s *Store) SetProgress(runID, stage string, done, total int) {
-	s.Update(runID, func(j *Job) {
-		j.Progress = Progress{Stage: stage, Done: done, Total: total}
-	})
-}
-
 // SetStage sets Status + the progress stage label together.
 func (s *Store) SetStage(runID string, status Status, done, total int) {
 	s.Update(runID, func(j *Job) {

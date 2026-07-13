@@ -292,7 +292,8 @@ func CanaryIntegrityFactor(perCase []protocol.CaseScore) float64 {
 // member cases the harness answered consistently — all correct or all incorrect
 // (Ideas #3). A phrasing-brittle harness that gets one twin right and its
 // reworded twin wrong scores below 1.0. Returns nil when no twin groups ran
-// (nothing to measure). Advisory only — never folded into the composite.
+// (nothing to measure). The raw rate is advisory; the derived
+// MetamorphicConsistencyFactor is what folds into the composite.
 func MetamorphicConsistency(perCase []protocol.CaseScore) *float64 {
 	groups := map[string][]bool{}
 	for _, cs := range perCase {
@@ -396,16 +397,6 @@ func memoryCaseScore(mc protocol.MemoryCase, resp protocol.RunResponse, score fl
 		cs.Category = "memory"
 	}
 	return cs
-}
-
-// ScoreMemoryCase builds a memory CaseScore from a binary correctness verdict.
-// Retained for legacy yes/no callers; the graded path is GradeMemory.
-func ScoreMemoryCase(mc protocol.MemoryCase, resp protocol.RunResponse, correct bool) protocol.CaseScore {
-	c := 0.0
-	if correct {
-		c = 1.0
-	}
-	return memoryCaseScore(mc, resp, c)
 }
 
 // GradeMemory scores one memory case with the public deterministic grader

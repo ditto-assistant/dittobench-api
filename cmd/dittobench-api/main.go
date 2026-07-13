@@ -181,7 +181,7 @@ type publicMemoryCase struct {
 
 // redactDataset strips validator-internal grading data, leaving only what the
 // harness sees. See the "validator-internal" comments on ToolCase/MemoryCase in
-// pkg/protocol.
+// the dittobench-datagen protocol module.
 func redactDataset(ds protocol.Dataset) publicDataset {
 	pub := publicDataset{Seed: ds.Seed, GeneratedAt: ds.GeneratedAt}
 	for _, c := range ds.ToolCases {
@@ -232,9 +232,10 @@ type submitRequest struct {
 	// platform issues (seed, dataset_sha256) with the ticket, and this guarantees
 	// the validator scored precisely that dataset. Empty on the practice path.
 	ExpectedDatasetSHA256 string `json:"dataset_sha256,omitempty"`
-	// OpenRouterKey is the miner's BYOK OpenRouter key, used for the generator
-	// (paraphrase) + judge (scoring). The hosted practice API requires it per
-	// request (it stores no keys); locally it falls back to the server env.
+	// OpenRouterKey is the legacy OpenRouter key, used only when the model lock
+	// is off. Generation is deterministic and grading is judge-free, so a locked
+	// run needs no key; on the legacy path the hosted practice API takes it per
+	// request (it stores no keys) and locally it falls back to the server env.
 	// May also be supplied via the Authorization: Bearer header.
 	OpenRouterKey string `json:"openrouter_key,omitempty"`
 }
@@ -334,7 +335,7 @@ func (s *server) handleSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// run_size selects the full SN118 pipeline (build + fresh anti-cheat dataset +
-	// memory seeding + LLM judge). Requires a buildable/runnable source + key.
+	// memory seeding + deterministic grading). Requires a buildable/runnable source.
 	if req.RunSize != "" {
 		s.submitRunSize(w, r, req)
 		return
@@ -972,8 +973,8 @@ func reportedHarnessModel() string {
 
 // modelLockEnabled reports whether the v2 harness model lock is active
 // (DITTOBENCH_MODEL_LOCK). Off by default so nothing breaks until infra
-// provisions the host gateway serving the locked model and drops openrouter.ai
-// from the egress allowlist; flip it on together with that infra. See
+// provisions the host gateway serving the locked model and restricts the egress
+// allowlist to the gateway's upstream; flip it on together with that infra. See
 // docs/model-lock.md and llm.HarnessModel.
 func modelLockEnabled() bool { return envBool("DITTOBENCH_MODEL_LOCK") }
 
@@ -997,10 +998,10 @@ var lockedEnvKeys = map[string]bool{
 //
 // With the v2 model lock ON (DITTOBENCH_MODEL_LOCK): the harness is scored
 // against ONE locked open-weight model (llm.HarnessModel) served by the host
-// gateway. No OpenRouter key is forwarded — the sandbox
-// cannot reach OpenRouter (dropped from the egress allowlist), so model choice
-// is not an attack surface and the median-of-3 validators' scores are
-// comparable. The locked provider/model/gateway are applied AFTER the
+// gateway. No provider key is forwarded — the sandbox cannot reach any LLM but
+// the locked gateway (the egress allowlist admits only the gateway upstream), so
+// model choice is not an attack surface and the median-of-3 validators' scores
+// are comparable. The locked provider/model/gateway are applied AFTER the
 // caller-supplied env and the caller's attempts to set any lockedEnvKey are
 // dropped, so req.Env can never override the lock.
 //

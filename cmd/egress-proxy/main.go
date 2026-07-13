@@ -1,7 +1,8 @@
 // Command egress-proxy is a minimal, fail-closed HTTPS CONNECT forward proxy
 // with a hostname allowlist. It fronts the untrusted miner sandbox network so a
-// harness's only permitted egress is to explicitly allowlisted hosts (e.g.
-// openrouter.ai:443). Anything not on the allowlist is refused.
+// harness's only permitted egress is to explicitly allowlisted hosts (e.g. the
+// locked model relay's upstream, llm.chutes.ai:443). Anything not on the
+// allowlist is refused.
 //
 // It is one of the two enforcement layers of the sandbox egress lockdown (see
 // the Sandbox egress section in docs/model-lock.md): this proxy allowlists by
@@ -10,8 +11,8 @@
 // separately DROPs any direct egress that bypasses the proxy — so a harness that
 // ignores HTTPS_PROXY and dials the internet fails closed rather than leaking.
 //
-// Deliberately CONNECT-only: the sandbox's sole legitimate outbound is HTTPS to
-// OpenRouter (the host Ollama gateway and loopback bypass the proxy via
+// Deliberately CONNECT-only: the only legitimate outbound is HTTPS to an
+// allowlisted host (the host model gateway and loopback bypass the proxy via
 // NO_PROXY). Plain-HTTP proxying and every non-CONNECT method are rejected, so
 // there is no request-forwarding surface to abuse.
 package main
@@ -134,8 +135,8 @@ func tunnel(a, b net.Conn) {
 }
 
 // hostAllowed reports whether host matches an allowlist entry exactly or as a
-// subdomain of it (entry "openrouter.ai" allows "openrouter.ai" and
-// "api.openrouter.ai", never "notopenrouter.ai" or "openrouter.ai.evil.com").
+// subdomain of it (entry "chutes.ai" allows "chutes.ai" and
+// "llm.chutes.ai", never "notchutes.ai" or "chutes.ai.evil.com").
 func hostAllowed(host string, allow []string) bool {
 	h := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
 	for _, a := range allow {

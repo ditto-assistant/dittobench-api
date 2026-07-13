@@ -16,23 +16,6 @@ func TestFinishTool(t *testing.T) {
 	}
 }
 
-func TestScoreMemoryCase(t *testing.T) {
-	mc := protocol.MemoryCase{ID: "m1", QuestionType: "multi-session"}
-	correct := ScoreMemoryCase(mc, protocol.RunResponse{LatencyMs: 50}, true)
-	if correct.Score != 1.0 || !correct.Correct || correct.Kind != protocol.KindMemory {
-		t.Fatalf("correct memory case: %+v", correct)
-	}
-	wrong := ScoreMemoryCase(mc, protocol.RunResponse{}, false)
-	if wrong.Score != 0.0 || wrong.Correct {
-		t.Fatalf("wrong memory case: %+v", wrong)
-	}
-	// empty question type defaults category to "memory"
-	def := ScoreMemoryCase(protocol.MemoryCase{ID: "m2"}, protocol.RunResponse{}, false)
-	if def.Category != "memory" {
-		t.Fatalf("expected default category 'memory', got %q", def.Category)
-	}
-}
-
 func TestAggregate(t *testing.T) {
 	perCase := []protocol.CaseScore{
 		{CaseID: "t1", Category: "web_search", Kind: protocol.KindTool, Score: 1.0, LatencyMs: 10},

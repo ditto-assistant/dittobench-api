@@ -1,8 +1,9 @@
 # DittoBench Wire Protocol
 
 This is the shared contract between the **practice validator** (this repo) and
-the **miner harness** (`dittobench-starter-kit`). The Go types live in
-`pkg/protocol/protocol.go` and must match the starter kit **byte-for-byte**.
+the **miner harness** (`dittobench-starter-kit`). The Go types live in the public
+`github.com/ditto-assistant/dittobench-datagen/protocol` module and must match the
+starter kit **byte-for-byte**.
 
 All payloads are JSON over HTTP.
 
@@ -176,20 +177,38 @@ After running every case, the validator produces a `ScoreReport`.
 
 ## Scoring rules
 
-Per tool case:
+Grading is deterministic and judge-free.
 
-- `matched` = Σ over expected tools of `min(expected_count, observed_count)`.
-- `base` = `matched / total_expected`.
-- `penalty` = `0.1` per unexpected/extra call (skipped if `allow_extra_tools`).
-- `tool_score` = `clamp(base - penalty, 0, 1)`.
+Per tool case, scored on the trajectory the validator observed execute (a
+self-reported trajectory is capped, since it proves nothing):
+
+- `tool_score` = `0.4·name-F1 + 0.4·arg-F1 + 0.2·(order/extra-call discipline)`.
+  name-F1 and arg-F1 score tool selection and argument grounding against the
+  expected calls (both missing a needed call and making extra ones lose points);
+  the last term scores call order and extra-call discipline, and its penalty
+  scales with the call count.
 - No-expected-tool cases score `1.0` iff the harness called nothing, else `0.0`.
 
-`composite` is the mean `tool_score`. When a harness executes its calls through
-`tool_endpoint`, the validator scores the **observed** trajectory (not
-self-report) and folds a tool-efficiency factor (`≤1`) into the composite that
-penalizes overshooting the expected call budget on correctly-answered cases.
-`median_ms` is the median per-case latency, **measured by the validator** (the
-`/run` round trip); a self-reported `latency_ms` is ignored.
+Per memory case, graded by typed `answer_kind` (value, number, list, ordered
+list, duration, activity, decline, and so on) with normalized matching against
+the answer key. Surfacing a forbidden value (another user's fact, a decoy, or a
+planted canary bait) or declining an answerable question scores the case `0`.
+
+`composite = (0.5·tool_mean + 0.5·memory_mean)` scaled by three bounded integrity
+factors, each `1.0` when it does not apply:
+
+- **tool-efficiency**: penalizes overshooting the expected call budget on
+  correctly-answered cases the validator watched execute through `tool_endpoint`.
+- **canary-integrity**: a canary breach drops the composite. Echoing a planted
+  bait value (a leak) multiplies by `0.5`; an honest miss by `0.85`; failed
+  canaries compound.
+- **metamorphic-consistency**: penalizes answering paraphrased twins of the same
+  fact inconsistently.
+
+`tool_mean`, `memory_mean`, and `per_category` stay pure accuracy; the factors
+touch only the composite. `median_ms` is the median per-case latency, **measured
+by the validator** (the `/run` round trip); a self-reported `latency_ms` is
+ignored and latency stays out of the composite.
 
 > This local scope is tool-calling accuracy + efficiency; latency is measured and
 > reported but advisory. Memory recall and the memory/tool composite are scored by

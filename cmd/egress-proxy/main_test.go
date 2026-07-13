@@ -11,18 +11,18 @@ import (
 )
 
 func TestHostAllowed(t *testing.T) {
-	allow := parseList("openrouter.ai, Example.COM")
+	allow := parseList("chutes.ai, Example.COM")
 	cases := []struct {
 		host string
 		want bool
 	}{
-		{"openrouter.ai", true},
-		{"api.openrouter.ai", true},       // subdomain
-		{"OpenRouter.ai", true},           // case-insensitive
-		{"openrouter.ai.", true},          // trailing dot
-		{"example.com", true},             // allowlist entry was mixed-case
-		{"notopenrouter.ai", false},       // suffix but not a dot-boundary subdomain
-		{"openrouter.ai.evil.com", false}, // evil suffix trick
+		{"chutes.ai", true},
+		{"api.chutes.ai", true},       // subdomain
+		{"Chutes.ai", true},           // case-insensitive
+		{"chutes.ai.", true},          // trailing dot
+		{"example.com", true},         // allowlist entry was mixed-case
+		{"notchutes.ai", false},       // suffix but not a dot-boundary subdomain
+		{"chutes.ai.evil.com", false}, // evil suffix trick
 		{"evil.com", false},
 		{"", false},
 	}
@@ -34,7 +34,7 @@ func TestHostAllowed(t *testing.T) {
 }
 
 func TestEmptyAllowlistDeniesAll(t *testing.T) {
-	if hostAllowed("openrouter.ai", parseList("")) {
+	if hostAllowed("chutes.ai", parseList("")) {
 		t.Fatal("empty allowlist must deny every host (fail-closed)")
 	}
 }
@@ -47,9 +47,9 @@ func TestParsePorts(t *testing.T) {
 }
 
 func TestServeHTTP_NonConnectRejected(t *testing.T) {
-	p := newProxy(config{allow: parseList("openrouter.ai"), ports: parsePorts("443")})
+	p := newProxy(config{allow: parseList("chutes.ai"), ports: parsePorts("443")})
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "http://openrouter.ai/", nil)
+	req := httptest.NewRequest(http.MethodGet, "http://chutes.ai/", nil)
 	p.ServeHTTP(rec, req)
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("GET got %d, want 405", rec.Code)
@@ -57,7 +57,7 @@ func TestServeHTTP_NonConnectRejected(t *testing.T) {
 }
 
 func TestServeHTTP_DeniedHostForbidden(t *testing.T) {
-	p := newProxy(config{allow: parseList("openrouter.ai"), ports: parsePorts("443")})
+	p := newProxy(config{allow: parseList("chutes.ai"), ports: parsePorts("443")})
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodConnect, "//evil.com:443", nil)
 	req.Host = "evil.com:443"
@@ -69,10 +69,10 @@ func TestServeHTTP_DeniedHostForbidden(t *testing.T) {
 
 func TestServeHTTP_DeniedPortForbidden(t *testing.T) {
 	// Host is allowlisted but the port is not (only 443 permitted).
-	p := newProxy(config{allow: parseList("openrouter.ai"), ports: parsePorts("443")})
+	p := newProxy(config{allow: parseList("chutes.ai"), ports: parsePorts("443")})
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodConnect, "//openrouter.ai:22", nil)
-	req.Host = "openrouter.ai:22"
+	req := httptest.NewRequest(http.MethodConnect, "//chutes.ai:22", nil)
+	req.Host = "chutes.ai:22"
 	p.ServeHTTP(rec, req)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("CONNECT to denied port got %d, want 403", rec.Code)

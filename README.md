@@ -202,12 +202,13 @@ number, list, ordered list, duration, reversal, decline) with distractor
 zeroing, over the response's answer slot with a prose fallback.
 
 Composite: the mean tool score in direct mode; in the full pipeline
-`0.5·tool_mean + 0.5·memory_mean`, then multiplied by an observed
-tool-efficiency factor (at most 1) that penalizes harnesses whose observed
-trajectories overshoot the expected call budget on cases they answered
-correctly. Efficiency applies only to cases the validator watched execute
-through the tool endpoint; a remote harness that never routes through it is
-scored on accuracy alone.
+`0.5·tool_mean + 0.5·memory_mean`, then multiplied by three bounded integrity
+factors (each at most 1): observed tool-efficiency (penalizes overshooting the
+expected call budget on correctly-answered cases the validator watched execute
+through the tool endpoint), canary-integrity (a canary leak multiplies by 0.5, an
+honest miss by 0.85), and metamorphic-consistency (penalizes answering
+paraphrased twins of the same fact inconsistently). tool_mean, memory_mean, and
+per_category stay pure accuracy; the factors touch only the composite.
 
 Latency is measured by the validator (the `/run` round trip, never
 self-reported) and reported as `median_ms`. It is advisory telemetry: accuracy

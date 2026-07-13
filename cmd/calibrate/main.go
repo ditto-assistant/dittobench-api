@@ -15,7 +15,7 @@
 // isolates dataset difficulty rather than harness noise.
 //
 //	calibrate --runs 100 --harness http://localhost:9000          # direct (tool-only, no key)
-//	calibrate --runs 100 --run-size full --key sk-or-... --harness ...   # full SN118 pipeline
+//	calibrate --runs 100 --run-size full --harness ...   # full pipeline (--key is legacy, only with the model lock off)
 package main
 
 import (

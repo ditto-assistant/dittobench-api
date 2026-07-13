@@ -35,12 +35,13 @@ import (
 // mutates them.
 var (
 	// maxTarballBytes caps the compressed download. The platform caps uploads at
-	// 2 MiB (MAX_TARBALL_SIZE_BYTES); 8 MiB leaves headroom while still bounding
-	// a hostile presigned URL that streams an unbounded body.
-	maxTarballBytes int64 = 8 << 20 // 8 MiB compressed
+	// 20 MiB (MAX_TARBALL_SIZE_BYTES); this matches it so a max-size upload can be
+	// scored, while still bounding a hostile presigned URL that streams an
+	// unbounded body.
+	maxTarballBytes int64 = 20 << 20 // 20 MiB compressed
 	// maxExtractedBytes caps total uncompressed output (gzip-bomb guard: a few
 	// MiB of gzip can inflate to gigabytes).
-	maxExtractedBytes int64 = 64 << 20 // 64 MiB uncompressed
+	maxExtractedBytes int64 = 160 << 20 // 160 MiB uncompressed
 	// maxTarballFiles caps the member count (many-tiny-files / inode DoS).
 	maxTarballFiles = 20000
 )

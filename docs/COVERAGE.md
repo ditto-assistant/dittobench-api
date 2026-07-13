@@ -17,11 +17,11 @@ Each run generates a fresh dataset at one size:
 | medium   | 20         | 20           | 2         | ~42   |
 | full     | 60         | 50           | 4         | ~114  |
 
-The composite is `0.5·tool_mean + 0.5·memory_mean`, multiplied by a bounded
-observed-tool-efficiency factor and a canary-integrity factor (both explained
-below). tool_mean, memory_mean, and the per-category breakdown stay pure
-accuracy; the two factors touch only the composite. Latency and token cost are
-reported, never scored. A `composite_stderr` accompanies the composite so a
+The composite is `0.5·tool_mean + 0.5·memory_mean`, multiplied by three bounded
+factors (all explained below): observed tool-efficiency, canary-integrity, and
+metamorphic-consistency. tool_mean, memory_mean, and the per-category breakdown
+stay pure accuracy; the factors touch only the composite. Latency and token cost
+are reported, never scored. A `composite_stderr` accompanies the composite so a
 consumer (the subnet KOTH fold) can gate on measurement uncertainty rather than
 a flat margin.
 
@@ -116,9 +116,10 @@ supersession chain), `preference` and `preference-application`, `contradiction`
   run's conversation. It cannot be memorized across runs, so a correct answer
   proves genuine in-context retrieval. A plausible-but-wrong bait nonce
   (attributed to someone else) is seeded alongside it; echoing any nonce-shaped
-  token surfaces the bait and fails. Failing or leaking a canary multiplies the
-  whole composite down as an integrity disqualifier that easy recall cannot buy
-  back.
+  token surfaces the bait and fails. Leaking a canary (echoing the bait) multiplies
+  the whole composite by 0.5 as an integrity breach; an honest miss takes a
+  bounded 0.85 penalty. Failed canaries compound, so easy recall cannot buy the
+  integrity signal back.
 
 Memory grading is deterministic and judge-free: each case carries an
 `answer_kind` (value, number, list, ordered list, duration, reversal, decline)
@@ -139,8 +140,8 @@ matcher or a memorizer:
 
 - **Metamorphic twins**: occasional same-template pairs differ in one
   load-bearing mutation at unpredictable positions. Correct on one with the
-  stale answer on its twin is a memorization fingerprint; a consistency
-  sub-score reports it.
+  stale answer on its twin is a memorization fingerprint; the derived
+  metamorphic-consistency factor folds this into the composite.
 - **Calibration**: on a slice, the harness reports a confidence; a Brier
   proper-scoring term measures whether stated confidence matches observed
   correctness. Advisory, reported not scored.

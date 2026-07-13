@@ -37,7 +37,7 @@ import (
 // suite stratifies the type mix by a fixed per-run quota, applying a fixed
 // per-type score makes the structural memory_mean identical across seeds — i.e.
 // v2 removed v1's question-type-draw variance. The residual real σ comes
-// from the LLM judge + harness stochasticity, which this hermetic pass cannot
+// from model + harness stochasticity, which this hermetic pass cannot
 // see; it is measured by the hosted 30-seed run.
 var refMemoryCompetence = map[string]float64{
 	"single-session-recall":  0.90,

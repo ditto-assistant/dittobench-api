@@ -30,13 +30,15 @@ which an adversarial harness can ignore. The enforceable lock has two parts:
    reaches the host gateway at `OLLAMA_BASE_URL=http://host.docker.internal:11434`
    via the `NO_PROXY` bypass (the same bypass carries embeddings; the lock routes
    the chat model through it too).
-2. Hard-drop openrouter.ai from the egress allowlist. With
-   `EGRESS_PROXY_ALLOW` no longer listing openrouter, and the host firewall
-   dropping all forward egress except the proxy + host gateway
-   (see [Sandbox egress](#sandbox-egress) below), the host gateway is the ONLY
-   reachable LLM. A harness cannot route to any other model; it fails closed.
+2. Admit only the locked gateway on the egress allowlist. `EGRESS_PROXY_ALLOW`
+   is deny-by-default (empty admits nothing); under the lock it lists only the
+   relay's upstream (`llm.chutes.ai`), reached from the relay process, never the
+   sandbox. With the host firewall dropping all forward egress except the proxy +
+   host gateway (see [Sandbox egress](#sandbox-egress) below), the host gateway is
+   the ONLY reachable LLM. A harness cannot route to any other model; it fails
+   closed.
 
-Bonus: no OpenRouter key is forwarded into the sandbox at all under the lock, so
+Bonus: no provider key is forwarded into the sandbox at all under the lock, so
 the key-exfiltration threat (see [Sandbox egress](#sandbox-egress)) and the
 BYOK-spend concern both disappear on the locked path.
 
@@ -125,7 +127,7 @@ Setup:
 
 1. Run the host gateway (Ollama/vLLM) serving the Qwen3-32B model on
    `:11434` (OpenAI-compatible).
-2. Remove `openrouter.ai` from `EGRESS_PROXY_ALLOW` (drop to deny-all internet;
-   the gateway is reached via `NO_PROXY` + the firewall host-gateway allowance).
+2. Leave `EGRESS_PROXY_ALLOW` empty (deny-all internet; a local gateway needs no
+   upstream and is reached via `NO_PROXY` + the firewall host-gateway allowance).
 3. Set `DITTOBENCH_MODEL_LOCK=1`, `HARNESS_MODEL`, `HARNESS_PROVIDER`,
    `HARNESS_GATEWAY_URL` on the validator service.
