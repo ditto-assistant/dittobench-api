@@ -205,7 +205,7 @@ reproducible by anyone from the public `dittobench-datagen` module. See
 
 **Tool cases**: deterministic trajectory + argument accuracy
 (0.4 name-F1 + 0.4 arg-F1 + 0.2 order and extra-call discipline), scored on the
-validator-observed trajectory (Phase C); an observable case the harness didn't
+validator-observed trajectory; an observable case the harness didn't
 execute through the tool endpoint is capped at 0.5. Result-usage cases also
 require the served needle value in the answer.
 

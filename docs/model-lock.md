@@ -35,11 +35,11 @@ which an adversarial harness can ignore. The enforceable lock has two parts:
 2. Hard-drop openrouter.ai from the egress allowlist. With
    `EGRESS_PROXY_ALLOW` no longer listing openrouter, and the host firewall
    dropping all forward egress except the proxy + host gateway
-   (see sandbox-egress-hardening.md), the host gateway is the ONLY reachable
-   LLM. A harness cannot route to any other model; it fails closed.
+   (see [Sandbox egress](#sandbox-egress) below), the host gateway is the ONLY
+   reachable LLM. A harness cannot route to any other model; it fails closed.
 
 Bonus: no OpenRouter key is forwarded into the sandbox at all under the lock, so
-the key-exfiltration threat (sandbox-egress-hardening.md threat #1) and the
+the key-exfiltration threat (see [Sandbox egress](#sandbox-egress)) and the
 BYOK-spend concern both disappear on the locked path.
 
 This hard lock covers the sandbox path (`git_url`/`tarball_url`), where the
@@ -48,6 +48,33 @@ a harness the miner hosts, so the validator cannot force its model; practice
 relies on the starter kit defaulting to the locked model (`qwen/qwen3-32b`), and
 miners are told to keep it. Hard enforcement applies on-chain, where submissions
 are built and run in the sandbox.
+
+## Sandbox egress
+
+On-chain submissions build and run an untrusted miner crate in a Docker sandbox,
+so the container's egress is locked down independently of the model lock. The
+container runs on an isolated `ditto-sandbox` network with a host firewall that
+DROPs all forward egress except the host gateway and a CONNECT-only,
+hostname-allowlisting forward proxy (`cmd/egress-proxy`). Enforcement is
+fail-closed: a harness that ignores the proxy env and dials the internet
+directly is dropped, surfacing as a scoring failure, never a silent full-egress
+run.
+
+This defends the sandbox against a malicious submission:
+
+1. Key exfiltration. Under the model lock no OpenRouter (or provider) key is
+   forwarded into the sandbox at all, so there is no key to steal on the locked
+   path.
+2. Eval-set exfiltration. The seeded haystack and eval cases cannot be shipped
+   out to learn or game the dataset.
+3. Call-home / attack-proxy. The sandbox cannot receive commands or be used to
+   scan, DoS, or abuse third parties from our IP.
+
+`--cap-drop ALL`, `--pids-limit`, `no-new-privileges`, and memory/CPU bounds
+harden the container itself. The container config is env-driven
+(`DITTOBENCH_SANDBOX_EGRESS_NETWORK`, `DITTOBENCH_SANDBOX_EGRESS_PROXY`,
+`DITTOBENCH_SANDBOX_HARDEN`); the proxy allowlist and firewall are provisioned
+on the validator host.
 
 ## In-repo plumbing (landed)
 
@@ -59,8 +86,8 @@ are built and run in the sandbox.
   key; the locked keys (`lockedEnvKeys`) are applied AFTER the caller-supplied
   `req.Env` and any caller attempt to set them is discarded, so `req.Env` can
   never override the lock. `RunDetails.Models.Harness` reports the locked model.
-- Gated by `DITTOBENCH_MODEL_LOCK` (default off, matching the egress-hardening
-  phase-1 pattern) so nothing breaks until the gateway + firewall are provisioned.
+- Gated by `DITTOBENCH_MODEL_LOCK` (default off in code, on for the deployed
+  validators). The locked path is a single switch; with it off, nothing changes.
 
 ## Config surface
 

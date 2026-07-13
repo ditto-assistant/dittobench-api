@@ -181,7 +181,7 @@ type publicMemoryCase struct {
 
 // redactDataset strips validator-internal grading data, leaving only what the
 // harness sees. See the "validator-internal" comments on ToolCase/MemoryCase in
-// pkg/protocol and docs/scoring-decentralization-brief.md.
+// pkg/protocol.
 func redactDataset(ds protocol.Dataset) publicDataset {
 	pub := publicDataset{Seed: ds.Seed, GeneratedAt: ds.GeneratedAt}
 	for _, c := range ds.ToolCases {
@@ -635,7 +635,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	// when DITTOBENCH_ARTIFACT_DIR is set, persist the artifact keyed by run_id
 	// (the local-file form of the "upload rendered dataset" persistence; a
 	// platform bucket is the drop-in replacement for os.WriteFile here).
-	// Phase C: derive each tool case's live mock-tool environment (the Fixtures
+	// Observed execution: derive each tool case's live mock-tool environment (the Fixtures
 	// back the mock endpoint stood up below). The hashed artifact — assembled by
 	// gen.BuildArtifact so the run path and the generate service produce identical
 	// bytes for a seed — recomputes the fixture digests from the same (seed, case).
@@ -688,7 +688,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	tools := catalog.Catalog()
 	perCase := make([]protocol.CaseScore, 0, total)
 
-	// Phase C observed execution: stand up the validator's mock tool
+	// Observed tool execution: stand up the validator's mock tool
 	// endpoint. It serves deterministic, seed-derived results for external-world
 	// tools AND records the real trajectory, so tool cases are scored on what the
 	// validator observed rather than the harness's self-report.
@@ -832,7 +832,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		runID, protocol.BenchVersion, report.Composite, report.ToolMean, report.MemoryMean, observedTool, cappedTool)
 }
 
-// startToolServer stands up the Phase C mock tool-execution endpoint on an
+// startToolServer stands up the observed-execution mock tool endpoint on an
 // ephemeral host port, serving h at POST /tool. It returns the URL the harness
 // should use (reachable from where the harness runs) and a stop func. The URL is
 // empty when the harness cannot reach our loopback port — a remote hosted

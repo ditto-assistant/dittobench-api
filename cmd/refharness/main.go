@@ -71,7 +71,7 @@ func handleRun(w http.ResponseWriter, r *http.Request) {
 	}
 	calls := refharness.Route(req.UserInput, req.Tools)
 	finalText := "ok"
-	// Phase C observed execution: when the validator advertises a mock tool
+	// Observed tool execution: when the validator advertises a mock tool
 	// endpoint, actually EXECUTE the routed tools through it (so the validator
 	// observes the trajectory) and incorporate the returned content into the
 	// answer. A pure function of (prompt, tools, seeded endpoint) — still

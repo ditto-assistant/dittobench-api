@@ -86,7 +86,7 @@ const (
 	resultUsageAnswerWeight     = 0.6
 )
 
-// ComposeResultUsage finishes a result-usage tool case (Phase C). It scores
+// ComposeResultUsage finishes a result-usage tool case (observed execution). It scores
 // deterministically: 0.4·trajectory (did it call the
 // right tool) + 0.6·(answer carries the served needle value). Because the needle
 // is a fabricated per-seed value that exists only in the tool's returned content,
@@ -136,7 +136,7 @@ func stripSeparators(s string) string {
 
 // UnobservedCeiling caps the composite of an OBSERVABLE tool case (every expected
 // tool is validator-served) that the harness did NOT execute through the mock
-// tool_endpoint (Phase C). Its self-reported trajectory is untrusted:
+// tool_endpoint. Its self-reported trajectory is untrusted:
 // we cannot verify the tools actually ran, so the case is scored selection-only
 // and cannot reach full marks. Set at 0.5 so a right-tool self-report still earns
 // meaningful-but-capped credit, and a harness is materially rewarded for
@@ -144,11 +144,11 @@ func stripSeparators(s string) string {
 const UnobservedCeiling = 0.5
 
 // ScoreToolCaseObserved computes the deterministic tool-accuracy half of a case
-// under Phase C observed execution. When observed is non-empty (the harness
+// under observed execution. When observed is non-empty (the harness
 // routed its calls through the validator's mock endpoint) it REPLACES the
 // harness's self-reported tool_calls as the authoritative trajectory — the
 // validator grades what it actually saw execute, not what the harness claims.
-// When observed is nil it degrades to the pre-Phase-C self-report path
+// When observed is nil it degrades to the self-report path
 // (ScoreToolCase); the caller applies CapUnobserved for an observable case so an
 // unverifiable self-report cannot score full marks.
 func ScoreToolCaseObserved(c protocol.ToolCase, resp protocol.RunResponse, ok bool, observed []protocol.ObservedToolCall) protocol.CaseScore {

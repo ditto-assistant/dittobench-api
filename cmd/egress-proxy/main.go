@@ -3,9 +3,10 @@
 // harness's only permitted egress is to explicitly allowlisted hosts (e.g.
 // openrouter.ai:443). Anything not on the allowlist is refused.
 //
-// It is one of the two enforcement layers described in
-// docs/sandbox-egress-hardening.md (C-ISO): this proxy allowlists by hostname at
-// CONNECT time (solving the CDN rotating-IP problem), and a host firewall
+// It is one of the two enforcement layers of the sandbox egress lockdown (see
+// the Sandbox egress section in docs/model-lock.md): this proxy allowlists by
+// hostname at CONNECT time (solving the CDN rotating-IP problem), and a host
+// firewall
 // separately DROPs any direct egress that bypasses the proxy — so a harness that
 // ignores HTTPS_PROXY and dials the internet fails closed rather than leaking.
 //

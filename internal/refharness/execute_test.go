@@ -16,7 +16,7 @@ import (
 	"github.com/ditto-assistant/dittobench-datagen/toolexec"
 )
 
-// End-to-end of Phase C observed execution across three packages: the reference
+// End-to-end of observed tool execution across three packages: the reference
 // harness routes a prompt, EXECUTES the routed tools through the validator's mock
 // endpoint, the server OBSERVES the trajectory, and the scorer grades the
 // observation (not the self-report). Also checks the served needle flows back so

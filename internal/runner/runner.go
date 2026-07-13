@@ -154,11 +154,11 @@ func Seed(ctx context.Context, harnessURL string, req protocol.SeedRequest) (pro
 	return out, nil
 }
 
-// CaseOptions carries the optional Phase C per-case wire fields: a
+// CaseOptions carries the optional observed-execution per-case wire fields: a
 // validator-served mock tool-execution endpoint the harness should route its
 // non-memory tool calls through (so the validator observes the trajectory), and
 // the user_id the case's memory graph was seeded under (multi-graph isolation).
-// The zero value reproduces pre-Phase-C behavior (no endpoint, default user).
+// The zero value reproduces self-report behavior (no endpoint, default user).
 type CaseOptions struct {
 	ToolEndpoint string
 	UserID       string
@@ -168,7 +168,7 @@ type CaseOptions struct {
 // pass c (the toolcase) and prompt=c.Prompt; for a memory case, pass a synthetic
 // ToolCase with the question as the prompt. Exported so the pipeline can run +
 // score cases one at a time (appending partial results). opts carries the
-// optional Phase C fields (tool_endpoint, user_id).
+// optional observed-execution fields (tool_endpoint, user_id).
 func RunCase(ctx context.Context, harnessURL, caseID, prompt string, tools []protocol.ToolDefinition, opts CaseOptions) (protocol.RunResponse, error) {
 	return runOne(ctx, harnessURL, protocol.ToolCase{ID: caseID, Prompt: prompt}, tools, opts)
 }

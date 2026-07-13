@@ -15,11 +15,12 @@
 // Isolation: resource caps (memory/cpu/pids) + auto-remove + no-new-privileges,
 // plus opt-in hardening for untrusted (on-chain) submissions — `--cap-drop ALL`
 // (Harden) and an egress allowlist via a restricted network + forward proxy
-// (EgressNetwork/EgressProxy; see docs/sandbox-egress-hardening.md). With the
-// egress config unset it stays "good-faith practice" grade (full-egress bridge),
-// which is fine for the miner's own practice submissions; the on-chain validator
-// turns the egress + cap-drop hardening on and provisions the proxy + host
-// firewall. Deeper isolation (seccomp/gVisor/Kata) is tracked in that doc.
+// (EgressNetwork/EgressProxy; see the Sandbox egress section in
+// docs/model-lock.md). With the egress config unset it stays "good-faith
+// practice" grade (full-egress bridge), which is fine for the miner's own
+// practice submissions; the on-chain validator turns the egress + cap-drop
+// hardening on and provisions the proxy + host firewall. Deeper isolation
+// (seccomp/gVisor/Kata) is a later hardening step.
 package sandbox
 
 import (
@@ -99,7 +100,8 @@ type LocalDocker struct {
 	// EgressNetwork, when set, attaches the container to this user-defined docker
 	// network — the egress-restricted sandbox network (allowlisting proxy + host
 	// firewall) — instead of the default full-egress bridge. Empty = today's
-	// behavior. Env DITTOBENCH_SANDBOX_EGRESS_NETWORK. See docs/sandbox-egress-hardening.md.
+	// behavior. Env DITTOBENCH_SANDBOX_EGRESS_NETWORK. See the Sandbox egress
+	// section in docs/model-lock.md.
 	EgressNetwork string
 	// EgressProxy, when set, is injected as HTTPS_PROXY/HTTP_PROXY so the harness's
 	// outbound calls are forced through the allowlisting forward proxy (loopback +
@@ -285,8 +287,8 @@ func (d *LocalDocker) runArgs(image string, env map[string]string) []string {
 	}
 	if d.EgressNetwork != "" {
 		// The egress-restricted sandbox network (allowlisting proxy + host
-		// firewall) instead of the default full-egress bridge. See
-		// docs/sandbox-egress-hardening.md.
+		// firewall) instead of the default full-egress bridge. See the Sandbox
+		// egress section in docs/model-lock.md.
 		args = append(args, "--network", d.EgressNetwork)
 	}
 	// Let the harness reach host services (e.g. the Ollama embeddings server) at

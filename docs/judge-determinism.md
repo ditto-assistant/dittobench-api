@@ -15,8 +15,8 @@ gone with the judge itself.
 
 Tool cases: deterministic trajectory + argument accuracy
 (0.4 name-F1 + 0.4 arg-F1 + 0.2 order and extra-call discipline), scored on the
-validator-observed trajectory under Phase C. Result-usage cases also require
-the served needle value in the answer. There is no quality half: under the
+validator-observed trajectory when the validator serves observed tool execution.
+Result-usage cases also require the served needle value in the answer. There is no quality half: under the
 model lock every harness produces text with the same model, so response
 quality is a property of the locked model, not the miner.
 
