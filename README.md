@@ -252,5 +252,14 @@ not penalized.
 - `docs/model-lock.md` — the locked harness model and gateway backends
   (local Ollama/vLLM or `cmd/model-relay` fronting Chutes).
 
----
-Proprietary — Ditto Assistant.
+## Independent validators
+
+This is the same scoring engine a subnet validator runs, published so any
+validator can score submissions itself and third parties can verify the composite
+(no central scorer). See the subnet's
+[`VALIDATOR-ONBOARDING.md`](https://github.com/ditto-assistant/ditto-subnet/blob/main/docs/VALIDATOR-ONBOARDING.md)
+for how it slots into the validator worker.
+
+## License
+
+MIT — see [`LICENSE`](LICENSE).
