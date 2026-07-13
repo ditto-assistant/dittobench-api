@@ -46,6 +46,30 @@ similar host, not on a daemon-less platform. Run it directly:
 go run ./cmd/dittobench-api   # listens on :8000 (or $PORT; -port to override)
 ```
 
+Or build the validator image, which adds the Docker CLI and Git to the same
+statically linked API binary:
+
+```sh
+docker build --target sandbox -t dittobench-api:sandbox .
+docker run --rm \
+  --user 65532:65532 \
+  --group-add "$(stat -c '%g' /var/run/docker.sock)" \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -p 127.0.0.1:8000:8000 \
+  dittobench-api:sandbox
+```
+
+The image runs the API as a non-root UID. The supplemental group must match the
+Docker socket's group on the host; in Compose, use `group_add` with that numeric
+GID. Docker Desktop users may need the socket GID exposed inside its VM instead
+of the macOS host's value.
+
+> **Security:** mounting the raw Docker socket gives this service
+> host-root-equivalent control even when its process is non-root. Use this image
+> only on an isolated validator host, never on a shared or public application
+> host. The resource and capability limits applied to miner containers do not
+> reduce the API container's control of the daemon.
+
 The binary is self-contained: dataset generation, execution, and grading run
 locally with no external services. For how it slots into the worker, see the
 subnet's
