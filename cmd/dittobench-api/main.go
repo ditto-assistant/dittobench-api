@@ -232,27 +232,6 @@ type submitRequest struct {
 	// platform issues (seed, dataset_sha256) with the ticket, and this guarantees
 	// the validator scored precisely that dataset. Empty on the practice path.
 	ExpectedDatasetSHA256 string `json:"dataset_sha256,omitempty"`
-	// OpenRouterKey is the legacy OpenRouter key, used only when the model lock
-	// is off. Generation is deterministic and grading is judge-free, so a locked
-	// run needs no key; on the legacy path the hosted practice API takes it per
-	// request (it stores no keys) and locally it falls back to the server env.
-	// May also be supplied via the Authorization: Bearer header.
-	OpenRouterKey string `json:"openrouter_key,omitempty"`
-}
-
-// resolveOpenRouterKey returns the OpenRouter key for a submission, preferring
-// (1) the request body, (2) an Authorization: Bearer header, (3) the server's
-// OPENROUTER_API_KEY env (local/internal fallback). The key is never logged.
-func resolveOpenRouterKey(r *http.Request, req submitRequest) string {
-	if k := strings.TrimSpace(req.OpenRouterKey); k != "" {
-		return k
-	}
-	if h := strings.TrimSpace(r.Header.Get("Authorization")); h != "" {
-		if rest, ok := strings.CutPrefix(h, "Bearer "); ok {
-			return strings.TrimSpace(rest)
-		}
-	}
-	return strings.TrimSpace(os.Getenv(llm.EnvAPIKey))
 }
 
 // sourceFromReq builds the sandbox Source for a build submission. git_url and
@@ -539,15 +518,8 @@ func (s *server) submitRunSize(w http.ResponseWriter, r *http.Request, req submi
 			return
 		}
 	}
-	// Scoring is judge-free (fully deterministic), so the validator itself needs
-	// no LLM key. A key is only forwarded to the crate's agent on the legacy
-	// pre-lock Docker path; under the model lock the sandbox reaches only the
-	// gateway and no key exists anywhere in the run.
-	apiKey := resolveOpenRouterKey(r, req)
-	if apiKey == "" && (req.GitURL != "" || req.TarballURL != "") && !modelLockEnabled() {
-		writeError(w, http.StatusBadRequest, "the legacy (no model lock) Docker path forwards an OpenRouter key to the crate's agent; send \"openrouter_key\" or enable DITTOBENCH_MODEL_LOCK")
-		return
-	}
+	// Generation is deterministic, scoring is judge-free, and the harness talks
+	// only to the locked-model gateway, so no LLM key exists anywhere in a run.
 
 	// Bound concurrent in-flight runs so a burst can't exhaust the instance.
 	select {
@@ -564,7 +536,7 @@ func (s *server) submitRunSize(w http.ResponseWriter, r *http.Request, req submi
 	log.Printf("run %s: run_size=%s seed=%d tools=%d mem=%d",
 		runID, req.RunSize, seed, prof.Tools, prof.Mem)
 
-	go s.runSizeJob(context.Background(), runID, req, prof, seed, apiKey)
+	go s.runSizeJob(context.Background(), runID, req, prof, seed)
 
 	writeJSON(w, http.StatusAccepted, acceptedResponse{
 		RunID:  runID,
@@ -576,7 +548,7 @@ func (s *server) submitRunSize(w http.ResponseWriter, r *http.Request, req submi
 // runSizeJob is the full SN118 pipeline: building → generating → seeding →
 // running (appending partials) → scoring → done. Every stage is deterministic;
 // the only LLM in the loop is the locked model the harness itself talks to.
-func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest, prof gen.Profile, seed int64, apiKey string) {
+func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest, prof gen.Profile, seed int64) {
 	defer func() { <-s.runSlots }() // release the concurrency slot
 	defer func() {
 		if rec := recover(); rec != nil {
@@ -671,7 +643,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	//    and target the miner's already-running harness.
 	harnessURL := req.HarnessURL
 	if image != "" {
-		env := harnessSandboxEnv(apiKey, req.Env)
+		env := harnessSandboxEnv(req.Env)
 		handle, err := s.sandbox.Run(ctx, image, env)
 		if err != nil {
 			s.store.Fail(runID, "container start failed: "+err.Error())
@@ -812,7 +784,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		// Generation and grading are both deterministic and non-LLM; the only
 		// model in a run is the locked one the harness talks to.
 		Models: &protocol.ModelInfo{
-			Harness: reportedHarnessModel(),
+			Harness: llm.HarnessModel(),
 		},
 		PerCategory: report.PerCategory,
 	}
@@ -932,16 +904,6 @@ func pinnedOrFreshSeed(pinned int64) int64 {
 	return gen.FreshSeed()
 }
 
-// copyEnv copies the named env vars into dst when set and non-blank (the
-// legacy-path operator passthrough for the crate's provider settings).
-func copyEnv(dst map[string]string, names ...string) {
-	for _, name := range names {
-		if v := strings.TrimSpace(os.Getenv(name)); v != "" {
-			dst[name] = v
-		}
-	}
-}
-
 // envBool reports whether an env var is set to a truthy value.
 func envBool(name string) bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
@@ -959,30 +921,16 @@ func envOr(name, def string) string {
 	return def
 }
 
-// reportedHarnessModel returns the harness chat model this run scored against,
-// for RunDetails.Models.Harness (advisory transparency). With the model lock on
-// it is the locked model (llm.HarnessModel); otherwise it is the operator
-// escape-hatch DITTOBENCH_HARNESS_MODEL, or "" when the harness used its own
-// default (the server does not observe that choice).
-func reportedHarnessModel() string {
-	if modelLockEnabled() {
-		return llm.HarnessModel()
-	}
-	return strings.TrimSpace(os.Getenv("DITTOBENCH_HARNESS_MODEL"))
-}
+// lockedProvider is the frozen crate provider. The whole fleet reaches the
+// locked model through this one OpenAI-compatible path, so serving differences
+// do not make the k=3 validators' scores less comparable. Not env-tunable.
+const lockedProvider = "chutes"
 
-// modelLockEnabled reports whether the v2 harness model lock is active
-// (DITTOBENCH_MODEL_LOCK). Off by default so nothing breaks until infra
-// provisions the host gateway serving the locked model and restricts the egress
-// allowlist to the gateway's upstream; flip it on together with that infra. See
-// docs/model-lock.md and llm.HarnessModel.
-func modelLockEnabled() bool { return envBool("DITTOBENCH_MODEL_LOCK") }
-
-// lockedEnvKeys are the sandbox env vars the model lock owns. When the lock is
-// on, a caller-supplied req.Env may not set any of these — otherwise a miner
-// could route around the locked model (point at OpenRouter, Chutes, or any
-// OpenAI-compatible host, swap the model id, or redirect the gateway URL).
-// Every provider selector any supported crate honors must be listed here.
+// lockedEnvKeys are the sandbox env vars the model lock owns. A caller-supplied
+// req.Env may not set any of these — otherwise a miner could route around the
+// locked model (point at OpenRouter, Chutes, or any OpenAI-compatible host, swap
+// the model id, or redirect the gateway URL). Every provider selector any
+// supported crate honors must be listed here.
 var lockedEnvKeys = map[string]bool{
 	"OPENROUTER_API_KEY":  true,
 	"DITTOBENCH_PROVIDER": true,
@@ -996,67 +944,40 @@ var lockedEnvKeys = map[string]bool{
 
 // harnessSandboxEnv builds the env for the miner sandbox container.
 //
-// With the v2 model lock ON (DITTOBENCH_MODEL_LOCK): the harness is scored
-// against ONE locked open-weight model (llm.HarnessModel) served by the host
-// gateway. No provider key is forwarded — the sandbox cannot reach any LLM but
-// the locked gateway (the egress allowlist admits only the gateway upstream), so
-// model choice is not an attack surface and the median-of-3 validators' scores
-// are comparable. The locked provider/model/gateway are applied AFTER the
-// caller-supplied env and the caller's attempts to set any lockedEnvKey are
-// dropped, so req.Env can never override the lock.
+// The harness is scored against ONE locked open-weight model (llm.HarnessModel)
+// served by the host gateway. No provider key is forwarded — the sandbox cannot
+// reach any LLM but the locked gateway (the egress allowlist admits only the
+// gateway upstream), so model choice is not an attack surface and the median of
+// the k=3 validators' scores is comparable. The locked provider/model/gateway
+// are applied AFTER the caller-supplied env and the caller's attempts to set any
+// lockedEnvKey are dropped, so req.Env can never override the lock.
 //
-// With the lock OFF (legacy/pre-lock BYOK): forward the OpenRouter key +
-// provider so the crate's agent makes its own LLM calls, honoring the
-// DITTOBENCH_HARNESS_MODEL escape-hatch and the operator's Chutes/OpenAI
-// provider settings (DITTOBENCH_PROVIDER, CHUTES_*, OPENAI_*).
-//
-// The provider string + gateway URL are env-configurable (HARNESS_PROVIDER,
-// HARNESS_GATEWAY_URL) because they must match what the miner crate honors and
-// the provisioned gateway serves. The defaults target an OpenAI-compatible
-// gateway on the host: a local Ollama/vLLM, or cmd/model-relay fronting Chutes
-// for a GPU-less validator.
-func harnessSandboxEnv(apiKey string, reqEnv map[string]string) map[string]string {
+// The provider is frozen (lockedProvider): the crate always reaches the locked
+// model through the OpenAI-compatible "chutes" path, so the fleet serves one
+// backend and scores stay comparable. Only the gateway URLs are env-configurable
+// (HARNESS_GATEWAY_URL for chat, HARNESS_EMBED_URL for embeddings), pointing at
+// whatever serves the locked model on the host: cmd/model-relay fronting Chutes
+// for a GPU-less validator, or a local OpenAI-compatible server. The model id is
+// frozen too (llm.HarnessModel).
+func harnessSandboxEnv(reqEnv map[string]string) map[string]string {
 	gateway := envOr("HARNESS_GATEWAY_URL", "http://host.docker.internal:11434")
-	env := map[string]string{
-		"OLLAMA_BASE_URL": gateway,
-	}
-	lock := modelLockEnabled()
-	if !lock {
-		// Legacy BYOK path.
-		env["OPENROUTER_API_KEY"] = apiKey
-		env["DITTOBENCH_PROVIDER"] = envOr("DITTOBENCH_PROVIDER", "openrouter")
-		if m := strings.TrimSpace(os.Getenv("DITTOBENCH_HARNESS_MODEL")); m != "" {
-			env["DITTOBENCH_MODEL"] = m
-		}
-		copyEnv(env, "CHUTES_API_KEY", "CHUTES_BASE_URL", "OPENAI_API_KEY", "OPENAI_BASE_URL",
-			"DITTOBENCH_EMBEDDER", "DITTOBENCH_MAX_TOKENS", "DITTOBENCH_MAX_TURNS")
-	}
+	env := map[string]string{}
 	for k, v := range reqEnv {
-		if lock && lockedEnvKeys[k] {
+		if lockedEnvKeys[k] {
 			continue // the lock owns these; callers cannot set them
 		}
 		env[k] = v
 	}
-	if lock {
-		// Applied last so the lock wins over anything above.
-		provider := envOr("HARNESS_PROVIDER", "ollama")
-		env["DITTOBENCH_PROVIDER"] = provider
-		env["DITTOBENCH_MODEL"] = llm.HarnessModel()
-		// Embeddings and chat are separate backends when the chat gateway is
-		// not an Ollama (e.g. model-relay fronting Chutes): embeddings keep
-		// hitting the local Ollama (HARNESS_EMBED_URL), chat goes to the
-		// gateway. With one Ollama serving both, the default (embed = gateway)
-		// preserves the single-URL setup.
-		env["OLLAMA_BASE_URL"] = envOr("HARNESS_EMBED_URL", gateway)
-		if provider == "chutes" {
-			// The crate's chutes provider reads CHUTES_BASE_URL for chat and
-			// requires a non-empty key; the relay injects the real key
-			// upstream, so the sandbox-side value is a placeholder.
-			env["CHUTES_BASE_URL"] = gateway
-			env["CHUTES_API_KEY"] = "relay"
-		}
-		delete(env, "OPENROUTER_API_KEY")
-	}
+	// The lock, applied last so it wins over caller env. Chat routes to the
+	// gateway through the crate's chutes provider (CHUTES_BASE_URL); embeddings
+	// hit the local Ollama (OLLAMA_BASE_URL), which is the same host by default.
+	// The real upstream key lives only in the relay, so the sandbox-side key is a
+	// placeholder.
+	env["DITTOBENCH_PROVIDER"] = lockedProvider
+	env["DITTOBENCH_MODEL"] = llm.HarnessModel()
+	env["OLLAMA_BASE_URL"] = envOr("HARNESS_EMBED_URL", gateway)
+	env["CHUTES_BASE_URL"] = gateway
+	env["CHUTES_API_KEY"] = "relay"
 	return env
 }
 

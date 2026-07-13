@@ -2,9 +2,9 @@
 
 Every miner harness is scored against one locked open-weight model, Qwen3-32B,
 served in a Trusted Execution Environment (TEE) via `cmd/model-relay` fronting
-Chutes (`Qwen/Qwen3-32B-TEE`). The `DITTOBENCH_MODEL_LOCK` switch ships off by
-default in code and is set on for scored validators. A single locked model
-limits the exploit surface.
+Chutes (`Qwen/Qwen3-32B-TEE`). The model id is frozen in code (`internal/llm`),
+not an env var: it is consensus-critical, so every validator scores against the
+same model. A single locked model limits the exploit surface.
 
 ## Why
 
@@ -22,14 +22,14 @@ model is a public, reproducible fact, part of the auditability goal.
 
 ## The lock is the network, not an env var
 
-`DITTOBENCH_HARNESS_MODEL` only sets `DITTOBENCH_MODEL` inside the container,
-which an adversarial harness can ignore. The enforceable lock has two parts:
+Setting `DITTOBENCH_MODEL` inside the container only asks the harness politely;
+an adversarial one can ignore it. The enforceable lock has two parts:
 
-1. Serve the locked model on the host gateway. An OpenAI-compatible endpoint
-   (Ollama/vLLM) on the host serves the locked Qwen3-32B model. The sandbox already
-   reaches the host gateway at `OLLAMA_BASE_URL=http://host.docker.internal:11434`
-   via the `NO_PROXY` bypass (the same bypass carries embeddings; the lock routes
-   the chat model through it too).
+1. Serve the locked model on the host gateway. `cmd/model-relay` fronting Chutes
+   serves the locked Qwen3-32B chat model on the host. The sandbox reaches the
+   host gateway at `http://host.docker.internal` via the `NO_PROXY` bypass (the
+   same bypass carries embeddings from a local Ollama; the lock routes the chat
+   model through the relay).
 2. Admit only the locked gateway on the egress allowlist. `EGRESS_PROXY_ALLOW`
    is deny-by-default (empty admits nothing); under the lock it lists only the
    relay's upstream (`llm.chutes.ai`), reached from the relay process, never the
@@ -78,19 +78,20 @@ on the validator host.
 
 ## Enforcement in the engine
 
-Under the lock the engine forces the provider, model, and gateway on the sandbox
-and drops any caller-supplied model or key. The locked values are applied after
-the request's own environment, so a request cannot override them, and the run
-details report the model that actually served the run. All of it is gated by
-`DITTOBENCH_MODEL_LOCK`; with the switch off, nothing changes.
+The engine forces the provider, model, and gateway on the sandbox and drops any
+caller-supplied model or key. The locked values are applied after the request's
+own environment, so a request cannot override them, and the run details report
+the model that actually served the run.
 
 ## Config surface
 
+The locked model id and the crate provider are both frozen in code
+(`internal/llm` = `qwen/qwen3-32b`; `cmd/dittobench-api` provider = `chutes`, the
+OpenAI-compatible path the whole fleet uses so scores stay comparable). The
+remaining env is deployment config: where the gateway serves that model.
+
 | Env | Default | Effect |
 |-----|---------|--------|
-| `DITTOBENCH_MODEL_LOCK` | `false` | master switch for the lock |
-| `HARNESS_MODEL` | `qwen/qwen3-32b` | the locked model id (must match what the gateway serves) |
-| `HARNESS_PROVIDER` | `ollama` | the crate provider value pointing at the host gateway (`chutes` for the relay) |
 | `HARNESS_GATEWAY_URL` | `http://host.docker.internal:11434` | the CHAT gateway base URL |
 | `HARNESS_EMBED_URL` | _(the gateway URL)_ | the embeddings Ollama, when it differs from the chat gateway (relay setups) |
 
@@ -100,34 +101,15 @@ provider selectors (`CHUTES_API_KEY`, `CHUTES_BASE_URL`, `OPENAI_API_KEY`,
 `OPENAI_BASE_URL`), so a crate that supports those providers cannot route
 around the lock either.
 
-## Gateway backends
+## Gateway backend
 
-The gateway can be anything OpenAI-compatible that serves exactly the locked
-model:
+The gateway is `cmd/model-relay` fronting Chutes. The relay terminates the
+sandbox's requests locally, forces the model field to the locked id, injects the
+operator's Chutes key, and forwards upstream (`Qwen/Qwen3-32B-TEE`,
+hardware-attested TEE serving). The sandbox never holds the key and cannot choose
+the model. The egress allowlist then admits only the relay's upstream from the
+relay process, nothing from the sandbox.
 
-- Local Ollama or vLLM on the validator's GPUs. Qwen3-32B at Q4_K_M is about
-  20 GB, one 24 GB card.
-- `cmd/model-relay` fronting Chutes, for a GPU-less validator. The relay
-  terminates the sandbox's requests locally, forces the model field to the
-  locked id, injects the operator's Chutes key, and forwards upstream
-  (`Qwen/Qwen3-32B-TEE`, hardware-attested TEE serving). The sandbox never
-  holds the key and cannot choose the model, so the lock's semantics are
-  unchanged. The egress allowlist then admits only the relay's upstream from
-  the relay process, nothing from the sandbox.
-
-## Local-gateway alternative (GPU validators)
-
-A validator can serve the locked model on its own GPUs instead of the Chutes
-relay. The crate honors `DITTOBENCH_PROVIDER=<gateway>` plus the gateway base URL
-to route chat at the host gateway. The deployed relay path uses
-`DITTOBENCH_PROVIDER=chutes`; a local gateway sets `HARNESS_PROVIDER` to the
-matching OpenAI-compatible provider string.
-
-Setup:
-
-1. Run the host gateway (Ollama/vLLM) serving the Qwen3-32B model on
-   `:11434` (OpenAI-compatible).
-2. Leave `EGRESS_PROXY_ALLOW` empty (deny-all internet; a local gateway needs no
-   upstream and is reached via `NO_PROXY` + the firewall host-gateway allowance).
-3. Set `DITTOBENCH_MODEL_LOCK=1`, `HARNESS_MODEL`, `HARNESS_PROVIDER`,
-   `HARNESS_GATEWAY_URL` on the validator service.
+Fronting one hosted model (rather than each validator self-hosting on its own
+GPUs) keeps the whole fleet on the same serving backend, so the k=3 validators'
+scores of a submission stay comparable. No GPU is required.

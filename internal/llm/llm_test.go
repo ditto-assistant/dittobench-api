@@ -2,13 +2,12 @@ package llm
 
 import "testing"
 
-func TestHarnessModelDefault(t *testing.T) {
-	t.Setenv("HARNESS_MODEL", "")
-	if got := HarnessModel(); got != defaultHarnessModel {
-		t.Fatalf("harness model default: got %q want %q", got, defaultHarnessModel)
-	}
+// TestHarnessModelFrozen: the locked model id is a code constant, not env-set,
+// so HARNESS_MODEL cannot change it. Every validator scores against the same
+// model.
+func TestHarnessModelFrozen(t *testing.T) {
 	t.Setenv("HARNESS_MODEL", "qwen/qwen3-next")
-	if got := HarnessModel(); got != "qwen/qwen3-next" {
-		t.Fatalf("HARNESS_MODEL override: got %q", got)
+	if got := HarnessModel(); got != LockedHarnessModel {
+		t.Fatalf("HARNESS_MODEL must not override the frozen model: got %q want %q", got, LockedHarnessModel)
 	}
 }

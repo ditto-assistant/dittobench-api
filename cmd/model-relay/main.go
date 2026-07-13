@@ -10,18 +10,18 @@
 // upstream. A CONNECT-only egress proxy cannot pin the model field (it cannot
 // see request bodies); this relay exists because it can.
 //
-// Env:
+// The forced model and thinking mode are frozen, not env vars: both are
+// consensus-critical (a hybrid-reasoning model must run one mode fleet-wide or
+// the k=3 validators' scores of a submission are not comparable), so every
+// validator's relay pins the same model (llm.LockedUpstreamModel) and the same
+// thinking mode (lockedThinking, off, which keeps replies inside per-case
+// budgets and cuts variance). Bump either in code (a network-wide change), then
+// redeploy.
+//
+// Env (deployment only; nothing that affects scoring):
 //   - RELAY_UPSTREAM_URL  upstream chat-completions URL
 //     (default https://llm.chutes.ai/v1/chat/completions)
 //   - RELAY_API_KEY       upstream bearer key (required)
-//   - RELAY_MODEL         the model id to force (default: the upstream form of
-//     the locked model must be set explicitly, since gateway names differ
-//     from canonical ids; required)
-//   - RELAY_THINKING      "true" or "false" (default false). Locked like the
-//     model field: every request gets chat_template_kwargs.enable_thinking
-//     set to this value, so a hybrid-reasoning model (Qwen3) runs in ONE mode
-//     fleet-wide instead of whatever the sandbox or serving default picks.
-//     Thinking off keeps replies inside per-case budgets and cuts variance.
 //   - PORT                listen port (default 11434, the gateway port the
 //     sandbox already expects)
 package main
@@ -35,9 +35,16 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/ditto-assistant/dittobench-api/internal/llm"
 )
 
 const defaultUpstream = "https://llm.chutes.ai/v1/chat/completions"
+
+// lockedThinking is the frozen fleet-wide thinking mode. Off: a hybrid-reasoning
+// model (Qwen3) must not pick per request, and off keeps replies inside per-case
+// budgets. Consensus-critical, so it is a code constant, not env-tunable.
+const lockedThinking = false
 
 // maxBody bounds a relayed request body; chat requests are prompts, not blobs.
 const maxBody = 4 << 20
@@ -54,12 +61,12 @@ func main() {
 	r := &relay{
 		upstream: envOr("RELAY_UPSTREAM_URL", defaultUpstream),
 		apiKey:   strings.TrimSpace(os.Getenv("RELAY_API_KEY")),
-		model:    strings.TrimSpace(os.Getenv("RELAY_MODEL")),
-		thinking: strings.EqualFold(envOr("RELAY_THINKING", "false"), "true"),
+		model:    llm.LockedUpstreamModel,
+		thinking: lockedThinking,
 		client:   &http.Client{Timeout: 300 * time.Second},
 	}
-	if r.apiKey == "" || r.model == "" {
-		log.Fatal("RELAY_API_KEY and RELAY_MODEL are required")
+	if r.apiKey == "" {
+		log.Fatal("RELAY_API_KEY is required")
 	}
 	mux := http.NewServeMux()
 	// Both the bare and /v1 chat-completions paths, so OLLAMA_BASE_URL-style
