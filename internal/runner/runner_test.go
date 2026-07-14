@@ -5,17 +5,27 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
+	"strings"
 	"testing"
 
 	"github.com/ditto-assistant/dittobench-datagen/protocol"
 )
 
-// TestMain relaxes the SSRF guard so tests can reach loopback httptest servers
-// (the default client blocks private/loopback targets in production).
-func TestMain(m *testing.M) {
-	Configure(true)
-	os.Exit(m.Run())
+func sandboxContext() context.Context { return TrustSandbox(context.Background()) }
+
+func TestSandboxContextAllowsLoopbackWithoutRelaxingExternalURLs(t *testing.T) {
+	Configure(false)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	if err := Health(context.Background(), srv.URL); err == nil || !strings.Contains(err.Error(), "blocked connection") {
+		t.Fatalf("external loopback URL must remain blocked, got %v", err)
+	}
+	if err := Health(sandboxContext(), srv.URL); err != nil {
+		t.Fatalf("validator-owned sandbox URL should be reachable: %v", err)
+	}
 }
 
 func TestHealthOK(t *testing.T) {
@@ -28,7 +38,7 @@ func TestHealthOK(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if err := Health(context.Background(), srv.URL); err != nil {
+	if err := Health(sandboxContext(), srv.URL); err != nil {
 		t.Fatalf("expected healthy, got %v", err)
 	}
 }
@@ -39,7 +49,7 @@ func TestHealthBad(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if err := Health(context.Background(), srv.URL); err == nil {
+	if err := Health(sandboxContext(), srv.URL); err == nil {
 		t.Fatalf("expected error for 503 health")
 	}
 }
@@ -64,7 +74,7 @@ func TestRunHarnessEchoesTool(t *testing.T) {
 	ds := protocol.Dataset{ToolCases: []protocol.ToolCase{
 		{ID: "c1", Category: "web_search", Prompt: "search foo"},
 	}}
-	out, err := RunHarness(context.Background(), srv.URL, ds, nil)
+	out, err := RunHarness(sandboxContext(), srv.URL, ds, nil)
 	if err != nil {
 		t.Fatalf("RunHarness error: %v", err)
 	}
@@ -84,7 +94,7 @@ func TestRunHarnessPerCaseFailureIsEmpty(t *testing.T) {
 	defer srv.Close()
 
 	ds := protocol.Dataset{ToolCases: []protocol.ToolCase{{ID: "c1", Prompt: "x"}}}
-	out, err := RunHarness(context.Background(), srv.URL, ds, nil)
+	out, err := RunHarness(sandboxContext(), srv.URL, ds, nil)
 	if err != nil {
 		t.Fatalf("RunHarness should not abort on per-case failure: %v", err)
 	}
@@ -115,7 +125,7 @@ func TestSeed(t *testing.T) {
 		Subjects: []protocol.Subject{{ID: "s1", SubjectText: "x"}},
 		Links:    []protocol.SubjectLink{{SubjectID: "s1", PairID: "p1"}},
 	}
-	resp, err := Seed(context.Background(), srv.URL, req)
+	resp, err := Seed(sandboxContext(), srv.URL, req)
 	if err != nil {
 		t.Fatalf("Seed error: %v", err)
 	}
@@ -132,7 +142,7 @@ func TestSeedError(t *testing.T) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer srv.Close()
-	if _, err := Seed(context.Background(), srv.URL, protocol.SeedRequest{}); err == nil {
+	if _, err := Seed(sandboxContext(), srv.URL, protocol.SeedRequest{}); err == nil {
 		t.Fatal("expected error for 500 /seed")
 	}
 }
@@ -144,7 +154,7 @@ func TestRunCase(t *testing.T) {
 		json.NewEncoder(w).Encode(protocol.RunResponse{FinalText: "answer:" + req.UserInput})
 	}))
 	defer srv.Close()
-	resp, err := RunCase(context.Background(), srv.URL, "m1", "what color?", nil, CaseOptions{})
+	resp, err := RunCase(sandboxContext(), srv.URL, "m1", "what color?", nil, CaseOptions{})
 	if err != nil {
 		t.Fatalf("RunCase error: %v", err)
 	}

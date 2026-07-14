@@ -40,7 +40,7 @@ const defaultN = 30
 
 // sandboxHealthTimeout bounds how long we wait for a freshly built container to
 // answer /health before giving up on the submission.
-const sandboxHealthTimeout = 90 * time.Second
+const sandboxHealthTimeout = 3 * time.Minute
 
 // Abuse guards for the public submit endpoint.
 const (
@@ -53,8 +53,8 @@ const (
 type server struct {
 	store   *store.Store
 	sandbox sandbox.Sandbox
-	// allowPrivate relaxes the SSRF guard for local dev + the Docker sandbox
-	// (loopback containers). False in production (hosted Cloud Run).
+	// allowPrivate relaxes caller-supplied URL checks for local development.
+	// Validator-owned loopback sandboxes use a separate trusted client.
 	allowPrivate bool
 	limiter      *ratelimit.Limiter
 	runSlots     chan struct{} // bounds concurrent run_size jobs
@@ -477,6 +477,7 @@ func (s *server) runSandboxJob(ctx context.Context, runID string, req submitRequ
 		return
 	}
 	defer s.sandbox.Stop(context.Background(), handle)
+	ctx = runner.TrustSandbox(ctx)
 
 	if err := runner.WaitHealthy(ctx, handle.BaseURL, sandboxHealthTimeout); err != nil {
 		s.store.Fail(runID, "harness never became healthy: "+err.Error())
@@ -651,6 +652,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		}
 		defer s.sandbox.Stop(context.Background(), handle)
 		harnessURL = handle.BaseURL
+		ctx = runner.TrustSandbox(ctx)
 	}
 
 	if err := runner.WaitHealthy(ctx, harnessURL, sandboxHealthTimeout); err != nil {

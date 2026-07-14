@@ -43,14 +43,32 @@ func envDuration(key string, def time.Duration) time.Duration {
 	return def
 }
 
-// client is used for all outbound harness calls. It defaults to a guarded client
-// (no private targets); Configure swaps it for local/sandbox use.
+// client is used for caller-supplied harness URLs. It defaults to a guarded
+// client (no private targets); Configure relaxes it only for explicit local dev.
 var client = netguard.Client(false)
+var sandboxClient = netguard.Client(true)
 
-// Configure sets the outbound HTTP client's SSRF policy. allowPrivate=true (local
-// dev + Docker sandbox, whose containers are on loopback) permits private/loopback
-// targets; false (hosted) blocks them at dial time. Call once at startup.
+type sandboxContextKey struct{}
+
+// Configure sets the caller-supplied harness URL policy. allowPrivate=true is
+// for explicit local development; hosted deployments leave it false. Validator-
+// owned Docker sandboxes use TrustSandbox instead. Call once at startup.
 func Configure(allowPrivate bool) { client = netguard.Client(allowPrivate) }
+
+// TrustSandbox marks requests to a harness URL returned by the validator's own
+// Sandbox.Run implementation. Those URLs are loopback-bound by construction,
+// so they need a private-address-capable client. Caller-supplied harness URLs
+// never receive this context and remain protected by the SSRF guard.
+func TrustSandbox(ctx context.Context) context.Context {
+	return context.WithValue(ctx, sandboxContextKey{}, struct{}{})
+}
+
+func clientFor(ctx context.Context) *http.Client {
+	if _, ok := ctx.Value(sandboxContextKey{}).(struct{}); ok {
+		return sandboxClient
+	}
+	return client
+}
 
 // Health probes <harnessURL>/health and returns nil on a 2xx response.
 func Health(ctx context.Context, harnessURL string) error {
@@ -61,7 +79,7 @@ func Health(ctx context.Context, harnessURL string) error {
 	if err != nil {
 		return fmt.Errorf("build health request: %w", err)
 	}
-	resp, err := client.Do(req)
+	resp, err := clientFor(ctx).Do(req)
 	if err != nil {
 		return fmt.Errorf("harness unreachable: %w", err)
 	}
@@ -134,7 +152,7 @@ func Seed(ctx context.Context, harnessURL string, req protocol.SeedRequest) (pro
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	httpResp, err := client.Do(httpReq)
+	httpResp, err := clientFor(ctx).Do(httpReq)
 	if err != nil {
 		return protocol.SeedResponse{}, fmt.Errorf("post /seed: %w", err)
 	}
@@ -197,7 +215,7 @@ func runOne(ctx context.Context, harnessURL string, c protocol.ToolCase, tools [
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	start := time.Now()
-	httpResp, err := client.Do(httpReq)
+	httpResp, err := clientFor(ctx).Do(httpReq)
 	if err != nil {
 		return protocol.RunResponse{}, fmt.Errorf("post /run: %w", err)
 	}
