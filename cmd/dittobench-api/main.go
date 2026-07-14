@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -58,6 +59,8 @@ type server struct {
 	allowPrivate bool
 	limiter      *ratelimit.Limiter
 	runSlots     chan struct{} // bounds concurrent run_size jobs
+	cancelMu     sync.Mutex
+	runCancels   map[string]context.CancelFunc
 }
 
 func main() {
@@ -85,6 +88,7 @@ func main() {
 		allowPrivate: allowPrivate,
 		limiter:      ratelimit.New(submitsPerWindow, submitWindow),
 		runSlots:     make(chan struct{}, maxConcurrentRuns),
+		runCancels:   make(map[string]context.CancelFunc),
 	}
 
 	mux := http.NewServeMux()
@@ -95,6 +99,7 @@ func main() {
 	mux.HandleFunc("POST /v1/submit", s.handleSubmit)
 	mux.HandleFunc("POST /v1/score", s.handleScore)
 	mux.HandleFunc("GET /v1/runs/{id}", s.handleGetRun)
+	mux.HandleFunc("DELETE /v1/runs/{id}", s.handleCancelRun)
 
 	addr := ":" + strconv.Itoa(*port)
 	log.Printf("dittobench-api (off-chain practice validator) listening on %s", addr)
@@ -537,7 +542,9 @@ func (s *server) submitRunSize(w http.ResponseWriter, r *http.Request, req submi
 	log.Printf("run %s: run_size=%s seed=%d tools=%d mem=%d",
 		runID, req.RunSize, seed, prof.Tools, prof.Mem)
 
-	go s.runSizeJob(context.Background(), runID, req, prof, seed)
+	runCtx, cancel := context.WithCancel(context.Background())
+	s.registerRunCancel(runID, cancel)
+	go s.runSizeJob(runCtx, runID, req, prof, seed)
 
 	writeJSON(w, http.StatusAccepted, acceptedResponse{
 		RunID:  runID,
@@ -551,6 +558,7 @@ func (s *server) submitRunSize(w http.ResponseWriter, r *http.Request, req submi
 // the only LLM in the loop is the locked model the harness itself talks to.
 func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest, prof gen.Profile, seed int64) {
 	defer func() { <-s.runSlots }() // release the concurrency slot
+	defer s.unregisterRunCancel(runID)
 	defer func() {
 		if rec := recover(); rec != nil {
 			s.store.Fail(runID, "internal panic during run_size job")
@@ -865,6 +873,46 @@ func (s *server) evaluate(ctx context.Context, runID, harnessURL string, seed in
 	report.StructuralFingerprint = fingerprint
 	s.store.Finish(runID, report)
 	return report, nil
+}
+
+func (s *server) registerRunCancel(runID string, cancel context.CancelFunc) {
+	s.cancelMu.Lock()
+	defer s.cancelMu.Unlock()
+	if s.runCancels == nil {
+		s.runCancels = make(map[string]context.CancelFunc)
+	}
+	s.runCancels[runID] = cancel
+}
+
+func (s *server) unregisterRunCancel(runID string) {
+	s.cancelMu.Lock()
+	defer s.cancelMu.Unlock()
+	delete(s.runCancels, runID)
+}
+
+func (s *server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	job, ok := s.store.Get(id)
+	if !ok {
+		writeError(w, http.StatusNotFound, "run not found")
+		return
+	}
+	if job.Status == store.StatusDone || job.Status == store.StatusFailed {
+		writeJSON(w, http.StatusOK, job)
+		return
+	}
+
+	s.cancelMu.Lock()
+	cancel := s.runCancels[id]
+	s.cancelMu.Unlock()
+	if cancel == nil {
+		writeError(w, http.StatusConflict, "run is not cancellable")
+		return
+	}
+	cancel()
+	s.store.Fail(id, "run cancelled by client")
+	job, _ = s.store.Get(id)
+	writeJSON(w, http.StatusAccepted, job)
 }
 
 func (s *server) handleGetRun(w http.ResponseWriter, r *http.Request) {
