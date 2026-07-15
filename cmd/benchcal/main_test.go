@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestCalibrateNoiseFloorZero(t *testing.T) {
 	// A deterministic harness on a fixed seed must have zero repeat-seed spread —
@@ -68,5 +72,78 @@ func TestCalibrateDeterministic(t *testing.T) {
 	b := calibrate(5, 60, 20)
 	if a.ToolMean != b.ToolMean {
 		t.Fatalf("calibration must be reproducible: %+v vs %+v", a.ToolMean, b.ToolMean)
+	}
+}
+
+func TestLoadMemProfile(t *testing.T) {
+	// Empty path keeps the placeholder (nil, nil).
+	if p, err := loadMemProfile(""); p != nil || err != nil {
+		t.Fatalf("empty path should yield (nil,nil), got (%v,%v)", p, err)
+	}
+	dir := t.TempDir()
+	good := filepath.Join(dir, "prof.json")
+	if err := os.WriteFile(good, []byte(`{"multi-session":0.5,"contradiction":0.3}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p, err := loadMemProfile(good)
+	if err != nil {
+		t.Fatalf("valid profile should load: %v", err)
+	}
+	if p["multi-session"] != 0.5 || p["contradiction"] != 0.3 {
+		t.Fatalf("profile not loaded correctly: %v", p)
+	}
+	// Out-of-range value is rejected.
+	bad := filepath.Join(dir, "bad.json")
+	if err := os.WriteFile(bad, []byte(`{"multi-session":1.5}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadMemProfile(bad); err == nil {
+		t.Fatal("out-of-range score should be rejected")
+	}
+	// Empty object is rejected.
+	empty := filepath.Join(dir, "empty.json")
+	if err := os.WriteFile(empty, []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadMemProfile(empty); err == nil {
+		t.Fatal("empty profile should be rejected")
+	}
+}
+
+// A recorded profile that scores every type lower than the placeholder must
+// lower memory_mean — proving the seam actually drives scoring. The report also
+// records the profile provenance and the configured target sigma.
+func TestCalibrateWithMemProfileSeam(t *testing.T) {
+	base := calibrate(5, 60, 20)
+
+	lowAll := map[string]float64{
+		"single-session-recall":  0.1,
+		"multi-session":          0.1,
+		"temporal-reasoning":     0.1,
+		"knowledge-update":       0.1,
+		"preference":             0.1,
+		"preference-application": 0.1,
+		"contradiction":          0.1,
+		"abstention":             0.1,
+	}
+	cfg := defaultConfig()
+	cfg.memProfile = lowAll
+	cfg.memProfileSource = "recorded profile: test"
+	cfg.targetSigma = 0.02
+	got := calibrateWith(5, 60, 20, cfg)
+
+	if got.MemoryMean.Mean >= base.MemoryMean.Mean {
+		t.Fatalf("recorded low profile should lower memory_mean: got %v vs placeholder %v",
+			got.MemoryMean.Mean, base.MemoryMean.Mean)
+	}
+	if got.MemProfileSource != "recorded profile: test" {
+		t.Fatalf("report should record profile provenance, got %q", got.MemProfileSource)
+	}
+	if got.TargetSigma != 0.02 {
+		t.Fatalf("report should record target sigma, got %v", got.TargetSigma)
+	}
+	// Tool half is independent of the memory profile.
+	if got.ToolMean != base.ToolMean {
+		t.Fatalf("tool_mean must not depend on the memory profile: %v vs %v", got.ToolMean, base.ToolMean)
 	}
 }

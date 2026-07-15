@@ -691,6 +691,21 @@ func (s *server) acquireRunSlot(w http.ResponseWriter) bool {
 	}
 }
 
+// runScope classifies a run_size request as SCORED or PRACTICE. The canonical
+// on-chain path (POST /v1/score) pins the exact dataset the platform issued with
+// its ticket (dataset_sha256), so its report feeds the KOTH ledger and scoring is
+// trustless-strict: observed execution is mandatory and the parser free points
+// close. A run_size PRACTICE submission (POST /v1/submit, no dataset_sha256) keeps
+// the lenient self-hostable scoring. The scope is a pure property of the request,
+// so any third party re-deriving (dataset, transcript, scope) reproduces the
+// score — no validator secret enters the score path.
+func runScope(req submitRequest) scorer.Scope {
+	if strings.TrimSpace(req.ExpectedDatasetSHA256) != "" {
+		return scorer.ScopeScored
+	}
+	return scorer.ScopePractice
+}
+
 // runSizeJob is the full SN118 pipeline: building → generating → seeding →
 // running (appending partials) → scoring → done. Every stage is deterministic;
 // the only LLM in the loop is the locked model the harness itself talks to.
@@ -829,8 +844,23 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		return
 	}
 	defer stopToolSrv()
+
+	scope := runScope(req)
+
 	if toolEndpoint == "" {
-		log.Printf("run %s: tool_endpoint not advertised (remote harness unreachable); observable tool cases scored capped", runID)
+		if scope == scorer.ScopeScored {
+			// Observed execution is mandatory on the scored path: without the mock
+			// endpoint reachable, observable tool cases can never be watched execute
+			// and would all score 0, which is not a defensible score. The on-chain
+			// validator always builds+runs the harness in Docker (endpoint served via
+			// host.docker.internal), so this only trips on a misconfigured scored run
+			// (e.g. a remote harness_url that cannot reach our loopback). Fail loudly
+			// rather than emit a zeroed report.
+			s.store.Fail(runID, "scored run cannot observe tool execution: tool_endpoint unreachable from the harness (build+run in the Docker sandbox, or use a locally reachable harness). Observed execution is mandatory on the scored path.")
+			log.Printf("run %s: scored run aborted — tool_endpoint not advertised (harness cannot be observed)", runID)
+			return
+		}
+		log.Printf("run %s: tool_endpoint not advertised (remote harness unreachable); observable tool cases scored capped (practice)", runID)
 	}
 
 	// 4. tool cases — independent of the memory haystack, so run before seeding.
@@ -839,7 +869,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	for i, c := range toolCases {
 		resp, runErr := runner.RunCase(ctx, harnessURL, c.ID, c.Prompt, tools, runner.CaseOptions{ToolEndpoint: toolEndpoint})
 		observed := toolSrv.Observed(c.ID)
-		cs := scorer.ScoreToolCaseObserved(c, resp, runErr == nil, observed)
+		cs := scorer.ScoreToolCaseObservedScope(c, resp, runErr == nil, observed, scope)
 		if datagen.IsResultUsage(c.Category) {
 			// Result-usage: trajectory + whether the answer carried the served
 			// needle value (a fabricated value only the executed tool could reveal).
@@ -851,7 +881,8 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		case len(observed) > 0:
 			observedTool++
 		case toolexec.Observable(c):
-			cs = scorer.CapUnobserved(cs)
+			// Unobserved observable case: capped at 0.5 in practice, 0 when scored.
+			cs = scorer.CapUnobservedScope(cs, scope)
 			cappedTool++
 		}
 		perCase = append(perCase, cs)

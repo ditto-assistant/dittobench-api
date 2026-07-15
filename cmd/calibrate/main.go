@@ -14,6 +14,17 @@
 // a deterministic harness that stddev should be ~0, confirming the measurement
 // isolates dataset difficulty rather than harness noise.
 //
+// CALIBRATION TRUST ASSUMPTION: the --max-stddev gate is only as honest as the
+// harness it runs against. Pointed at the DETERMINISTIC refharness (or any
+// zero-variance parser) it measures dataset-difficulty spread ALONE and reports
+// a noise floor of ~0 — it says nothing about the run-to-run variance a real
+// locked-model reasoning harness carries. Tuning the gate (or the KOTH
+// margin/score_tol it feeds) against that number will certify a deterministic
+// parser as a stable champion. To gate honestly, run this against a real
+// locked-model harness over many fresh seeds and set --max-stddev from the
+// MEASURED champion-region σ, not the refharness floor. See
+// docs/calibration-trust.md.
+//
 //	calibrate --runs 100 --harness http://localhost:9000   # direct (tool-only)
 //	calibrate --runs 100 --run-size full --harness ...      # full pipeline
 package main
@@ -47,7 +58,11 @@ func main() {
 	runSize := flag.String("run-size", "", "small|medium|full for the full pipeline; empty = direct path")
 	repeatSeed := flag.Int64("repeat-seed", 0, "if non-zero, also run --repeats evals at this pinned seed (noise floor)")
 	repeats := flag.Int("repeats", 10, "repeats for the --repeat-seed noise-floor pass")
-	maxStddev := flag.Float64("max-stddev", 0.03, "pass/fail gate on stddev(tool_mean)")
+	// The gate is only meaningful against a REAL locked-model harness: against the
+	// deterministic refharness this measures dataset difficulty alone (harness σ
+	// = 0). Calibrate the threshold from a real harness's measured champion-region
+	// σ, not the refharness floor. See docs/calibration-trust.md.
+	maxStddev := flag.Float64("max-stddev", 0.03, "pass/fail gate on stddev(tool_mean); calibrate against a REAL locked-model harness, not the deterministic refharness (see docs/calibration-trust.md)")
 	flag.Parse()
 
 	c := &client{api: *api, harness: *harness, n: *n, runSize: *runSize}
