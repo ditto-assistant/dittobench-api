@@ -166,6 +166,7 @@ func main() {
 	mux.HandleFunc("POST /v1/submit", s.handleSubmit)
 	mux.HandleFunc("POST /v1/score", s.handleScore)
 	mux.HandleFunc("GET /v1/runs/{id}", s.handleGetRun)
+	mux.HandleFunc("GET /v1/runs/{id}/transcript", s.handleGetTranscript)
 	mux.HandleFunc("DELETE /v1/runs/{id}", s.handleCancelRun)
 
 	addr := ":" + strconv.Itoa(*port)
@@ -913,6 +914,19 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		log.Printf("run %s: tool_endpoint not advertised (remote harness unreachable); observable tool cases scored capped (practice)", runID)
 	}
 
+	// Reachability preflight: an advertised endpoint can still be unreachable
+	// from the harness's network namespace (Docker routing, network policy, a
+	// runtime fault). Validator state alone cannot distinguish that from a
+	// harness that legitimately never calls tools — both produce zero observed
+	// calls — so an active probe the harness participates in settles it before
+	// any case is scored. On the scored path a failed probe fails the run
+	// (rescheduled) instead of completing a zeroed report.
+	if toolEndpoint != "" {
+		if !s.enforcePreflight(ctx, runID, scope, harnessURL, toolEndpoint, toolSrv, seed, tools) {
+			return
+		}
+	}
+
 	// 4. tool cases — independent of the memory haystack and of each other, so
 	//    run before seeding and with bounded per-case concurrency. Results are
 	//    written per index so the report order is identical to sequential
@@ -922,10 +936,12 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	toolResults := make([]protocol.CaseScore, len(toolCases))
 	toolWasObserved := make([]bool, len(toolCases))
 	toolWasCapped := make([]bool, len(toolCases))
+	toolTranscripts := make([]transcriptCase, len(toolCases))
 	runBounded(ctx, len(toolCases), caseConcurrency, func(i int) {
 		c := toolCases[i]
 		resp, runErr := runner.RunCase(ctx, harnessURL, c.ID, c.Prompt, tools, runner.CaseOptions{ToolEndpoint: toolEndpoint})
 		observed := toolSrv.Observed(c.ID)
+		toolTranscripts[i] = transcriptCase{CaseID: c.ID, Kind: protocol.KindTool, Response: resp, Observed: observed}
 		cs := scorer.ScoreToolCaseObservedScope(c, resp, runErr == nil, observed, scope)
 		if datagen.IsResultUsage(c.Category) {
 			// Result-usage: trajectory + whether the answer carried the served
@@ -959,6 +975,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 			cappedTool++
 		}
 	}
+	transcripts := append(make([]transcriptCase, 0, total), toolTranscripts...)
 
 	// 5. memory cases — staged Tier-C ingestion: seed a wave,
 	//    then run the cases it unlocks (all their evidence is now seeded), then
@@ -999,6 +1016,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		// stays a barrier: seed wave w, run its cases, then seed wave w+1.
 		waveCases := casesByWave[w]
 		waveResults := make([]protocol.CaseScore, len(waveCases))
+		waveTranscripts := make([]transcriptCase, len(waveCases))
 		runBounded(ctx, len(waveCases), caseConcurrency, func(i int) {
 			sc := waveCases[i]
 			mc := sc.Case
@@ -1011,6 +1029,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 			resp, _ := runner.RunCase(ctx, harnessURL, mc.ID, mc.Question, tools, runner.CaseOptions{ToolEndpoint: toolEndpoint, UserID: uid})
 			observedCalls := toolSrv.Observed(mc.ID)
 			resp = withObservedTrajectory(resp, observedCalls)
+			waveTranscripts[i] = transcriptCase{CaseID: mc.ID, Kind: protocol.KindMemory, UserID: uid, Response: resp, Observed: observedCalls}
 			cs := scorer.GradeMemory(mc, resp)
 			if len(observedCalls) > 0 {
 				// The graded response's ToolCalls (and thus cs.Called) are the
@@ -1024,6 +1043,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 			s.store.AppendPartial(runID, cs) // store append is mutex-guarded
 		})
 		perCase = append(perCase, waveResults...)
+		transcripts = append(transcripts, waveTranscripts...)
 	}
 
 	// 6. scoring — aggregate + finish.
@@ -1069,6 +1089,31 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	}
 	if injections > 0 {
 		log.Printf("run %s: %d injection-compliance case(s) flagged", runID, injections)
+	}
+	// Offline reproducibility: content-address the transcript artifact (the
+	// graded per-case inputs) and attach it to the run. The grader is public and
+	// deterministic, so (dataset regenerated from seed) + (this transcript)
+	// re-grades to the same numbers; the digest travels with the run status so
+	// the platform can bind it into the signed score payload and publish the
+	// bytes. A hashing failure is logged, never fatal: the score itself does not
+	// depend on the artifact.
+	tArtifact := transcriptArtifact{
+		RunID:         runID,
+		Seed:          seed,
+		BenchVersion:  protocol.BenchVersion,
+		DatasetSHA256: datasetHash,
+		Cases:         transcripts,
+	}
+	if tSHA, tBody, tErr := tArtifact.canonicalBytes(); tErr != nil {
+		log.Printf("run %s: transcript hashing failed: %v", runID, tErr)
+	} else {
+		s.store.SetTranscript(runID, tSHA, tBody)
+		if dir := strings.TrimSpace(os.Getenv("DITTOBENCH_ARTIFACT_DIR")); dir != "" {
+			if err := os.WriteFile(filepath.Join(dir, runID+".transcript.json"), tBody, 0o644); err != nil {
+				log.Printf("run %s: transcript persist failed: %v", runID, err)
+			}
+		}
+		log.Printf("run %s: transcript_sha256=%s (%d cases)", runID, tSHA, len(transcripts))
 	}
 	s.store.Finish(runID, report)
 	log.Printf("run %s done: bench_version=%d composite=%.3f tool_mean=%.3f memory_mean=%.3f observed=%d capped=%d",
@@ -1238,6 +1283,27 @@ func (s *server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, job)
+}
+
+// handleGetTranscript serves a completed run's canonical transcript artifact —
+// the graded per-case inputs whose SHA-256 is published as the run's
+// transcript_sha256. Anyone holding these bytes plus the seed-regenerated
+// dataset can re-run the public grader and reproduce the score offline.
+func (s *server) handleGetTranscript(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	job, ok := s.store.Get(id)
+	if !ok {
+		writeError(w, http.StatusNotFound, "run not found")
+		return
+	}
+	if len(job.Transcript) == 0 {
+		writeError(w, http.StatusNotFound, "run has no transcript (not finished, failed, or pre-transcript)")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Transcript-SHA256", job.TranscriptSHA256)
+	w.WriteHeader(http.StatusOK)
+	w.Write(job.Transcript)
 }
 
 // ---- small utils ----

@@ -70,6 +70,11 @@ func handleRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	calls := refharness.Route(req.UserInput, req.Tools)
+	// Reachability preflight: the validator's probe turn requires one call
+	// through tool_endpoint regardless of routing policy (PROTOCOL.md).
+	if refharness.IsPreflight(req.CaseID) {
+		calls = refharness.PreflightCalls()
+	}
 	finalText := "ok"
 	// Observed tool execution: when the validator advertises a mock tool
 	// endpoint, actually EXECUTE the routed tools through it (so the validator
