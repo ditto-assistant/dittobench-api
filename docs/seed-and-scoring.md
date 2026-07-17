@@ -45,18 +45,29 @@ two are compared on the same dataset (`ditto/validator/crn.py`):
     crn_seed = SHA-256(sorted(agent_ids) || bench_version || k) & (2**63-1)
 
 Scoring compared agents on an identical dataset collapses the variance of their
-score difference, which is the only quantity KOTH cares about. As implemented,
-CRN runs are triggered by bench-version staleness, not per dethrone attempt:
-when a version bump makes the reigning champion and participation tail stale,
-each validator re-scores that whole set on `KOTH_CONFIRMATION_SEEDS = 3` common
-seeds (k = 0..2) and submits each agent's median composite over them, so a
-refreshed crown has to replicate across seeds instead of riding one lucky draw.
+score difference, which is the only quantity KOTH cares about. CRN confirmation
+runs on two triggers:
+
+- Bench-version staleness. A version bump makes the reigning champion and
+  participation tail stale; each validator re-scores that whole set on
+  `KOTH_CONFIRMATION_SEEDS = 3` common seeds (k = 0..2) and submits each
+  agent's median composite over them, so a refreshed crown has to replicate
+  across seeds instead of riding one lucky draw.
+- A contested dethrone. When a current-version challenger's effective
+  composite lands inside the indifference band of the champion — the zone
+  where seed luck could decide the crown — the validator re-scores the whole
+  contested set (champion plus every in-band challenger) on the set's common
+  seeds. Clear wins and clear losses resolve immediately without confirmation
+  runs, and a settled pair (already sharing confirmation seeds) never
+  re-triggers.
+
 The dethrone comparison pairs the two sides seed-by-seed whenever both ledger
-entries carry composites for at least two shared CRN seeds; a challenger scored
-only on its own commit-reveal seed is compared unpaired — against the
-champion's median, over the flat margin or the independent z-band. The CRN seed
-is a pure function of the compared set and the version, so every validator
-computes the same value and Yuma consensus holds.
+entries carry composites for at least two shared CRN seeds — which the
+contested trigger guarantees for any decision inside the band. Outside the
+band the comparison is unpaired: the challenger's own-seed score against the
+champion's median, over the flat margin or the independent z-band. The CRN
+seed is a pure function of the compared set and the version, so every
+validator computes the same value and Yuma consensus holds.
 
 This is where per-run seed variance is removed. It is removed from the
 comparison, not by forcing every miner onto one global dataset (see the next
