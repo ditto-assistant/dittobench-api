@@ -930,7 +930,17 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 				uid = wave.UserID
 			}
 			resp, _ := runner.RunCase(ctx, harnessURL, mc.ID, mc.Question, tools, runner.CaseOptions{ToolEndpoint: toolEndpoint, UserID: uid})
+			observedCalls := toolSrv.Observed(mc.ID)
+			resp = withObservedTrajectory(resp, observedCalls)
 			cs := scorer.GradeMemory(mc, resp)
+			if len(observedCalls) > 0 {
+				// The graded response's ToolCalls (and thus cs.Called) are the
+				// validator-observed trajectory, not the harness self-report. Mark it
+				// so a consumer/auditor reading the report — e.g. reviewing a BaitTool
+				// zero — knows cs.Called is authoritative, matching the tool-case path.
+				cs.Observed = true
+				cs.Notes = append(cs.Notes, "called reflects the validator-observed trajectory")
+			}
 			perCase = append(perCase, cs)
 			s.store.AppendPartial(runID, cs)
 		}
@@ -1023,6 +1033,21 @@ func (s *server) finishSandboxRun(runID string, handle *sandbox.Handle) {
 		s.store.FailWith(runID, message, failure)
 	}
 	s.sandbox.Stop(context.Background(), handle)
+}
+
+// withObservedTrajectory substitutes the validator-OBSERVED tool trajectory for
+// the harness's self-reported ToolCalls before a memory case is graded. This is
+// what makes injection-bait compliance unscrubable: a bait action-tool call
+// recorded by the mock endpoint reaches the grader even if the harness deleted
+// every trace of it from its response text. When nothing was observed (a
+// harness that stubs tools locally, or a pure recall answer that called no
+// served tool), the self-report is left untouched, so honest harnesses are
+// unaffected.
+func withObservedTrajectory(resp protocol.RunResponse, observed []protocol.ObservedToolCall) protocol.RunResponse {
+	if len(observed) > 0 {
+		resp.ToolCalls = observed
+	}
+	return resp
 }
 
 // startToolServer stands up the observed-execution mock tool endpoint on an

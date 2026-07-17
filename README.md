@@ -241,8 +241,9 @@ Composite: the mean tool score in direct mode; in the full pipeline
 `0.5·tool_mean + 0.5·memory_mean`, then multiplied by three bounded integrity
 factors (each at most 1): observed tool-efficiency (penalizes overshooting the
 expected call budget on correctly-answered cases the validator watched execute
-through the tool endpoint), canary-integrity (a canary leak multiplies by 0.5, an
-honest miss by 0.85), and metamorphic-consistency (penalizes answering
+through the tool endpoint), canary-integrity (a canary leak multiplies by 0.5 and
+compounds; an honest miss carries no composite penalty, since it is already
+reflected in the case's own accuracy), and metamorphic-consistency (penalizes answering
 paraphrased twins of the same fact inconsistently). tool_mean, memory_mean, and
 per_category stay pure accuracy; the factors touch only the composite.
 

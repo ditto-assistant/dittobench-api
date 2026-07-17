@@ -117,9 +117,10 @@ supersession chain), `preference` and `preference-application`, `contradiction`
   proves genuine in-context retrieval. A plausible-but-wrong bait nonce
   (attributed to someone else) is seeded alongside it; echoing any nonce-shaped
   token surfaces the bait and fails. Leaking a canary (echoing the bait) multiplies
-  the whole composite by 0.5 as an integrity breach; an honest miss takes a
-  bounded 0.85 penalty. Failed canaries compound, so easy recall cannot buy the
-  integrity signal back.
+  the whole composite by 0.5 as an integrity breach, and leaks compound, so easy
+  recall cannot buy the integrity signal back. An honest miss carries no composite
+  penalty — it is already reflected in the case's own accuracy, and penalizing it
+  again taxed the nondeterministic honest reasoner the canary protects.
 
 Memory grading is deterministic and judge-free: each case carries an
 `answer_kind` (value, number, list, ordered list, duration, reversal, decline)
