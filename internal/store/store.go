@@ -59,8 +59,13 @@ type Job struct {
 	Progress  Progress              `json:"progress"`           // stage/done/total for the UI
 	Partial   []protocol.CaseScore  `json:"partial,omitempty"`  // case scores appended as they complete
 	Report    *protocol.ScoreReport `json:"report,omitempty"`   // set when Status == done
-	CreatedAt time.Time             `json:"created_at"`
-	UpdatedAt time.Time             `json:"updated_at"`
+	// TranscriptSHA256 content-addresses the canonical transcript artifact (the
+	// graded per-case inputs) for offline re-grading; the bytes themselves are
+	// served by GET /v1/runs/{id}/transcript, not inlined in run status.
+	TranscriptSHA256 string    `json:"transcript_sha256,omitempty"`
+	Transcript       []byte    `json:"-"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 // Store holds jobs by run ID.
@@ -140,6 +145,14 @@ func (s *Store) FailWith(runID, msg string, failure *Failure) {
 		j.Status = StatusFailed
 		j.Error = msg
 		j.Failure = failure
+	})
+}
+
+// SetTranscript attaches the canonical transcript artifact and its digest.
+func (s *Store) SetTranscript(runID, sha string, body []byte) {
+	s.Update(runID, func(j *Job) {
+		j.TranscriptSHA256 = sha
+		j.Transcript = body
 	})
 }
 

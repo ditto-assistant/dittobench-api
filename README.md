@@ -209,7 +209,8 @@ submit a reachable `harness_url` instead.
 
 ### `GET /v1/runs/{id}`
 Fetch the job: `status`, `mode`, and (when `done`) the full `ScoreReport` with
-the per-case breakdown. Returns `404` if unknown.
+the per-case breakdown, plus `transcript_sha256` — the digest of the run's
+canonical transcript artifact. Returns `404` if unknown.
 ```sh
 curl localhost:8000/v1/runs/<run_id>
 ```
@@ -220,6 +221,17 @@ with `retryable=true`; ordinary non-zero miner exits remain non-retryable. Its
 diagnostics are limited to Docker state, exit code, OOM/cgroup counters, and
 aggregate `/tmp` usage. Container IDs, environment, output, paths, and source
 are never returned.
+
+### `GET /v1/runs/{id}/transcript`
+The run's canonical transcript artifact: every graded case's exact inputs (the
+`RunResponse` as graded plus the validator-observed trajectory), sorted by
+case id so the bytes — and therefore `transcript_sha256` — are deterministic.
+Together with the seed-regenerated dataset this is everything a third party
+needs to re-run the public grader and reproduce the score offline. Returns
+`404` until the run finishes.
+```sh
+curl localhost:8000/v1/runs/<run_id>/transcript
+```
 
 ## Scoring
 
