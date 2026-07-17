@@ -113,3 +113,121 @@ invoke create).
 | web_recovery_result_usage | 1.000 | 0.000 | 24 |
 | web_result_usage | 1.000 | 0.000 | 24 |
 
+## Run 2: bench_version 3, datagen v3 (pre-tag)
+
+- Date: 2026-07-17
+- Config: v3 scorer + datagen (anti-gaming hardening: dump guard, needle
+  gating + decoys, grammar collision, trajectory bait, canary multi-decoy,
+  reachability preflight, transcript publication), `bench_version` 3
+- Harness: stock reference (dittobench starter kit baseline, unmodified, with
+  the v3 preflight)
+- Model: Qwen3-32B. Backend: OpenRouter `qwen/qwen3-32b` (same weights as the
+  scored Chutes `Qwen/Qwen3-32B-TEE`)
+- Method: ONE full run (seed 20260717, 114 cases, 13 min). A single seed, so
+  no between-seed SE here; the within-run `composite_stderr` is reported, and
+  the hermetic between-seed dataset spread comes from `cmd/benchcal`
+  (30 seeds: tool sd 0.030, composite sd 0.015, noise floor 0). Regenerate
+  this section over 24 seeds like Run 1 once the release settles.
+
+### Headline
+
+| metric | value |
+| --- | --- |
+| composite | 0.461 |
+| tool_mean | 0.713 |
+| memory_mean | 0.284 |
+| within-run composite_stderr | 0.0372 |
+
+Versus Run 1 (v2): composite 0.492 -> 0.461, tool 0.793 -> 0.713, memory
+0.419 -> 0.284. The drop is the hardening working: v3 removed the surfaces
+the reference harness scored free points on. The transcript digest for this
+run verified byte-exact against `GET /v1/runs/{id}/transcript`.
+
+### Gates and latency
+
+- Observed / capped tool cases: 39 / 10 (scored path would zero the capped 10)
+- Injection attempts flagged: 5
+- Metamorphic consistency: 0.5
+- Tool efficiency factor: 1.0
+- Median latency: 17.2 s per case (reported, not scored)
+
+### Memory categories (weakest first; n = cases in this single run)
+
+The v3 hard categories (abstention, canary, injection-resistance,
+computed-answer, knowledge-update, point-in-time) all sit at 0 for the stock
+kit: that is the intended miner headroom, and why the public baseline no
+longer saturates the benchmark.
+
+| category | mean | n |
+| --- | --- | --- |
+| abstention | 0.000 | 5 |
+| aggregation-count | 0.000 | 1 |
+| assistant-recall | 0.000 | 3 |
+| canary | 0.000 | 1 |
+| computed-answer | 0.000 | 1 |
+| injection-resistance | 0.000 | 5 |
+| knowledge-update | 0.000 | 2 |
+| point-in-time | 0.000 | 2 |
+| preference | 0.000 | 1 |
+| preference-application | 0.000 | 3 |
+| multi-session | 0.090 | 4 |
+| temporal-reasoning | 0.250 | 4 |
+| memory-write | 0.333 | 3 |
+| memory-write-read | 0.333 | 3 |
+| isolation | 0.500 | 4 |
+| single-session-recall | 0.700 | 10 |
+| contradiction | 1.000 | 3 |
+
+### Tool categories (weakest first; n = cases in this single run)
+
+The result-usage family drops sharply from v2 (e.g. `web_result_usage`
+1.000 -> 0.400): v3's needle gating and decoy zeroing require incorporating
+the value the bearing tool actually served, which the stock kit only
+sometimes does. `calendar_create` remains the known v2 reference gap.
+
+| category | mean | n |
+| --- | --- | --- |
+| calendar_create | 0.000 | 1 |
+| capability_discovery | 0.000 | 1 |
+| job_chain_result_usage | 0.000 | 1 |
+| memory_update | 0.000 | 1 |
+| multi_job_status | 0.000 | 1 |
+| multi_subject_scope | 0.000 | 1 |
+| recipe_create | 0.000 | 1 |
+| multi_web_result_usage | 0.267 | 1 |
+| web_recovery_result_usage | 0.400 | 1 |
+| web_result_usage | 0.400 | 1 |
+| agent_run_not_read | 0.500 | 2 |
+| artifacts_create | 0.500 | 2 |
+| image_edit_not_create | 0.500 | 2 |
+| memory_save_not_search | 0.500 | 1 |
+| web_search | 0.500 | 2 |
+| agent_workflow | 0.600 | 1 |
+| automation_not_job | 0.600 | 1 |
+| calendar_search | 0.600 | 1 |
+| email_send | 0.600 | 1 |
+| set_tool_prefs | 0.600 | 1 |
+| workflow_not_job | 0.600 | 2 |
+| agent_job | 1.000 | 2 |
+| agent_read_not_run | 1.000 | 2 |
+| arg_hallucination | 1.000 | 1 |
+| automation_list | 1.000 | 1 |
+| feedback | 1.000 | 1 |
+| image_create | 1.000 | 2 |
+| link_read | 1.000 | 2 |
+| memory_delete | 1.000 | 1 |
+| memory_fetch | 1.000 | 1 |
+| memory_lookup | 1.000 | 2 |
+| memory_subject | 1.000 | 2 |
+| multi_image_edit | 1.000 | 1 |
+| multi_web_read | 1.000 | 1 |
+| no_tool | 1.000 | 2 |
+| parallel_web_image | 1.000 | 1 |
+| recipe_apply | 1.000 | 1 |
+| route_memory_not_web | 1.000 | 2 |
+| route_web_not_memory | 1.000 | 2 |
+| set_accent | 1.000 | 1 |
+| set_effort | 1.000 | 1 |
+| set_font | 1.000 | 1 |
+| set_model | 1.000 | 1 |
+| settings | 1.000 | 2 |
