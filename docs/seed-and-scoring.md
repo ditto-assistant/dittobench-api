@@ -5,8 +5,9 @@ champion comparison is seeded, and how a miner can reproduce and audit any score
 It also records the plan for surfacing this through the platform API and UI so
 miners get the full picture without reading validator code.
 
-The companion `v3-deferred-hardening.md` covers the two hardening steps this
-design still wants (a fixed block offset and published transcripts).
+Offline reproducibility is closed end to end: every scored run publishes a
+content-addressed transcript artifact whose digest is bound into the validator's
+score signature (see "Verify any score yourself").
 
 ## The seed is committed before it exists, not hidden then revealed
 
@@ -52,8 +53,43 @@ compared set and the version, so every validator computes the same value and
 Yuma consensus holds.
 
 This is where per-run seed variance is removed. It is removed from the
-comparison, not by forcing every miner onto one global dataset. A single global
-seed would reopen the shared answer-key channel for no added fairness.
+comparison, not by forcing every miner onto one global dataset (see the next
+section for why a shared dataset would be a step backwards).
+
+## Why one shared dataset would not be better
+
+It is tempting to score every miner on the same dataset in the name of
+fairness. That trade is worse on every axis that matters here:
+
+- It recreates the shared answer key. With one global dataset, a single leak —
+  one miner extracting cases from their harness's own inputs and posting them —
+  compromises the benchmark for everyone at once, and every miner has an
+  incentive to trade answers because everyone's answers are the same. With
+  per-agent seeds, a leaked dataset is worthless to anyone but the agent it was
+  drawn for; there is nothing to collude over.
+- It makes overfitting profitable. A fixed target rewards memorizing that
+  target: distribution-shaping strategies (archetype extractors tuned to the
+  known case population) get strictly stronger when the population is a single
+  known instance rather than a distribution. Per-agent commit-reveal seeds mean
+  the only thing a miner can prepare for is the generator's distribution, which
+  is exactly the generalization the benchmark wants to measure.
+- It has to rotate, and every rotation is a window. A shared dataset must be
+  refreshed (else it decays into a public answer key), and whoever knows the
+  next dataset before harnesses freeze can pre-compute against it. The
+  per-agent scheme has no rotation moment: each submission's dataset is bound
+  to a block that does not exist until after that submission froze.
+- It buys less fairness than it appears to. Same distribution is not the same
+  as same instances, but instance-level fairness only matters where scores are
+  *compared* — and there the design already provides it exactly: a dethrone
+  scores champion and challenger on identical CRN datasets and takes medians
+  over `KOTH_CONFIRMATION_SEEDS` shared seeds. Routine (non-comparative)
+  scores tolerate seed variance because emissions never hinge on them; forcing
+  a global dataset would harden the answer-key channel to remove variance the
+  emission decision has already removed.
+
+In short: a single shared dataset concentrates all the risk (leak, overfit,
+collusion, rotation timing) to buy fairness only at the one place the design
+already gets it for free via common random numbers.
 
 ## Cadence: scoring is continuous, weights are hourly
 
@@ -90,9 +126,18 @@ reproduce scores rather than trust validators (`dittobench-datagen`). A given
 
    The printed `dataset_sha256` must equal the published one. That proves all
    validators scored the exact bytes the platform pinned.
-4. Re-grade a transcript with the public `grade/` package to reproduce the
-   composite. Full offline re-grading of an arbitrary run depends on transcript
-   publishing, which is finding 3 in `v3-deferred-hardening.md`.
+4. Re-grade the run's transcript with the public grader to reproduce the
+   composite. Every scored run publishes a canonical transcript artifact — the
+   graded per-case inputs (each case's `RunResponse` exactly as graded, plus
+   the validator-observed trajectory). Its SHA-256 is carried on the score
+   record (`PublicValidatorScore.transcript_sha256`) and, crucially, is bound
+   inside the validator's score signature, so the artifact cannot be swapped
+   after the fact. The bytes live content-addressed in the public bucket at
+   `transcripts/{sha256}.json` (uploaded by the validator via
+   `PUT /validator/agent/{id}/transcript/{run_id}`, which refuses any body
+   that does not hash to the signed digest). Verify the digest, regenerate the
+   dataset from step 3, and re-run the grader: the numbers must match the
+   signed composite byte for byte.
 
 ## What the platform exposes today
 
@@ -105,9 +150,10 @@ Per-submission transparency is already wired through the public API
   (`dataset_seed_block`, `dataset_seed_block_hash`) with verification
   instructions in the field docs, and the full list of per-validator scores.
 - `PublicValidatorScore` publishes each of the k=3 validators' `validator_hotkey`,
-  exact numbers, the `seed` it scored on, its sr25519 `signature`, and a redacted
-  per-case breakdown (category, kind, score, pass, latency, notes, never the
-  answer key).
+  exact numbers, the `seed` it scored on, its sr25519 `signature`, the
+  `transcript_sha256` of its published transcript artifact (when the validator
+  published one), and a redacted per-case breakdown (category, kind, score,
+  pass, latency, notes, never the answer key).
 - `PublicLeaderboardEntry` at the leaderboard stays aggregate: composite, tool
   and memory means, models, `bench_version`, `dataset_sha256`, and a per-category
   breakdown. It omits the raw seed by design and links to the full record by
@@ -162,12 +208,11 @@ most needs to understand why they did or did not take the crown.
 
 ### Sequencing
 
-The per-submission verification path already works, so the UI can surface the
-existing `PublicSubmissionScores` fields immediately. The dethrone record is the
-one new API artifact and should land first, since the head-to-head is the part
-miners cannot currently see. Full offline re-grading of a run still depends on
-transcript publishing (finding 3), so the "re-grade a transcript" step stays
-partial until that ships.
+The per-submission verification path already works end to end — including full
+offline re-grading via the published, signature-bound transcript artifact — so
+the UI can surface the existing `PublicSubmissionScores` fields immediately.
+The dethrone record is the one new API artifact and should land first, since
+the head-to-head is the part miners cannot currently see.
 
 ## On hiding versus publishing the seed
 
