@@ -58,39 +58,41 @@ func TestCapUnobservedScope_ObservedUnaffected(t *testing.T) {
 	}
 }
 
-// Memory-routing free point: a memory-tool case answered with only a non-empty
-// FinalText (no memory-tool call) earns 1.0 in practice but 0 when scored.
-func TestMemoryRoutingScope_FreePointClosedWhenScored(t *testing.T) {
+// Memory routing is scored on OBSERVED misrouting only, identically in both
+// scopes. Memory retrieval is internal and unobservable, so a legitimate
+// direct-store answer with no catalog call must be credited, and a self-reported
+// memory-tool call is never trusted as evidence (it is not in the observed
+// trajectory). This replaces the old "require a memory-tool call when scored"
+// rule, which was spoofable and zeroed correct direct-store retrieval.
+func TestMemoryRoutingScoresOnObservedMisroutingOnly(t *testing.T) {
 	c := protocol.ToolCase{
 		ID:            "memq-1",
 		Category:      "route_memory",
 		ExpectedTools: []protocol.ToolSpec{{Name: "search_memories"}},
 	}
-	// Harness produced an answer string but called NO memory tool.
+	// Direct-store answer, no catalog call: credited in BOTH scopes.
 	textOnly := protocol.RunResponse{FinalText: "Your favorite color is blue."}
-
-	practice := ScoreToolCaseScope(c, textOnly, true, ScopePractice)
-	if practice.ToolScore != 1.0 {
-		t.Fatalf("practice memory-routing with answer text should score 1.0, got %v", practice.ToolScore)
+	for _, sc := range []Scope{ScopePractice, ScopeScored} {
+		if got := ScoreToolCaseScope(c, textOnly, true, sc); got.ToolScore != 1.0 {
+			t.Fatalf("direct-store memory answer must score 1.0 in %v, got %v", sc, got.ToolScore)
+		}
 	}
-
-	scored := ScoreToolCaseScope(c, textOnly, true, ScopeScored)
-	if scored.ToolScore != 0 {
-		t.Fatalf("scored memory-routing with answer-only (no memory-tool call) must score 0, got %v", scored.ToolScore)
-	}
-
-	// A real memory-tool call earns credit in BOTH scopes.
-	withCall := protocol.RunResponse{
-		FinalText: "Your favorite color is blue.",
-		ToolCalls: []protocol.ObservedToolCall{{Name: "search_memories"}},
-	}
+	// An observed memory-tool call is also fine in both scopes.
+	withCall := protocol.RunResponse{ToolCalls: []protocol.ObservedToolCall{{Name: "search_memories"}}}
 	if got := ScoreToolCaseScope(c, withCall, true, ScopeScored); got.ToolScore != 1.0 {
-		t.Fatalf("scored memory-routing WITH a memory-tool call should score 1.0, got %v", got.ToolScore)
+		t.Fatalf("observed memory-tool call should score 1.0, got %v", got.ToolScore)
 	}
-	// A misroute to a non-memory tool still zeroes in scored scope.
+	// A misroute to a non-memory tool zeroes in both scopes.
 	misroute := protocol.RunResponse{ToolCalls: []protocol.ObservedToolCall{{Name: "search_web"}}}
-	if got := ScoreToolCaseScope(c, misroute, true, ScopeScored); got.ToolScore != 0 {
-		t.Fatalf("scored memory-routing misroute must score 0, got %v", got.ToolScore)
+	for _, sc := range []Scope{ScopePractice, ScopeScored} {
+		if got := ScoreToolCaseScope(c, misroute, true, sc); got.ToolScore != 0 {
+			t.Fatalf("memory-routing misroute must score 0 in %v, got %v", sc, got.ToolScore)
+		}
+	}
+	// A pure no-op (no call, no answer) still fails the routing trap.
+	noop := protocol.RunResponse{}
+	if got := ScoreToolCaseScope(c, noop, true, ScopeScored); got.ToolScore != 0 {
+		t.Fatalf("no-op memory routing must score 0, got %v", got.ToolScore)
 	}
 }
 

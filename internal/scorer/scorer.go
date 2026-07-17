@@ -696,6 +696,18 @@ func scoreCase(c protocol.ToolCase, resp protocol.RunResponse, ok bool, scope Sc
 	// penalizing a competent memory harness for how it retrieves; retrieval
 	// accuracy itself is the memory suite's job.
 	if allMemoryTools(c.ExpectedTools) {
+		// Memory retrieval is INTERNAL and unobservable: the endpoint never serves
+		// a memory tool, so a legitimate harness may answer straight from its
+		// seeded store with no catalog call. Score this case only on what is
+		// verifiable in the OBSERVED trajectory — routing — and never on a
+		// self-reported memory call. resp.ToolCalls here is the validator-observed
+		// trajectory (auth.ToolCalls = observed), so a memory-tool name that was
+		// not routed through the endpoint does not appear and cannot earn credit.
+		//
+		// The previous scored rule required a memory-tool call as "evidence": that
+		// was both spoofable (a fabricated search_memories self-report scored 1)
+		// and a false positive (correct direct-store retrieval with no call scored
+		// 0). It is replaced by the same routing-only rule in both scopes.
 		for _, call := range resp.ToolCalls {
 			if !memoryTools[call.Name] {
 				cs.ToolScore = 0
@@ -703,30 +715,15 @@ func scoreCase(c protocol.ToolCase, resp protocol.RunResponse, ok bool, scope Sc
 				return cs
 			}
 		}
-		if scope == ScopeScored {
-			// Scored/on-chain: a non-empty FinalText alone is a free point — a
-			// deterministic parser can emit any answer string without retrieving
-			// anything. Require a real memory-tool call as verifiable evidence of a
-			// retrieval attempt; a self-reported answer with no call earns nothing.
-			if len(resp.ToolCalls) > 0 {
-				cs.ToolScore = 1.0
-				cs.Notes = append(cs.Notes, "memory request handled via memory-tool call (scored: call required)")
-			} else {
-				cs.ToolScore = 0
-				cs.Notes = append(cs.Notes, "scored: no memory-tool call — self-reported answer alone is not credited")
-			}
-			return cs
-		}
-		// Practice: credit retrieval with EVIDENCE of it — a memory tool call or a
-		// substantive answer. A pure no-op (no call and no answer) did not attempt
-		// to retrieve, so a routing trap still catches a harness that just ignores
-		// the memory request.
+		// No observed misrouting. Credit any genuine attempt (an observed memory
+		// call or a substantive answer); a pure no-op still fails the routing trap.
+		// Whether the answer is CORRECT is the memory suite's job, not this case's.
 		if len(resp.ToolCalls) > 0 || strings.TrimSpace(resp.FinalText) != "" {
 			cs.ToolScore = 1.0
-			cs.Notes = append(cs.Notes, "memory request handled via memory retrieval (internal or memory tool)")
+			cs.Notes = append(cs.Notes, "memory request routed to internal/memory retrieval, no non-memory misrouting observed")
 		} else {
 			cs.ToolScore = 0
-			cs.Notes = append(cs.Notes, "no memory retrieval attempted (no memory tool call and no answer)")
+			cs.Notes = append(cs.Notes, "no memory retrieval attempted (no observed call and no answer)")
 		}
 		return cs
 	}
