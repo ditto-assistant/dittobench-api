@@ -844,8 +844,17 @@ func (s *server) startToolServer(h http.Handler, docker bool) (endpoint string, 
 		// (mapped to host-gateway when the container is started, see sandbox.Run).
 		endpoint = fmt.Sprintf("http://host.docker.internal:%d/tool", port)
 	case s.allowPrivate:
-		// Local dev: the harness runs on the same host as the validator.
-		endpoint = fmt.Sprintf("http://127.0.0.1:%d/tool", port)
+		// Local dev normally runs the harness on the same host as the validator.
+		// A provider-certification setup may instead put both processes in an
+		// isolated Docker network. In that case the trusted validator advertises
+		// its network alias while keeping the untrusted harness off the host
+		// network. This setting is intentionally local-only and ignored unless the
+		// private-harness development mode is already enabled.
+		if host := strings.TrimSpace(os.Getenv("DITTOBENCH_LOCAL_TOOL_HOST")); host != "" {
+			endpoint = fmt.Sprintf("http://%s:%d/tool", host, port)
+		} else {
+			endpoint = fmt.Sprintf("http://127.0.0.1:%d/tool", port)
+		}
 	default:
 		// Hosted practice with a remote harness_url: it cannot reach our loopback
 		// port. Leave the endpoint unadvertised; observable cases score capped.
