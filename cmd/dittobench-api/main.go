@@ -945,14 +945,11 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		cs := scorer.ScoreToolCaseObservedScope(c, resp, runErr == nil, observed, scope)
 		if datagen.IsResultUsage(c.Category) {
 			// Result-usage: trajectory + whether the answer carried the served
-			// needle value (a fabricated value only the executed tool could reveal).
-			// v3 INTEGRATION (pending the datagen pin bump): switch to
-			// scorer.ComposeResultUsageWithDecoy(cs, resp.FinalText,
-			// toolFixtures[i].NeedleValue(), toolFixtures[i].DecoyValue()) so an answer
-			// carrying the served decoy (a number fished from the wrong tool) also
-			// zeros the usage half. Fixture.DecoyValue() is absent from the pinned
-			// datagen v0.7.0, so this wiring lands together with the pin bump.
-			cs = scorer.ComposeResultUsage(cs, resp.FinalText, toolFixtures[i].NeedleValue())
+			// needle value (a fabricated value only the executed tool could
+			// reveal). An answer carrying the served DECOY (a plausible number
+			// fished from the wrong tool's result) zeros the usage half too.
+			cs = scorer.ComposeResultUsageWithDecoy(cs, resp.FinalText,
+				toolFixtures[i].NeedleValue(), toolFixtures[i].DecoyValue())
 		} else {
 			cs = scorer.FinishTool(cs)
 		}
