@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/ditto-assistant/dittobench-api/internal/netguard"
@@ -191,6 +192,29 @@ func RunCase(ctx context.Context, harnessURL, caseID, prompt string, tools []pro
 	return runOne(ctx, harnessURL, protocol.ToolCase{ID: caseID, Prompt: prompt}, tools, opts)
 }
 
+// runAttemptBackoff is the fixed pause before the Nth retry (index 0 is the
+// pause before the first retry). No jitter: the delay only bounds retry rate,
+// and scores never depend on timing, so determinism is not affected.
+var runAttemptBackoff = []time.Duration{250 * time.Millisecond, 750 * time.Millisecond}
+
+// runAttempts is the total number of /run attempts per case (1 = no retry).
+// A harness under concurrent load, or the model relay, can return a transient
+// 429/5xx or drop the connection; without a retry that case silently scores a
+// miss, which becomes common once cases run in parallel. Retries only fire on
+// transient failures and stay inside the per-case deadline. Overridable so an
+// operator can disable retries (set 1) or widen them.
+var runAttempts = envInt("DITTOBENCH_RUN_ATTEMPTS", 3)
+
+// envInt reads a positive int from key, returning def when unset or invalid.
+func envInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return def
+}
+
 func runOne(ctx context.Context, harnessURL string, c protocol.ToolCase, tools []protocol.ToolDefinition, opts CaseOptions) (protocol.RunResponse, error) {
 	ctx, cancel := context.WithTimeout(ctx, perCaseTimeout)
 	defer cancel()
@@ -208,35 +232,70 @@ func runOne(ctx context.Context, harnessURL string, c protocol.ToolCase, tools [
 		return protocol.RunResponse{}, fmt.Errorf("marshal run request: %w", err)
 	}
 
+	attempts := runAttempts
+	if attempts < 1 {
+		attempts = 1
+	}
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		if attempt > 0 {
+			// Back off before a retry, but abandon if the per-case deadline is up.
+			pause := runAttemptBackoff[min(attempt-1, len(runAttemptBackoff)-1)]
+			select {
+			case <-ctx.Done():
+				return protocol.RunResponse{}, lastErr
+			case <-time.After(pause):
+			}
+		}
+		resp, retryable, err := runAttempt(ctx, harnessURL, buf)
+		if err == nil {
+			return resp, nil
+		}
+		lastErr = err
+		// A non-retryable failure (a 4xx other than 429, or a valid 200 the
+		// harness returned as unparseable) will not change on a retry.
+		if !retryable {
+			return protocol.RunResponse{}, err
+		}
+	}
+	return protocol.RunResponse{}, lastErr
+}
+
+// runAttempt makes one POST /run. retryable is true when the failure is
+// transient (connection error, 429, or 5xx) and a fresh attempt could succeed.
+func runAttempt(ctx context.Context, harnessURL string, buf []byte) (protocol.RunResponse, bool, error) {
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, harnessURL+"/run", bytes.NewReader(buf))
 	if err != nil {
-		return protocol.RunResponse{}, fmt.Errorf("build run request: %w", err)
+		return protocol.RunResponse{}, false, fmt.Errorf("build run request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	start := time.Now()
 	httpResp, err := clientFor(ctx).Do(httpReq)
 	if err != nil {
-		return protocol.RunResponse{}, fmt.Errorf("post /run: %w", err)
+		// A network/connection error is transient unless the context itself is
+		// done (deadline or cancellation), in which case a retry cannot help.
+		return protocol.RunResponse{}, ctx.Err() == nil, fmt.Errorf("post /run: %w", err)
 	}
 	defer httpResp.Body.Close()
 
 	body, err := io.ReadAll(io.LimitReader(httpResp.Body, 4<<20))
 	if err != nil {
-		return protocol.RunResponse{}, fmt.Errorf("read /run body: %w", err)
+		return protocol.RunResponse{}, ctx.Err() == nil, fmt.Errorf("read /run body: %w", err)
 	}
 	elapsed := time.Since(start)
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		return protocol.RunResponse{}, fmt.Errorf("/run returned %d", httpResp.StatusCode)
+		retryable := httpResp.StatusCode == http.StatusTooManyRequests || httpResp.StatusCode >= 500
+		return protocol.RunResponse{}, retryable, fmt.Errorf("/run returned %d", httpResp.StatusCode)
 	}
 
 	var out protocol.RunResponse
 	if err := json.Unmarshal(body, &out); err != nil {
-		return protocol.RunResponse{}, fmt.Errorf("decode /run response: %w", err)
+		return protocol.RunResponse{}, false, fmt.Errorf("decode /run response: %w", err)
 	}
 	// Measure latency validator-side (the /run round trip) and override any
 	// self-reported value: a harness-supplied latency_ms is untrusted and must
 	// never reach a score.
 	out.LatencyMs = elapsed.Milliseconds()
-	return out, nil
+	return out, false, nil
 }

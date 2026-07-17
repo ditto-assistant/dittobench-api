@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/ditto-assistant/dittobench-datagen/protocol"
@@ -160,5 +161,65 @@ func TestRunCase(t *testing.T) {
 	}
 	if resp.FinalText != "answer:what color?" {
 		t.Fatalf("unexpected: %q", resp.FinalText)
+	}
+}
+
+func TestRunCaseRetriesTransientThenSucceeds(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&calls, 1)
+		if n < 3 { // first two attempts: transient failures (429 then 503)
+			if n == 1 {
+				w.WriteHeader(http.StatusTooManyRequests)
+			} else {
+				w.WriteHeader(http.StatusServiceUnavailable)
+			}
+			return
+		}
+		json.NewEncoder(w).Encode(protocol.RunResponse{FinalText: "recovered"})
+	}))
+	defer srv.Close()
+
+	out, err := RunCase(sandboxContext(), srv.URL, "c1", "hi", nil, CaseOptions{})
+	if err != nil {
+		t.Fatalf("RunCase should have recovered after retries: %v", err)
+	}
+	if out.FinalText != "recovered" {
+		t.Fatalf("unexpected response: %+v", out)
+	}
+	if got := atomic.LoadInt32(&calls); got != 3 {
+		t.Fatalf("expected 3 attempts (2 transient + 1 success), got %d", got)
+	}
+}
+
+func TestRunCaseDoesNotRetryClientError(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.WriteHeader(http.StatusBadRequest) // 400: not transient
+	}))
+	defer srv.Close()
+
+	if _, err := RunCase(sandboxContext(), srv.URL, "c1", "hi", nil, CaseOptions{}); err == nil {
+		t.Fatal("expected an error for a 400 response")
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("a 4xx must not be retried; got %d attempts", got)
+	}
+}
+
+func TestRunCaseGivesUpAfterAttempts(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.WriteHeader(http.StatusServiceUnavailable) // always transient
+	}))
+	defer srv.Close()
+
+	if _, err := RunCase(sandboxContext(), srv.URL, "c1", "hi", nil, CaseOptions{}); err == nil {
+		t.Fatal("expected an error after exhausting attempts")
+	}
+	if got := atomic.LoadInt32(&calls); got != int32(runAttempts) {
+		t.Fatalf("expected %d attempts, got %d", runAttempts, got)
 	}
 }

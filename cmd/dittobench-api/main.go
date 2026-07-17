@@ -49,12 +49,62 @@ const (
 	maxSubmitBody    = 64 << 10        // request body cap (submissions are tiny)
 	submitsPerWindow = 15              // per-IP submissions...
 	submitWindow     = 5 * time.Minute // ...per this window
-	// One full miner sandbox has a 3 GiB cgroup cap and 512 MiB writable tmpfs
-	// within that cap. The
-	// validator host also runs Ollama, the relay, Docker, Pylon, and the worker,
-	// so multiple in-process full runs can overcommit the documented 16 GiB host.
-	maxConcurrentRuns = 1
 )
+
+// maxConcurrentRuns is the global cap on in-flight run_size jobs. caseConcurrency
+// is how many cases within one run execute in parallel against the harness. The
+// two multiply into the peak load on the locked-model provider (roughly
+// maxConcurrentRuns * caseConcurrency concurrent model round-trips), so size them
+// together to the provider's rate limit. caseConcurrency=1 reproduces the
+// original strictly-sequential per-case execution. Both are env-overridable so a
+// rescore wave can be tuned to the available provider headroom without a rebuild.
+var (
+	// Defaults to 1: one full miner sandbox has a 3 GiB cgroup cap and 512 MiB
+	// writable tmpfs within it, and the validator host also runs Ollama, the
+	// relay, Docker, Pylon, and the worker, so concurrent in-process full runs
+	// overcommit the documented 16 GiB host (#31). Raise it only on a host with
+	// headroom to spare.
+	maxConcurrentRuns = envIntDefault("DITTOBENCH_MAX_CONCURRENT_RUNS", 1)
+	caseConcurrency   = envIntDefault("DITTOBENCH_CASE_CONCURRENCY", 4)
+)
+
+// envIntDefault reads a positive int from key, returning def when unset or invalid.
+func envIntDefault(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return def
+}
+
+// runBounded runs fn for each index in [0,n) with at most `concurrency` calls in
+// flight, and returns once all have finished. fn must be safe for concurrent use;
+// callers write per-index results into a preallocated slice so output order is
+// independent of completion order. Acquisition honors ctx cancellation so a
+// timed-out or cancelled run stops scheduling new cases promptly.
+func runBounded(ctx context.Context, n, concurrency int, fn func(i int)) {
+	if concurrency < 1 {
+		concurrency = 1
+	}
+	sem := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		select {
+		case <-ctx.Done():
+			wg.Wait()
+			return
+		case sem <- struct{}{}:
+		}
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			fn(i)
+		}(i)
+	}
+	wg.Wait()
+}
 
 type server struct {
 	store   *store.Store
@@ -863,10 +913,17 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		log.Printf("run %s: tool_endpoint not advertised (remote harness unreachable); observable tool cases scored capped (practice)", runID)
 	}
 
-	// 4. tool cases — independent of the memory haystack, so run before seeding.
+	// 4. tool cases — independent of the memory haystack and of each other, so
+	//    run before seeding and with bounded per-case concurrency. Results are
+	//    written per index so the report order is identical to sequential
+	//    execution regardless of completion order.
 	observedTool, cappedTool := 0, 0
 	s.store.SetStage(runID, store.StatusRunning, 0, total)
-	for i, c := range toolCases {
+	toolResults := make([]protocol.CaseScore, len(toolCases))
+	toolWasObserved := make([]bool, len(toolCases))
+	toolWasCapped := make([]bool, len(toolCases))
+	runBounded(ctx, len(toolCases), caseConcurrency, func(i int) {
+		c := toolCases[i]
 		resp, runErr := runner.RunCase(ctx, harnessURL, c.ID, c.Prompt, tools, runner.CaseOptions{ToolEndpoint: toolEndpoint})
 		observed := toolSrv.Observed(c.ID)
 		cs := scorer.ScoreToolCaseObservedScope(c, resp, runErr == nil, observed, scope)
@@ -879,14 +936,22 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		}
 		switch {
 		case len(observed) > 0:
-			observedTool++
+			toolWasObserved[i] = true
 		case toolexec.Observable(c):
 			// Unobserved observable case: capped at 0.5 in practice, 0 when scored.
 			cs = scorer.CapUnobservedScope(cs, scope)
+			toolWasCapped[i] = true
+		}
+		toolResults[i] = cs
+		s.store.AppendPartial(runID, cs) // store append is mutex-guarded
+	})
+	for i, cs := range toolResults {
+		perCase = append(perCase, cs)
+		if toolWasObserved[i] {
+			observedTool++
+		} else if toolWasCapped[i] {
 			cappedTool++
 		}
-		perCase = append(perCase, cs)
-		s.store.AppendPartial(runID, cs)
 	}
 
 	// 5. memory cases — staged Tier-C ingestion: seed a wave,
@@ -921,7 +986,15 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 			}
 		}
 		s.store.SetStage(runID, store.StatusRunning, len(perCase), total)
-		for _, sc := range casesByWave[w] {
+		// Cases within one wave are independent: their evidence is fully seeded
+		// (this wave and all prior waves), lifecycle WRITE cases live only in wave
+		// 0 and their READ cases in a later wave, and same-wave writes target
+		// distinct keys — so they run with bounded concurrency. The wave boundary
+		// stays a barrier: seed wave w, run its cases, then seed wave w+1.
+		waveCases := casesByWave[w]
+		waveResults := make([]protocol.CaseScore, len(waveCases))
+		runBounded(ctx, len(waveCases), caseConcurrency, func(i int) {
+			sc := waveCases[i]
 			mc := sc.Case
 			// Scope the query to the case's memory graph: isolation cases carry an
 			// explicit user_id; all others default to the primary wave's user.
@@ -941,9 +1014,10 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 				cs.Observed = true
 				cs.Notes = append(cs.Notes, "called reflects the validator-observed trajectory")
 			}
-			perCase = append(perCase, cs)
-			s.store.AppendPartial(runID, cs)
-		}
+			waveResults[i] = cs
+			s.store.AppendPartial(runID, cs) // store append is mutex-guarded
+		})
+		perCase = append(perCase, waveResults...)
 	}
 
 	// 6. scoring — aggregate + finish.
