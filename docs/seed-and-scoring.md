@@ -44,13 +44,19 @@ two are compared on the same dataset (`ditto/validator/crn.py`):
 
     crn_seed = SHA-256(sorted(agent_ids) || bench_version || k) & (2**63-1)
 
-Scoring the champion and challenger on an identical dataset collapses the
-variance of their score difference, which is the only quantity KOTH cares about.
-A dethrone runs `KOTH_CONFIRMATION_SEEDS = 3` common seeds (k = 0..2) and takes
-each agent's median composite over them, so a crown flip has to replicate across
-seeds instead of riding one lucky draw. The CRN seed is a pure function of the
-compared set and the version, so every validator computes the same value and
-Yuma consensus holds.
+Scoring compared agents on an identical dataset collapses the variance of their
+score difference, which is the only quantity KOTH cares about. As implemented,
+CRN runs are triggered by bench-version staleness, not per dethrone attempt:
+when a version bump makes the reigning champion and participation tail stale,
+each validator re-scores that whole set on `KOTH_CONFIRMATION_SEEDS = 3` common
+seeds (k = 0..2) and submits each agent's median composite over them, so a
+refreshed crown has to replicate across seeds instead of riding one lucky draw.
+The dethrone comparison pairs the two sides seed-by-seed whenever both ledger
+entries carry composites for at least two shared CRN seeds; a challenger scored
+only on its own commit-reveal seed is compared unpaired — against the
+champion's median, over the flat margin or the independent z-band. The CRN seed
+is a pure function of the compared set and the version, so every validator
+computes the same value and Yuma consensus holds.
 
 This is where per-run seed variance is removed. It is removed from the
 comparison, not by forcing every miner onto one global dataset (see the next
