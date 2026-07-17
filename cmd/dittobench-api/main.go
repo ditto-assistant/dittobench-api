@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -56,11 +57,13 @@ type server struct {
 	sandbox sandbox.Sandbox
 	// allowPrivate relaxes caller-supplied URL checks for local development.
 	// Validator-owned loopback sandboxes use a separate trusted client.
-	allowPrivate bool
-	limiter      *ratelimit.Limiter
-	runSlots     chan struct{} // bounds concurrent run_size jobs
-	cancelMu     sync.Mutex
-	runCancels   map[string]context.CancelFunc
+	allowPrivate         bool
+	allowScreenedImages  bool
+	requireScreenedImage bool
+	limiter              *ratelimit.Limiter
+	runSlots             chan struct{} // bounds concurrent run_size jobs
+	cancelMu             sync.Mutex
+	runCancels           map[string]context.CancelFunc
 }
 
 func main() {
@@ -77,18 +80,28 @@ func main() {
 
 	// SSRF guard is ON by default; opt out for local dev / sandbox containers.
 	allowPrivate := envBool("DITTOBENCH_ALLOW_PRIVATE_HARNESS")
+	allowScreenedImages := envBool("DITTOBENCH_ALLOW_SCREENED_IMAGES")
+	requireScreenedImage := envBool("DITTOBENCH_REQUIRE_SCREENED_IMAGE")
 	runner.Configure(allowPrivate)
 	if allowPrivate {
 		log.Printf("WARNING: DITTOBENCH_ALLOW_PRIVATE_HARNESS set — SSRF guard relaxed (local/dev only)")
 	}
+	if allowScreenedImages {
+		log.Printf("DITTOBENCH_ALLOW_SCREENED_IMAGES set — trusted validator image path enabled")
+	}
+	if requireScreenedImage && !allowScreenedImages {
+		log.Fatal("DITTOBENCH_REQUIRE_SCREENED_IMAGE requires DITTOBENCH_ALLOW_SCREENED_IMAGES")
+	}
 
 	s := &server{
-		store:        store.New(),
-		sandbox:      sandbox.NewLocalDocker(),
-		allowPrivate: allowPrivate,
-		limiter:      ratelimit.New(submitsPerWindow, submitWindow),
-		runSlots:     make(chan struct{}, maxConcurrentRuns),
-		runCancels:   make(map[string]context.CancelFunc),
+		store:                store.New(),
+		sandbox:              sandbox.NewLocalDocker(),
+		allowPrivate:         allowPrivate,
+		allowScreenedImages:  allowScreenedImages,
+		requireScreenedImage: requireScreenedImage,
+		limiter:              ratelimit.New(submitsPerWindow, submitWindow),
+		runSlots:             make(chan struct{}, maxConcurrentRuns),
+		runCancels:           make(map[string]context.CancelFunc),
 	}
 
 	mux := http.NewServeMux()
@@ -221,9 +234,20 @@ type submitRequest struct {
 	// TarballSHA256 optionally pins the tarball's SHA-256 (hex). When present the
 	// sandbox re-verifies the fetched bytes — the platform already checks it at
 	// upload, so this is defense in depth against a swapped/corrupted blob.
-	TarballSHA256 string            `json:"tarball_sha256,omitempty"`
-	Env           map[string]string `json:"env,omitempty"`
-	N             int               `json:"n"`
+	TarballSHA256 string `json:"tarball_sha256,omitempty"`
+	// ScreenedImageURL is a short-lived URL for a `docker save` archive
+	// produced by the trusted screener from this exact tarball. It is
+	// accepted only together with TarballURL: the source is still materialized
+	// for structural anti-copy fingerprinting, but the Rust crate is not rebuilt.
+	ScreenedImageURL string `json:"screened_image_url,omitempty"`
+	// ScreenedImageSHA256 pins the archive bytes. ScreenedImageID pins
+	// the Docker image loaded from those bytes, preventing an archive/tag swap.
+	ScreenedImageSHA256 string            `json:"screened_image_sha256,omitempty"`
+	ScreenedImageID     string            `json:"screened_image_id,omitempty"`
+	ScreenedImageRef    string            `json:"screened_image_ref,omitempty"`
+	ScreenedImageSize   int64             `json:"screened_image_size_bytes,omitempty"`
+	Env                 map[string]string `json:"env,omitempty"`
+	N                   int               `json:"n"`
 	// RunSize selects the full SN118 pipeline (build → generate fresh anti-cheat
 	// dataset → seed haystack → run tool+memory cases → judge → score). One of
 	// "small" | "medium" | "full". When set, this path takes precedence.
@@ -244,11 +268,71 @@ type submitRequest struct {
 // only to the git path.
 func sourceFromReq(req submitRequest) sandbox.Source {
 	return sandbox.Source{
-		GitURL:        req.GitURL,
-		GitRef:        req.GitRef,
-		TarballURL:    req.TarballURL,
-		TarballSHA256: req.TarballSHA256,
+		GitURL:              req.GitURL,
+		GitRef:              req.GitRef,
+		TarballURL:          req.TarballURL,
+		TarballSHA256:       req.TarballSHA256,
+		ScreenedImageURL:    req.ScreenedImageURL,
+		ScreenedImageSHA256: req.ScreenedImageSHA256,
+		ScreenedImageID:     req.ScreenedImageID,
+		ScreenedImageRef:    req.ScreenedImageRef,
+		ScreenedImageSize:   req.ScreenedImageSize,
 	}
+}
+
+func validateScreenedImage(req submitRequest) string {
+	fieldsSet := req.ScreenedImageURL != "" || req.ScreenedImageSHA256 != "" ||
+		req.ScreenedImageID != "" || req.ScreenedImageRef != "" || req.ScreenedImageSize != 0
+	if !fieldsSet {
+		return ""
+	}
+	if req.TarballURL == "" {
+		return "screened image requires tarball_url for source fingerprinting"
+	}
+	if req.ScreenedImageURL == "" || req.ScreenedImageSHA256 == "" ||
+		req.ScreenedImageID == "" || req.ScreenedImageRef == "" || req.ScreenedImageSize <= 0 {
+		return "screened image url, sha256, id, ref, and positive size are required together"
+	}
+	if req.ScreenedImageSize > 8<<30 {
+		return "screened_image_size_bytes exceeds the 8 GiB limit"
+	}
+	if len(req.ScreenedImageSHA256) != 64 {
+		return "screened_image_sha256 must be 64 lowercase hex characters"
+	}
+	if _, err := hex.DecodeString(req.ScreenedImageSHA256); err != nil ||
+		req.ScreenedImageSHA256 != strings.ToLower(req.ScreenedImageSHA256) {
+		return "screened_image_sha256 must be 64 lowercase hex characters"
+	}
+	if !strings.HasPrefix(req.ScreenedImageID, "sha256:") || len(req.ScreenedImageID) != 71 {
+		return "screened_image_id must be a sha256 Docker image id"
+	}
+	imageHex := strings.TrimPrefix(req.ScreenedImageID, "sha256:")
+	if _, err := hex.DecodeString(imageHex); err != nil || imageHex != strings.ToLower(imageHex) {
+		return "screened_image_id must be a sha256 Docker image id"
+	}
+	const refPrefix = "ditto-screen/"
+	const refSuffix = ":latest"
+	refID := strings.TrimSuffix(strings.TrimPrefix(req.ScreenedImageRef, refPrefix), refSuffix)
+	parsedRefID, refErr := uuid.Parse(refID)
+	if !strings.HasPrefix(req.ScreenedImageRef, refPrefix) || !strings.HasSuffix(req.ScreenedImageRef, refSuffix) ||
+		refErr != nil || parsedRefID.String() != refID {
+		return "screened_image_ref must be the screener-owned ditto-screen reference"
+	}
+	return ""
+}
+
+func validateScreenedImageAccess(req submitRequest, allowScreenedImages bool) string {
+	if req.ScreenedImageURL != "" && !allowScreenedImages {
+		return "screened images are only accepted by the validator sandbox"
+	}
+	return ""
+}
+
+func validateScreenedImageRequired(req submitRequest, required bool) string {
+	if required && req.HarnessURL == "" && req.ScreenedImageURL == "" {
+		return "validator policy requires a screener-built image; source builds are disabled"
+	}
+	return ""
 }
 
 // submitResponse is returned by the direct (synchronous) path.
@@ -302,6 +386,21 @@ func (s *server) handleSubmit(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "provide only one of harness_url, git_url, or tarball_url")
 		return
 	}
+	if msg := validateScreenedImage(req); msg != "" {
+		writeError(w, http.StatusBadRequest, msg)
+		return
+	}
+	// Screened-image metadata is an integrity pin, not caller authentication.
+	// Only validator-owned/private deployments may bypass the source build; the
+	// public unauthenticated practice API must always build submitted source.
+	if msg := validateScreenedImageAccess(req, s.allowScreenedImages); msg != "" {
+		writeError(w, http.StatusForbidden, msg)
+		return
+	}
+	if msg := validateScreenedImageRequired(req, s.requireScreenedImage); msg != "" {
+		writeError(w, http.StatusForbidden, msg)
+		return
+	}
 
 	// SSRF guard: a caller-supplied harness_url / tarball_url must be a public
 	// http(s) endpoint (relaxed for local dev via DITTOBENCH_ALLOW_PRIVATE_HARNESS).
@@ -313,6 +412,12 @@ func (s *server) handleSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.TarballURL != "" {
 		if err := netguard.ValidateURL(req.TarballURL, s.allowPrivate); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	if req.ScreenedImageURL != "" {
+		if err := netguard.ValidateURL(req.ScreenedImageURL, s.allowPrivate); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -378,6 +483,18 @@ func (s *server) handleScore(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "provide exactly one of harness_url, git_url, or tarball_url")
 		return
 	}
+	if msg := validateScreenedImage(req); msg != "" {
+		writeError(w, http.StatusBadRequest, msg)
+		return
+	}
+	if msg := validateScreenedImageAccess(req, s.allowScreenedImages); msg != "" {
+		writeError(w, http.StatusForbidden, msg)
+		return
+	}
+	if msg := validateScreenedImageRequired(req, s.requireScreenedImage); msg != "" {
+		writeError(w, http.StatusForbidden, msg)
+		return
+	}
 	if req.HarnessURL != "" {
 		if err := netguard.ValidateURL(req.HarnessURL, s.allowPrivate); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
@@ -386,6 +503,12 @@ func (s *server) handleScore(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.TarballURL != "" {
 		if err := netguard.ValidateURL(req.TarballURL, s.allowPrivate); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	if req.ScreenedImageURL != "" {
+		if err := netguard.ValidateURL(req.ScreenedImageURL, s.allowPrivate); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -475,6 +598,7 @@ func (s *server) runSandboxJob(ctx context.Context, runID string, req submitRequ
 		log.Printf("sandbox job %s build failed: %v\n%s", runID, err, buildLog)
 		return
 	}
+	defer s.sandbox.Release(context.Background(), image)
 
 	handle, err := s.sandbox.Run(ctx, image, req.Env)
 	if err != nil {
@@ -582,6 +706,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		}
 		image = img
 		structuralFP = fp
+		defer s.sandbox.Release(context.Background(), image)
 	}
 
 	// 2. generating — fresh, anti-cheat dataset (tools + memory haystack).
