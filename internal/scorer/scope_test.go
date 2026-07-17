@@ -94,6 +94,15 @@ func TestMemoryRoutingScoresOnObservedMisroutingOnly(t *testing.T) {
 	if got := ScoreToolCaseScope(c, noop, true, ScopeScored); got.ToolScore != 0 {
 		t.Fatalf("no-op memory routing must score 0, got %v", got.ToolScore)
 	}
+	// A direct-store response that populates only the answer SLOT (empty
+	// final_text) is substantive retrieval evidence too: the protocol grades
+	// the slot with a prose fallback, so routing must credit it the same way.
+	slotOnly := protocol.RunResponse{Answer: "blue"}
+	for _, sc := range []Scope{ScopePractice, ScopeScored} {
+		if got := ScoreToolCaseScope(c, slotOnly, true, sc); got.ToolScore != 1.0 {
+			t.Fatalf("answer-slot-only memory answer must score 1.0 in %v, got %v", sc, got.ToolScore)
+		}
+	}
 }
 
 // The exported practice wrappers must remain identical to the scoped-practice

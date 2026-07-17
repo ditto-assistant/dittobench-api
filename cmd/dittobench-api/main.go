@@ -100,6 +100,15 @@ func runBounded(ctx context.Context, n, concurrency int, fn func(i int)) {
 		go func(i int) {
 			defer wg.Done()
 			defer func() { <-sem }()
+			// A panic in one worker must not kill the whole process (the
+			// pipeline's own recover only covers runSizeJob's goroutine, not
+			// these). The case keeps its zero-value score, which grades as a
+			// miss, matching how a failed /run call is treated.
+			defer func() {
+				if rec := recover(); rec != nil {
+					log.Printf("bounded worker %d panicked: %v", i, rec)
+				}
+			}()
 			fn(i)
 		}(i)
 	}
@@ -964,6 +973,13 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		toolResults[i] = cs
 		s.store.AppendPartial(runID, cs) // store append is mutex-guarded
 	})
+	// A cancelled context aborts runBounded early, leaving unexecuted slots as
+	// zero-value CaseScores. Never fold those into a report: the cancel handler
+	// has already failed the run, so just abandon it.
+	if ctx.Err() != nil {
+		log.Printf("run %s: cancelled during tool cases; abandoning without a report", runID)
+		return
+	}
 	for i, cs := range toolResults {
 		perCase = append(perCase, cs)
 		if toolWasObserved[i] {
@@ -1039,6 +1055,12 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 			waveResults[i] = cs
 			s.store.AppendPartial(runID, cs) // store append is mutex-guarded
 		})
+		// Same zero-value guard as the tool loop: a cancellation mid-wave must
+		// not fold half-empty results into a report.
+		if ctx.Err() != nil {
+			log.Printf("run %s: cancelled during memory wave %d; abandoning without a report", runID, w)
+			return
+		}
 		perCase = append(perCase, waveResults...)
 		transcripts = append(transcripts, waveTranscripts...)
 	}

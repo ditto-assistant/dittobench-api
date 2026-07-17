@@ -162,8 +162,10 @@ func stripSeparators(s string) string {
 // self-report still earns bounded, capped credit. Scored is the canonical
 // on-chain path whose report feeds the KOTH ledger; there, observed execution is
 // MANDATORY — an observable tool case the validator did not actually watch
-// execute earns nothing, and a memory-routing case must show a real memory-tool
-// call rather than an unverifiable answer string. Keeping the split explicit
+// execute earns nothing. Memory-routing cases are routing-only in BOTH scopes
+// (internal memory retrieval is unobservable through the tool endpoint, so a
+// substantive direct-store answer credits and only an observed misroute
+// zeroes). Keeping the split explicit
 // means practice tooling and calibration stay unchanged while the trustless,
 // stake-weighted path closes the parser-harness free points. A Scope is not a
 // validator secret: it is a property of the request (the canonical /v1/score
@@ -216,8 +218,9 @@ func ScoreToolCaseObserved(c protocol.ToolCase, resp protocol.RunResponse, ok bo
 
 // ScoreToolCaseObservedScope is ScoreToolCaseObserved with an explicit scope.
 // The observed-overrides-self-report semantics are identical in both scopes; the
-// scope only tightens the no-verifiable-evidence fallbacks in scoreCase (e.g. a
-// memory-routing case with no memory-tool call earns 0 in ScopeScored).
+// scope only tightens the unobserved-observable ceiling applied by the caller
+// (0.5 in practice, 0 scored). Memory-routing cases stay routing-only in both
+// scopes; see the allMemoryTools branch in scoreCase.
 func ScoreToolCaseObservedScope(c protocol.ToolCase, resp protocol.RunResponse, ok bool, observed []protocol.ObservedToolCall, scope Scope) protocol.CaseScore {
 	if len(observed) == 0 {
 		return ScoreToolCaseScope(c, resp, ok, scope)
@@ -716,9 +719,11 @@ func scoreCase(c protocol.ToolCase, resp protocol.RunResponse, ok bool, scope Sc
 			}
 		}
 		// No observed misrouting. Credit any genuine attempt (an observed memory
-		// call or a substantive answer); a pure no-op still fails the routing trap.
-		// Whether the answer is CORRECT is the memory suite's job, not this case's.
-		if len(resp.ToolCalls) > 0 || strings.TrimSpace(resp.FinalText) != "" {
+		// call or a substantive answer, in either the answer slot or the prose);
+		// a pure no-op still fails the routing trap. Whether the answer is
+		// CORRECT is the memory suite's job, not this case's.
+		if len(resp.ToolCalls) > 0 || strings.TrimSpace(resp.FinalText) != "" ||
+			strings.TrimSpace(resp.Answer) != "" {
 			cs.ToolScore = 1.0
 			cs.Notes = append(cs.Notes, "memory request routed to internal/memory retrieval, no non-memory misrouting observed")
 		} else {
