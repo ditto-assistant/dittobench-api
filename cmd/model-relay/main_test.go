@@ -97,3 +97,55 @@ func TestRelayRejectsNonJSON(t *testing.T) {
 		t.Fatalf("want 400 for non-JSON, got %d", resp.StatusCode)
 	}
 }
+
+// TestProviderProfilesAreFrozen: both certified profiles pin the exact scored
+// backend. Chutes serves the TEE model id; OpenRouter serves the canonical
+// slug with routing locked to the certified Nebius deployment and fallbacks
+// disabled, so OpenRouter cannot silently reroute to an uncertified host.
+func TestProviderProfilesAreFrozen(t *testing.T) {
+	chutes, ok := providers["chutes"]
+	if !ok || chutes.model != "Qwen/Qwen3-32B-TEE" || chutes.pinBody != nil {
+		t.Fatalf("chutes profile drifted: %+v", chutes)
+	}
+	or, ok := providers["openrouter"]
+	if !ok || or.model != "qwen/qwen3-32b" {
+		t.Fatalf("openrouter profile drifted: %+v", or)
+	}
+	body := map[string]any{"provider": map[string]any{"only": []string{"attacker-host"}, "allow_fallbacks": true}}
+	or.pinBody(body)
+	pin, _ := body["provider"].(map[string]any)
+	only, _ := pin["only"].([]string)
+	if len(only) != 1 || only[0] != "nebius" || pin["allow_fallbacks"] != false {
+		t.Fatalf("openrouter routing not locked to nebius/no-fallbacks: %v", body["provider"])
+	}
+}
+
+// TestRelayOpenRouterPinsServingProvider: end to end through handle, a sandbox
+// request that names its own provider routing reaches the upstream with the
+// locked model slug and the nebius-only routing pin.
+func TestRelayOpenRouterPinsServingProvider(t *testing.T) {
+	var got map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[]}`))
+	}))
+	defer upstream.Close()
+	profile := providers["openrouter"]
+	rl := &relay{upstream: upstream.URL, apiKey: "k", model: profile.model, thinking: false, pinBody: profile.pinBody, client: &http.Client{Timeout: 5 * time.Second}}
+	srv := httptest.NewServer(http.HandlerFunc(rl.handle))
+	defer srv.Close()
+
+	body := `{"model":"other/model","provider":{"only":["cheapest-host"],"allow_fallbacks":true},"messages":[]}`
+	if _, err := http.Post(srv.URL, "application/json", strings.NewReader(body)); err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	if got["model"] != "qwen/qwen3-32b" {
+		t.Fatalf("model not pinned to canonical slug: %v", got["model"])
+	}
+	pin, _ := got["provider"].(map[string]any)
+	only, _ := pin["only"].([]any)
+	if len(only) != 1 || only[0] != "nebius" || pin["allow_fallbacks"] != false {
+		t.Fatalf("serving provider not locked: %v", got["provider"])
+	}
+}
