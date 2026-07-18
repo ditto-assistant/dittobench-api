@@ -1,47 +1,34 @@
 // model-relay is the model-pinning gateway for validators that back the model
-// lock with a hosted provider (Chutes) instead of local GPUs. It terminates
-// the sandbox's OpenAI-compatible chat requests locally, FORCES the model
-// field to the locked id, injects the upstream API key, and forwards to the
-// upstream. The sandbox never holds the key and cannot choose the model, so
-// the lock's semantics are identical to a local Ollama/vLLM gateway.
+// lock with a hosted provider instead of local GPUs. It terminates the
+// sandbox's OpenAI-compatible chat requests locally, FORCES the model field to
+// the locked id, injects the upstream API key, and forwards to the upstream.
+// The sandbox never holds the key and cannot choose the model, so the lock's
+// semantics are identical to a local Ollama/vLLM gateway. The egress side stays
+// fail-closed: the sandbox reaches only this relay (host.docker.internal), and
+// the relay is the only process that reaches the upstream.
 //
-// The egress side stays fail-closed: the sandbox reaches only this relay
-// (host.docker.internal), and the relay is the only process that reaches the
-// upstream. A CONNECT-only egress proxy cannot pin the model field (it cannot
-// see request bodies); this relay exists because it can.
+// The same locked model (Qwen3-32B) is served by two interchangeable certified
+// providers, and each validator picks one with RELAY_PROVIDER. This spreads
+// scoring load: pinning the whole fleet to Chutes saturated that endpoint and
+// drove up latency, so validators now split across Chutes (the hardware-
+// attested TEE deployment, "chutes") and OpenRouter (the same weights via the
+// certified Nebius deployment, "openrouter"). The two are certified as
+// comparable, so a submission's k=3 quorum may mix providers by design; every
+// score reports the same harness model id (llm.LockedHarnessModel), so the
+// median is taken over comparable numbers.
 //
-// The forced model and thinking mode are frozen, not env vars: both are
-// consensus-critical (a hybrid-reasoning model must run one mode fleet-wide or
-// the k=3 validators' scores of a submission are not comparable), so every
-// validator's relay pins the same model (llm.LockedUpstreamModel) and the same
-// thinking mode (lockedThinking, off, which keeps replies inside per-case
-// budgets and cuts variance). Bump either in code (a network-wide change), then
-// redeploy.
+// Each profile is CODE-FROZEN: RELAY_PROVIDER only chooses which certified
+// profile runs, never what it pins (upstream, exact model id, serving-provider
+// routing, thinking mode). All of those are consensus-critical constants a
+// hybrid-reasoning model must share fleet-wide; change them in code (a
+// network-wide change), then redeploy. There is deliberately no upstream-URL
+// override: the pin is enforced in code, not left to a validator's env.
 //
-// The relay pins the model against a COMPROMISED SANDBOX, not against the
-// validator running it: the sandbox reaches only this relay and cannot choose
-// the model, provider, upstream, or see the key. A validator operator who
-// points RELAY_UPSTREAM_URL at an arbitrary server DOES change which model
-// answers (the forced `model` field is just a string an alternate server can
-// ignore), so the model lock is honor-system against the operator, backstopped
-// by k=3 quorum consensus: a single validator scoring on a different model is
-// outvoted by the median. Every validator must therefore run a certified
-// profile with its default upstream; overriding RELAY_UPSTREAM_URL is a
-// consensus-affecting deviation, not a neutral deployment knob.
-//
-// Env:
-//   - RELAY_PROVIDER      which CODE-FROZEN profile serves the locked model:
-//     "chutes" (default) or "openrouter". The env selects among profiles;
-//     everything inside a profile (default upstream, exact model id,
-//     serving-provider routing, thinking lock) is a code constant.
-//   - RELAY_UPSTREAM_URL  upstream chat-completions URL override for the
-//     selected profile. Intended only for a transparent same-model mirror
-//     (proxy in front of the SAME certified upstream). Pointing it elsewhere
-//     un-pins the scored model — see the consensus note above.
-//   - RELAY_API_KEY       upstream bearer key for the selected provider
-//     (required)
-//   - PORT                listen port (default 11434, the gateway port the
-//     sandbox already expects)
+// Env (deployment only):
+//   - RELAY_PROVIDER  "chutes" (default) or "openrouter"
+//   - RELAY_API_KEY   upstream bearer key for the selected provider (required)
+//   - PORT            listen port (default 11434, the gateway port the sandbox
+//     already expects)
 package main
 
 import (
@@ -57,8 +44,6 @@ import (
 	"github.com/ditto-assistant/dittobench-api/internal/llm"
 )
 
-const defaultUpstream = "https://llm.chutes.ai/v1/chat/completions"
-
 // providerProfile is one code-frozen upstream the relay may pin to. Every
 // field is consensus-critical and therefore a constant: RELAY_PROVIDER only
 // chooses WHICH profile runs, never what a profile pins.
@@ -69,14 +54,14 @@ type providerProfile struct {
 	pinBody func(body map[string]any)
 }
 
-// providers are the certified upstream profiles for the locked Qwen3-32B.
-// Chutes serves the hardware-attested TEE deployment; OpenRouter serves the
-// same weights with routing locked to the certified Nebius deployment (the
-// throughput/availability evidence behind the certification measured that
-// exact provider, and free routing would un-pin the scored backend).
+// providers are the certified profiles for the locked Qwen3-32B. Chutes serves
+// the hardware-attested TEE deployment; OpenRouter serves the same weights with
+// routing locked to the certified Nebius deployment (the throughput evidence
+// behind the certification measured that exact provider, and free routing would
+// un-pin the scored backend).
 var providers = map[string]providerProfile{
 	"chutes": {
-		upstream: defaultUpstream,
+		upstream: "https://llm.chutes.ai/v1/chat/completions",
 		model:    llm.LockedUpstreamModel,
 	},
 	"openrouter": {
@@ -145,7 +130,7 @@ func main() {
 		log.Fatalf("RELAY_PROVIDER %q is not a certified profile (chutes|openrouter)", providerName)
 	}
 	r := &relay{
-		upstream: envOr("RELAY_UPSTREAM_URL", profile.upstream),
+		upstream: profile.upstream,
 		apiKey:   strings.TrimSpace(os.Getenv("RELAY_API_KEY")),
 		model:    profile.model,
 		thinking: lockedThinking,
