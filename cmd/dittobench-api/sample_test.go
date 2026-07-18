@@ -67,7 +67,7 @@ func TestSampleIncludesAnswerKeys(t *testing.T) {
 }
 
 // TestSampleShapeMatchesProfile checks the sample is a real full-profile dataset
-// (60 tool + 4 isolation cases), so the community sees the real size.
+// (60 tool + 9 user-scoped cases), so the community sees the real size.
 func TestSampleShapeMatchesProfile(t *testing.T) {
 	s := &server{}
 	_, art := getSample(t, s, "?run_size=full")
@@ -80,8 +80,13 @@ func TestSampleShapeMatchesProfile(t *testing.T) {
 			iso++
 		}
 	}
-	if iso != 4 {
-		t.Fatalf("full profile should have 4 isolation cases, got %d", iso)
+	// 4 read-path isolation cases (the isoCases quota) plus the 5 cross-user
+	// LIFECYCLE cases (v3 B3): a write and a delete under user A, and the reads
+	// under user B that must be unaffected by them. Those are a fixed always-on
+	// probe rather than part of the quota, and they carry a user id because being
+	// user-scoped is the whole point of the probe.
+	if iso != 9 {
+		t.Fatalf("full profile should have 9 user-scoped cases, got %d", iso)
 	}
 	if len(art.MemoryWaves) < 1 {
 		t.Fatalf("expected at least one memory wave, got %d", len(art.MemoryWaves))

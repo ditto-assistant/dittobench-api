@@ -53,3 +53,30 @@ func TestComposeResultUsage(t *testing.T) {
 		t.Fatalf("no trajectory, no usage → 0, got %v", none.Score)
 	}
 }
+
+// TestComposeResultUsageDecoy: a harness that fished a number out of the wrong
+// tool carries the served decoy, so the usage half is 0 even if the needle is
+// also present — the decoy is the signature of grepping any number.
+func TestComposeResultUsageDecoy(t *testing.T) {
+	base := protocol.CaseScore{ToolScore: 1.0}
+	// Answer carries only the decoy -> usage 0.
+	d := ComposeResultUsageWithDecoy(base, "The figure is 7,902.", "3,418", "7,902")
+	if d.ResultUsage != 0 {
+		t.Fatalf("decoy-only answer must score usage 0, got %v", d.ResultUsage)
+	}
+	// Answer carries the needle and no decoy -> usage 1.
+	ok := ComposeResultUsageWithDecoy(base, "It reached 3,418 points.", "3,418", "7,902")
+	if ok.ResultUsage != 1 {
+		t.Fatalf("needle answer must score usage 1, got %v", ok.ResultUsage)
+	}
+	// Carrying the decoy zeroes usage even if the needle is also present (grepping).
+	both := ComposeResultUsageWithDecoy(base, "Maybe 3,418 or 7,902.", "3,418", "7,902")
+	if both.ResultUsage != 0 {
+		t.Fatalf("answer surfacing the decoy must score usage 0, got %v", both.ResultUsage)
+	}
+	// Empty decoy reproduces plain behavior.
+	plain := ComposeResultUsageWithDecoy(base, "It reached 3,418.", "3,418", "")
+	if plain.ResultUsage != 1 {
+		t.Fatalf("empty decoy should be plain: got %v", plain.ResultUsage)
+	}
+}

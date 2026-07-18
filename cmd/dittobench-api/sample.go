@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/ditto-assistant/dittobench-datagen/gen"
+	"github.com/ditto-assistant/dittobench-datagen/protocol"
 )
 
 // Public dataset sampler (task #52).
@@ -50,6 +51,13 @@ func (s *server) handleSample(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "sample must be between 0 and 9")
 		return
 	}
-	art := gen.GenerateDataset(publicSampleSeed(index), prof)
+	// Explicit version: the un-suffixed wrappers now default to the FROZEN v2
+	// contract, so an implicit call would silently serve the pre-hardening
+	// dataset while claiming to be current.
+	art, err := gen.GenerateDataset(publicSampleSeed(index), prof, protocol.CurrentBenchVersion)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "generating sample dataset failed")
+		return
+	}
 	writeJSON(w, http.StatusOK, art)
 }

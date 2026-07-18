@@ -49,12 +49,71 @@ const (
 	maxSubmitBody    = 64 << 10        // request body cap (submissions are tiny)
 	submitsPerWindow = 15              // per-IP submissions...
 	submitWindow     = 5 * time.Minute // ...per this window
-	// One full miner sandbox has a 3 GiB cgroup cap and 512 MiB writable tmpfs
-	// within that cap. The
-	// validator host also runs Ollama, the relay, Docker, Pylon, and the worker,
-	// so multiple in-process full runs can overcommit the documented 16 GiB host.
-	maxConcurrentRuns = 1
 )
+
+// maxConcurrentRuns is the global cap on in-flight run_size jobs. caseConcurrency
+// is how many cases within one run execute in parallel against the harness. The
+// two multiply into the peak load on the locked-model provider (roughly
+// maxConcurrentRuns * caseConcurrency concurrent model round-trips), so size them
+// together to the provider's rate limit. caseConcurrency=1 reproduces the
+// original strictly-sequential per-case execution. Both are env-overridable so a
+// rescore wave can be tuned to the available provider headroom without a rebuild.
+var (
+	// Defaults to 1: one full miner sandbox has a 3 GiB cgroup cap and 512 MiB
+	// writable tmpfs within it, and the validator host also runs Ollama, the
+	// relay, Docker, Pylon, and the worker, so concurrent in-process full runs
+	// overcommit the documented 16 GiB host (#31). Raise it only on a host with
+	// headroom to spare.
+	maxConcurrentRuns = envIntDefault("DITTOBENCH_MAX_CONCURRENT_RUNS", 1)
+	caseConcurrency   = envIntDefault("DITTOBENCH_CASE_CONCURRENCY", 4)
+)
+
+// envIntDefault reads a positive int from key, returning def when unset or invalid.
+func envIntDefault(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return def
+}
+
+// runBounded runs fn for each index in [0,n) with at most `concurrency` calls in
+// flight, and returns once all have finished. fn must be safe for concurrent use;
+// callers write per-index results into a preallocated slice so output order is
+// independent of completion order. Acquisition honors ctx cancellation so a
+// timed-out or cancelled run stops scheduling new cases promptly.
+func runBounded(ctx context.Context, n, concurrency int, fn func(i int)) {
+	if concurrency < 1 {
+		concurrency = 1
+	}
+	sem := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		select {
+		case <-ctx.Done():
+			wg.Wait()
+			return
+		case sem <- struct{}{}:
+		}
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			// A panic in one worker must not kill the whole process (the
+			// pipeline's own recover only covers runSizeJob's goroutine, not
+			// these). The case keeps its zero-value score, which grades as a
+			// miss, matching how a failed /run call is treated.
+			defer func() {
+				if rec := recover(); rec != nil {
+					log.Printf("bounded worker %d panicked: %v", i, rec)
+				}
+			}()
+			fn(i)
+		}(i)
+	}
+	wg.Wait()
+}
 
 type server struct {
 	store   *store.Store
@@ -116,6 +175,7 @@ func main() {
 	mux.HandleFunc("POST /v1/submit", s.handleSubmit)
 	mux.HandleFunc("POST /v1/score", s.handleScore)
 	mux.HandleFunc("GET /v1/runs/{id}", s.handleGetRun)
+	mux.HandleFunc("GET /v1/runs/{id}/transcript", s.handleGetTranscript)
 	mux.HandleFunc("DELETE /v1/runs/{id}", s.handleCancelRun)
 
 	addr := ":" + strconv.Itoa(*port)
@@ -691,6 +751,21 @@ func (s *server) acquireRunSlot(w http.ResponseWriter) bool {
 	}
 }
 
+// runScope classifies a run_size request as SCORED or PRACTICE. The canonical
+// on-chain path (POST /v1/score) pins the exact dataset the platform issued with
+// its ticket (dataset_sha256), so its report feeds the KOTH ledger and scoring is
+// trustless-strict: observed execution is mandatory and the parser free points
+// close. A run_size PRACTICE submission (POST /v1/submit, no dataset_sha256) keeps
+// the lenient self-hostable scoring. The scope is a pure property of the request,
+// so any third party re-deriving (dataset, transcript, scope) reproduces the
+// score — no validator secret enters the score path.
+func runScope(req submitRequest) scorer.Scope {
+	if strings.TrimSpace(req.ExpectedDatasetSHA256) != "" {
+		return scorer.ScopeScored
+	}
+	return scorer.ScopePractice
+}
+
 // runSizeJob is the full SN118 pipeline: building → generating → seeding →
 // running (appending partials) → scoring → done. Every stage is deterministic;
 // the only LLM in the loop is the locked model the harness itself talks to.
@@ -732,12 +807,23 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	// non-LLM and a pure function of the master `seed`; selection shares the run
 	// rng. The suite lays cases out across seeding tiers (A prepared, B raw-pairs)
 	// and staged Tier-C waves.
-	memSuite := gen.GenerateMemorySuite(rng, seed, prof.Mem, prof.Waves, prof.RawPairsFrac)
+	// Explicit version. The un-suffixed wrappers default to the FROZEN v2
+	// contract, so calling them here would score every run against the
+	// pre-hardening dataset while the report claimed bench_version 3.
+	memSuite, memErr := gen.GenerateMemorySuiteForVersion(rng, seed, prof.Mem, prof.Waves, prof.RawPairsFrac, protocol.CurrentBenchVersion)
+	if memErr != nil {
+		s.store.Fail(runID, "generating memory suite failed: "+memErr.Error())
+		return
+	}
 	// Multi-graph isolation: seed a second persona under a different
 	// user_id and add cross-user isolation cases. The secondary graph is template-
 	// rendered. Cases carry the user_id they must be answered under; they merge
 	// into the primary staged-case stream.
-	iso := gen.GenerateIsolation(seed, prof.Mem, prof.Waves, prof.IsoCases)
+	iso, isoErr := gen.GenerateIsolationForVersion(seed, prof.Mem, prof.Waves, prof.IsoCases, protocol.CurrentBenchVersion)
+	if isoErr != nil {
+		s.store.Fail(runID, "generating isolation layer failed: "+isoErr.Error())
+		return
+	}
 	memSuite.Cases = append(memSuite.Cases, iso.Cases...)
 	para := toolPara
 	para.Add(memSuite.Stats)
@@ -829,34 +915,91 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		return
 	}
 	defer stopToolSrv()
+
+	scope := runScope(req)
+
 	if toolEndpoint == "" {
-		log.Printf("run %s: tool_endpoint not advertised (remote harness unreachable); observable tool cases scored capped", runID)
+		if scope == scorer.ScopeScored {
+			// Observed execution is mandatory on the scored path: without the mock
+			// endpoint reachable, observable tool cases can never be watched execute
+			// and would all score 0, which is not a defensible score. The on-chain
+			// validator always builds+runs the harness in Docker (endpoint served via
+			// host.docker.internal), so this only trips on a misconfigured scored run
+			// (e.g. a remote harness_url that cannot reach our loopback). Fail loudly
+			// rather than emit a zeroed report.
+			s.store.Fail(runID, "scored run cannot observe tool execution: tool_endpoint unreachable from the harness (build+run in the Docker sandbox, or use a locally reachable harness). Observed execution is mandatory on the scored path.")
+			log.Printf("run %s: scored run aborted — tool_endpoint not advertised (harness cannot be observed)", runID)
+			return
+		}
+		log.Printf("run %s: tool_endpoint not advertised (remote harness unreachable); observable tool cases scored capped (practice)", runID)
 	}
 
-	// 4. tool cases — independent of the memory haystack, so run before seeding.
+	// Reachability preflight: an advertised endpoint can still be unreachable
+	// from the harness's network namespace (Docker routing, network policy, a
+	// runtime fault). Validator state alone cannot distinguish that from a
+	// harness that legitimately never calls tools — both produce zero observed
+	// calls — so an active probe the harness participates in settles it before
+	// any case is scored. On the scored path a failed probe fails the run
+	// (rescheduled) instead of completing a zeroed report.
+	if toolEndpoint != "" {
+		if !s.enforcePreflight(ctx, runID, scope, harnessURL, toolEndpoint, toolSrv, seed, tools) {
+			return
+		}
+	}
+
+	// 4. tool cases — independent of the memory haystack and of each other, so
+	//    run before seeding and with bounded per-case concurrency. Results are
+	//    written per index so the report order is identical to sequential
+	//    execution regardless of completion order.
 	observedTool, cappedTool := 0, 0
 	s.store.SetStage(runID, store.StatusRunning, 0, total)
-	for i, c := range toolCases {
+	toolResults := make([]protocol.CaseScore, len(toolCases))
+	toolWasObserved := make([]bool, len(toolCases))
+	toolWasCapped := make([]bool, len(toolCases))
+	toolTranscripts := make([]transcriptCase, len(toolCases))
+	runBounded(ctx, len(toolCases), caseConcurrency, func(i int) {
+		c := toolCases[i]
 		resp, runErr := runner.RunCase(ctx, harnessURL, c.ID, c.Prompt, tools, runner.CaseOptions{ToolEndpoint: toolEndpoint})
 		observed := toolSrv.Observed(c.ID)
-		cs := scorer.ScoreToolCaseObserved(c, resp, runErr == nil, observed)
+		toolTranscripts[i] = transcriptCase{CaseID: c.ID, Kind: protocol.KindTool, Response: resp, Observed: observed}
+		cs := scorer.ScoreToolCaseObservedScope(c, resp, runErr == nil, observed, scope)
 		if datagen.IsResultUsage(c.Category) {
 			// Result-usage: trajectory + whether the answer carried the served
-			// needle value (a fabricated value only the executed tool could reveal).
-			cs = scorer.ComposeResultUsage(cs, resp.FinalText, toolFixtures[i].NeedleValue())
+			// needle value (a fabricated value only the executed tool could
+			// reveal). An answer carrying the served DECOY (a plausible number
+			// fished from the wrong tool's result) zeros the usage half too.
+			cs = scorer.ComposeResultUsageWithDecoy(cs, resp.FinalText,
+				toolFixtures[i].NeedleValue(), toolFixtures[i].DecoyValue())
 		} else {
 			cs = scorer.FinishTool(cs)
 		}
 		switch {
 		case len(observed) > 0:
-			observedTool++
+			toolWasObserved[i] = true
 		case toolexec.Observable(c):
-			cs = scorer.CapUnobserved(cs)
+			// Unobserved observable case: capped at 0.5 in practice, 0 when scored.
+			cs = scorer.CapUnobservedScope(cs, scope)
+			toolWasCapped[i] = true
+		}
+		toolResults[i] = cs
+		s.store.AppendPartial(runID, cs) // store append is mutex-guarded
+	})
+	// A cancelled context aborts runBounded early, leaving unexecuted slots as
+	// zero-value CaseScores. Never fold those into a report: the cancel handler
+	// has already failed the run, so just abandon it.
+	if ctx.Err() != nil {
+		log.Printf("run %s: cancelled during tool cases; abandoning without a report", runID)
+		return
+	}
+	for i, cs := range toolResults {
+		perCase = append(perCase, cs)
+		if toolWasObserved[i] {
+			observedTool++
+		} else if toolWasCapped[i] {
 			cappedTool++
 		}
-		perCase = append(perCase, cs)
-		s.store.AppendPartial(runID, cs)
 	}
+	transcripts := append(make([]transcriptCase, 0, total), toolTranscripts...)
 
 	// 5. memory cases — staged Tier-C ingestion: seed a wave,
 	//    then run the cases it unlocks (all their evidence is now seeded), then
@@ -890,7 +1033,16 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 			}
 		}
 		s.store.SetStage(runID, store.StatusRunning, len(perCase), total)
-		for _, sc := range casesByWave[w] {
+		// Cases within one wave are independent: their evidence is fully seeded
+		// (this wave and all prior waves), lifecycle WRITE cases live only in wave
+		// 0 and their READ cases in a later wave, and same-wave writes target
+		// distinct keys — so they run with bounded concurrency. The wave boundary
+		// stays a barrier: seed wave w, run its cases, then seed wave w+1.
+		waveCases := casesByWave[w]
+		waveResults := make([]protocol.CaseScore, len(waveCases))
+		waveTranscripts := make([]transcriptCase, len(waveCases))
+		runBounded(ctx, len(waveCases), caseConcurrency, func(i int) {
+			sc := waveCases[i]
 			mc := sc.Case
 			// Scope the query to the case's memory graph: isolation cases carry an
 			// explicit user_id; all others default to the primary wave's user.
@@ -899,10 +1051,29 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 				uid = wave.UserID
 			}
 			resp, _ := runner.RunCase(ctx, harnessURL, mc.ID, mc.Question, tools, runner.CaseOptions{ToolEndpoint: toolEndpoint, UserID: uid})
+			observedCalls := toolSrv.Observed(mc.ID)
+			resp = withObservedTrajectory(resp, observedCalls)
+			waveTranscripts[i] = transcriptCase{CaseID: mc.ID, Kind: protocol.KindMemory, UserID: uid, Response: resp, Observed: observedCalls}
 			cs := scorer.GradeMemory(mc, resp)
-			perCase = append(perCase, cs)
-			s.store.AppendPartial(runID, cs)
+			if len(observedCalls) > 0 {
+				// The graded response's ToolCalls (and thus cs.Called) are the
+				// validator-observed trajectory, not the harness self-report. Mark it
+				// so a consumer/auditor reading the report — e.g. reviewing a BaitTool
+				// zero — knows cs.Called is authoritative, matching the tool-case path.
+				cs.Observed = true
+				cs.Notes = append(cs.Notes, "called reflects the validator-observed trajectory")
+			}
+			waveResults[i] = cs
+			s.store.AppendPartial(runID, cs) // store append is mutex-guarded
+		})
+		// Same zero-value guard as the tool loop: a cancellation mid-wave must
+		// not fold half-empty results into a report.
+		if ctx.Err() != nil {
+			log.Printf("run %s: cancelled during memory wave %d; abandoning without a report", runID, w)
+			return
 		}
+		perCase = append(perCase, waveResults...)
+		transcripts = append(transcripts, waveTranscripts...)
 	}
 
 	// 6. scoring — aggregate + finish.
@@ -942,12 +1113,49 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		report.Details.LexicalGap = &lg
 	}
 	report.Details.MetamorphicConsistency = scorer.MetamorphicConsistency(perCase)
+	if tr, pairs := scorer.TransformRobustness(perCase); tr != nil {
+		report.Details.TransformRobustness = tr
+		report.Details.AuditCaseCount = pairs
+	}
+	// The pair COUNTS are what a brittleness verdict is computed from; the
+	// robustness ratio above stays for continuity and human reading. Counts pool
+	// across runs and validators, and they preserve the direction of a split,
+	// which is the only part of the signal that separates a brittle harness from
+	// a noisy honest one.
+	if ap := scorer.AuditPairs(perCase); ap.Total() > 0 {
+		report.Details.AuditPairs = &ap
+	}
 	if brier, cn := scorer.CalibrationBrier(perCase); brier != nil {
 		report.Details.CalibrationBrier = brier
 		report.Details.CalibrationN = cn
 	}
 	if injections > 0 {
 		log.Printf("run %s: %d injection-compliance case(s) flagged", runID, injections)
+	}
+	// Offline reproducibility: content-address the transcript artifact (the
+	// graded per-case inputs) and attach it to the run. The grader is public and
+	// deterministic, so (dataset regenerated from seed) + (this transcript)
+	// re-grades to the same numbers; the digest travels with the run status so
+	// the platform can bind it into the signed score payload and publish the
+	// bytes. A hashing failure is logged, never fatal: the score itself does not
+	// depend on the artifact.
+	tArtifact := transcriptArtifact{
+		RunID:         runID,
+		Seed:          seed,
+		BenchVersion:  protocol.BenchVersion,
+		DatasetSHA256: datasetHash,
+		Cases:         transcripts,
+	}
+	if tSHA, tBody, tErr := tArtifact.canonicalBytes(); tErr != nil {
+		log.Printf("run %s: transcript hashing failed: %v", runID, tErr)
+	} else {
+		s.store.SetTranscript(runID, tSHA, tBody)
+		if dir := strings.TrimSpace(os.Getenv("DITTOBENCH_ARTIFACT_DIR")); dir != "" {
+			if err := os.WriteFile(filepath.Join(dir, runID+".transcript.json"), tBody, 0o644); err != nil {
+				log.Printf("run %s: transcript persist failed: %v", runID, err)
+			}
+		}
+		log.Printf("run %s: transcript_sha256=%s (%d cases)", runID, tSHA, len(transcripts))
 	}
 	s.store.Finish(runID, report)
 	log.Printf("run %s done: bench_version=%d composite=%.3f tool_mean=%.3f memory_mean=%.3f observed=%d capped=%d",
@@ -992,6 +1200,21 @@ func (s *server) finishSandboxRun(runID string, handle *sandbox.Handle) {
 		s.store.FailWith(runID, message, failure)
 	}
 	s.sandbox.Stop(context.Background(), handle)
+}
+
+// withObservedTrajectory substitutes the validator-OBSERVED tool trajectory for
+// the harness's self-reported ToolCalls before a memory case is graded. This is
+// what makes injection-bait compliance unscrubable: a bait action-tool call
+// recorded by the mock endpoint reaches the grader even if the harness deleted
+// every trace of it from its response text. When nothing was observed (a
+// harness that stubs tools locally, or a pure recall answer that called no
+// served tool), the self-report is left untouched, so honest harnesses are
+// unaffected.
+func withObservedTrajectory(resp protocol.RunResponse, observed []protocol.ObservedToolCall) protocol.RunResponse {
+	if len(observed) > 0 {
+		resp.ToolCalls = observed
+	}
+	return resp
 }
 
 // startToolServer stands up the observed-execution mock tool endpoint on an
@@ -1102,6 +1325,27 @@ func (s *server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, job)
+}
+
+// handleGetTranscript serves a completed run's canonical transcript artifact —
+// the graded per-case inputs whose SHA-256 is published as the run's
+// transcript_sha256. Anyone holding these bytes plus the seed-regenerated
+// dataset can re-run the public grader and reproduce the score offline.
+func (s *server) handleGetTranscript(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	job, ok := s.store.Get(id)
+	if !ok {
+		writeError(w, http.StatusNotFound, "run not found")
+		return
+	}
+	if len(job.Transcript) == 0 {
+		writeError(w, http.StatusNotFound, "run has no transcript (not finished, failed, or pre-transcript)")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Transcript-SHA256", job.TranscriptSHA256)
+	w.WriteHeader(http.StatusOK)
+	w.Write(job.Transcript)
 }
 
 // ---- small utils ----

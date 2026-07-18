@@ -20,6 +20,7 @@ import (
 	"strings"
 
 	"github.com/ditto-assistant/dittobench-datagen/grade"
+	"github.com/ditto-assistant/dittobench-datagen/persona"
 	"github.com/ditto-assistant/dittobench-datagen/protocol"
 )
 
@@ -32,7 +33,7 @@ func Score(runID string, cases []protocol.ToolCase, resps map[string]protocol.Ru
 
 	for _, c := range cases {
 		resp, ok := resps[c.ID]
-		cs := scoreCase(c, resp, ok)
+		cs := scoreCase(c, resp, ok, ScopePractice)
 		cs.Score = cs.ToolScore // direct/legacy mode: composite == tool accuracy
 		perCase = append(perCase, cs)
 		toolSum += cs.ToolScore
@@ -62,7 +63,14 @@ func Score(runID string, cases []protocol.ToolCase, resps map[string]protocol.Ru
 // or ComposeResultUsage. ok=false means the harness gave no usable response
 // (scored as a miss).
 func ScoreToolCase(c protocol.ToolCase, resp protocol.RunResponse, ok bool) protocol.CaseScore {
-	cs := scoreCase(c, resp, ok)
+	return ScoreToolCaseScope(c, resp, ok, ScopePractice)
+}
+
+// ScoreToolCaseScope is ScoreToolCase with an explicit scope. In ScopeScored the
+// no-verifiable-evidence case-scoring rules tighten (see scoreCase); practice is
+// identical to ScoreToolCase.
+func ScoreToolCaseScope(c protocol.ToolCase, resp protocol.RunResponse, ok bool, scope Scope) protocol.CaseScore {
+	cs := scoreCase(c, resp, ok, scope)
 	cs.Kind = protocol.KindTool
 	cs.Score = cs.ToolScore
 	return cs
@@ -93,17 +101,33 @@ const (
 // the answer half is unachievable without actually executing the tool and reading
 // the result — self-report and base-model knowledge both score 0 on it.
 func ComposeResultUsage(cs protocol.CaseScore, answer, needleValue string) protocol.CaseScore {
+	return ComposeResultUsageWithDecoy(cs, answer, needleValue, "")
+}
+
+// ComposeResultUsageWithDecoy is ComposeResultUsage plus the served DECOY value:
+// the plausible-but-wrong number the mock tool endpoint serves from NON-bearer
+// content tools (dittobench-datagen toolexec, DecoyValue). A harness that fished
+// a number out of the wrong tool's result carries the decoy, not the needle;
+// such an answer scores the usage half 0 even if it ALSO happens to include the
+// needle, because surfacing the decoy is the signature of grepping any number
+// rather than reading the answer-bearing tool. decoyValue "" reproduces the
+// plain behavior (no decoy configured). The caller obtains it from the case
+// fixture; it is validator-internal grading material, so the score stays a pure
+// function of (dataset, transcript).
+func ComposeResultUsageWithDecoy(cs protocol.CaseScore, answer, needleValue, decoyValue string) protocol.CaseScore {
 	usage := 0.0
-	if answerCarriesValue(answer, needleValue) {
+	switch {
+	case decoyValue != "" && answerCarriesValue(answer, decoyValue):
+		usage = 0.0
+		cs.Notes = append(cs.Notes, "answer carried the decoy value (fished from the wrong tool) — usage scored 0")
+	case answerCarriesValue(answer, needleValue):
 		usage = 1.0
+		cs.Notes = append(cs.Notes, "answer incorporated the served tool result")
+	default:
+		cs.Notes = append(cs.Notes, "answer did NOT incorporate the served tool result")
 	}
 	cs.ResultUsage = usage
 	cs.Score = round6(resultUsageTrajectoryWeight*cs.ToolScore + resultUsageAnswerWeight*usage)
-	if usage == 1.0 {
-		cs.Notes = append(cs.Notes, "answer incorporated the served tool result")
-	} else {
-		cs.Notes = append(cs.Notes, "answer did NOT incorporate the served tool result")
-	}
 	return cs
 }
 
@@ -134,14 +158,52 @@ func stripSeparators(s string) string {
 	return b.String()
 }
 
+// Scope selects how strictly a run is scored. Practice is the lenient,
+// self-hostable path (a miner testing their own harness): an unverifiable
+// self-report still earns bounded, capped credit. Scored is the canonical
+// on-chain path whose report feeds the KOTH ledger; there, observed execution is
+// MANDATORY — an observable tool case the validator did not actually watch
+// execute earns nothing. Memory-routing cases are routing-only in BOTH scopes
+// (internal memory retrieval is unobservable through the tool endpoint, so a
+// substantive direct-store answer credits and only an observed misroute
+// zeroes). Keeping the split explicit
+// means practice tooling and calibration stay unchanged while the trustless,
+// stake-weighted path closes the parser-harness free points. A Scope is not a
+// validator secret: it is a property of the request (the canonical /v1/score
+// path pins the dataset), so any third party re-deriving the score from
+// (dataset, transcript, scope) reproduces it byte-for-byte.
+type Scope int
+
+const (
+	// ScopePractice keeps the historical lenient scoring (default zero value).
+	ScopePractice Scope = iota
+	// ScopeScored is the on-chain/KOTH path: observed execution is mandatory.
+	ScopeScored
+)
+
 // UnobservedCeiling caps the composite of an OBSERVABLE tool case (every expected
 // tool is validator-served) that the harness did NOT execute through the mock
-// tool_endpoint. Its self-reported trajectory is untrusted:
+// tool_endpoint, in PRACTICE scope. Its self-reported trajectory is untrusted:
 // we cannot verify the tools actually ran, so the case is scored selection-only
 // and cannot reach full marks. Set at 0.5 so a right-tool self-report still earns
 // meaningful-but-capped credit, and a harness is materially rewarded for
 // executing through the endpoint (where the full, verified score is reachable).
 const UnobservedCeiling = 0.5
+
+// ScoredUnobservedCeiling is the ceiling in SCORED scope: 0. On the on-chain
+// path observed execution is mandatory, so an observable tool case that never
+// routed through the validator's mock endpoint is unverifiable and earns
+// nothing. This removes the deterministic-parser free 0.5: a harness that only
+// self-reports its trajectory cannot bank half-credit against staked runs.
+const ScoredUnobservedCeiling = 0.0
+
+// UnobservedCeilingFor returns the observable-but-unobserved ceiling for a scope.
+func UnobservedCeilingFor(scope Scope) float64 {
+	if scope == ScopeScored {
+		return ScoredUnobservedCeiling
+	}
+	return UnobservedCeiling
+}
 
 // ScoreToolCaseObserved computes the deterministic tool-accuracy half of a case
 // under observed execution. When observed is non-empty (the harness
@@ -152,12 +214,21 @@ const UnobservedCeiling = 0.5
 // (ScoreToolCase); the caller applies CapUnobserved for an observable case so an
 // unverifiable self-report cannot score full marks.
 func ScoreToolCaseObserved(c protocol.ToolCase, resp protocol.RunResponse, ok bool, observed []protocol.ObservedToolCall) protocol.CaseScore {
+	return ScoreToolCaseObservedScope(c, resp, ok, observed, ScopePractice)
+}
+
+// ScoreToolCaseObservedScope is ScoreToolCaseObserved with an explicit scope.
+// The observed-overrides-self-report semantics are identical in both scopes; the
+// scope only tightens the unobserved-observable ceiling applied by the caller
+// (0.5 in practice, 0 scored). Memory-routing cases stay routing-only in both
+// scopes; see the allMemoryTools branch in scoreCase.
+func ScoreToolCaseObservedScope(c protocol.ToolCase, resp protocol.RunResponse, ok bool, observed []protocol.ObservedToolCall, scope Scope) protocol.CaseScore {
 	if len(observed) == 0 {
-		return ScoreToolCase(c, resp, ok)
+		return ScoreToolCaseScope(c, resp, ok, scope)
 	}
 	auth := resp
 	auth.ToolCalls = observed
-	cs := ScoreToolCase(c, auth, ok)
+	cs := ScoreToolCaseScope(c, auth, ok, scope)
 	cs.Observed = true
 	cs.Notes = append(cs.Notes, "trajectory observed via tool_endpoint (authoritative)")
 	return cs
@@ -222,9 +293,22 @@ func ToolEfficiencyFactor(perCase []protocol.CaseScore) float64 {
 // Call it AFTER ComposeTool (the ceiling is on the final composite, not just the
 // deterministic half). No-op when the score is already at or below the ceiling.
 func CapUnobserved(cs protocol.CaseScore) protocol.CaseScore {
-	if cs.Score > UnobservedCeiling {
-		cs.Score = UnobservedCeiling
-		cs.Notes = append(cs.Notes, "capped: observable case not executed via tool_endpoint (self-report untrusted)")
+	return CapUnobservedScope(cs, ScopePractice)
+}
+
+// CapUnobservedScope caps a fully-composed observable-but-unobserved tool
+// CaseScore at the ceiling for its scope: 0.5 in practice, 0 on the scored
+// on-chain path where observed execution is mandatory. No-op when the score is
+// already at or below the ceiling. Call it AFTER ComposeTool.
+func CapUnobservedScope(cs protocol.CaseScore, scope Scope) protocol.CaseScore {
+	ceiling := UnobservedCeilingFor(scope)
+	if cs.Score > ceiling {
+		cs.Score = ceiling
+		if scope == ScopeScored {
+			cs.Notes = append(cs.Notes, "scored: observable case not executed via tool_endpoint — unobserved, scored 0 (observed execution mandatory)")
+		} else {
+			cs.Notes = append(cs.Notes, "capped: observable case not executed via tool_endpoint (self-report untrusted)")
+		}
 	}
 	return cs
 }
@@ -241,9 +325,8 @@ func CapUnobserved(cs protocol.CaseScore) protocol.CaseScore {
 // noise, not signal, whereas a leak is a low-noise, deliberate-looking breach
 // that a competent honest harness essentially never commits.
 const (
-	canaryPassThreshold  = 0.5  // canary case Score at/above this counts as passed
-	canaryLeakPenalty    = 0.5  // hard multiplier for a canary LEAK (bait echo): an integrity breach
-	canaryMissMaxPenalty = 0.15 // bounded drop for an honest canary MISS (matches effMaxPenalty / metamorphicMaxPenalty)
+	canaryPassThreshold = 0.5 // canary case Score at/above this counts as passed
+	canaryLeakPenalty   = 0.5 // hard multiplier for a canary LEAK (bait echo): an integrity breach
 )
 
 // canaryLeakNote is the canonical marker GradeMemory appends when a canary case
@@ -269,10 +352,20 @@ func isCanaryCase(cs protocol.CaseScore) bool {
 }
 
 // CanaryIntegrityFactor returns the composite multiplier for canary integrity,
-// 1.0 when every canary passed or none ran. A failed canary that leaked its bait
-// (canaryLeakNote) applies the hard canaryLeakPenalty; an honest miss applies the
-// bounded 1-canaryMissMaxPenalty. Each failed canary compounds, so a harness
-// cannot dilute the signal by failing several.
+// 1.0 when no canary leaked. Only a LEAK (bait echo, canaryLeakNote) — a
+// deliberate-looking integrity breach a competent honest harness never commits —
+// applies the hard canaryLeakPenalty; each leak compounds.
+//
+// De-inversion (anti-gaming): an honest canary MISS no longer penalizes the
+// composite. The miss is already counted in the canary case's own accuracy
+// score; multiplying the composite again double-counted it, and because that
+// penalty fell only on a nondeterministic model's coin-flip miss (a
+// deterministic parser retrieves the seeded nonce every run), it taxed exactly
+// the honest reasoner it was meant to protect. The composite must stay a pure
+// function of (dataset, transcript) — trustless — so parser-vs-reasoner
+// separation lives in task difficulty (the datagen suite) and in the advisory
+// screener/gstudy signals, NOT in a variance penalty here. The leak
+// disqualifier stays: it is a low-noise breach signature, not a variance tax.
 func CanaryIntegrityFactor(perCase []protocol.CaseScore) float64 {
 	factor := 1.0
 	for _, cs := range perCase {
@@ -281,9 +374,8 @@ func CanaryIntegrityFactor(perCase []protocol.CaseScore) float64 {
 		}
 		if hasNote(cs, canaryLeakNote) {
 			factor *= canaryLeakPenalty // genuine breach: hard disqualifier
-		} else {
-			factor *= 1.0 - canaryMissMaxPenalty // honest recall miss: bounded penalty
 		}
+		// honest miss: no composite penalty (already reflected in accuracy)
 	}
 	return round6(factor)
 }
@@ -298,6 +390,13 @@ func MetamorphicConsistency(perCase []protocol.CaseScore) *float64 {
 	groups := map[string][]bool{}
 	for _, cs := range perCase {
 		if cs.TwinGroup == "" {
+			continue
+		}
+		// Transform-audit pairs share a TwinGroup too, but they are reported and
+		// acted on separately (TransformRobustness). Counting them here as well
+		// would apply two composite penalties for one signal, which is a silent
+		// extra cost to a miner rather than a stronger defense.
+		if isAuditGroup(cs.TwinGroup) {
 			continue
 		}
 		groups[cs.TwinGroup] = append(groups[cs.TwinGroup], cs.Correct)
@@ -321,6 +420,176 @@ func MetamorphicConsistency(perCase []protocol.CaseScore) *float64 {
 	}
 	v := round6(float64(consistent) / float64(len(groups)))
 	return &v
+}
+
+// auditHalf classifies a case as the base or the transformed side of an audit
+// pair, or "" for everything else. Derived from the validator-internal question
+// id, so no new wire field is needed on the case itself and the harness sees
+// nothing new.
+func auditHalf(mc protocol.MemoryCase) string {
+	if !isAuditGroup(mc.TwinGroup) {
+		return ""
+	}
+	if strings.HasPrefix(mc.QuestionID, persona.AuditCaseIDPrefix) {
+		return protocol.AuditHalfTransform
+	}
+	return protocol.AuditHalfBase
+}
+
+// AuditPairs is the 2x2 outcome table over the run's transform-audit pairs, and
+// it is what a brittleness verdict should be built from rather than
+// TransformRobustness.
+//
+// The distinction that matters is DIRECTION. A pair the harness got right on
+// the base phrasing and wrong on the transformed one is the brittleness event;
+// the reverse is not, and a harness with a surface-keyed lookup has no reason to
+// produce it. The 2026-07-18 calibration measured an honest model at 5 base-only
+// vs 6 transform-only (symmetric, i.e. noise) and a surface-gated harness at 6
+// vs 0. Agreement collapses both of those to a single rate and cannot tell them
+// apart, which is why it did not separate the two.
+//
+// Counts rather than a rate because they POOL: a consumer sums them over an
+// agent's runs and over the k=3 validators and decides once on all the evidence,
+// instead of averaging per-run ratios that weight a one-pair run like a
+// seven-pair one.
+func AuditPairs(perCase []protocol.CaseScore) protocol.AuditPairCounts {
+	type sides struct{ base, xform *bool }
+	groups := map[string]*sides{}
+	for i := range perCase {
+		cs := perCase[i]
+		if !isAuditGroup(cs.TwinGroup) || cs.AuditHalf == "" {
+			continue
+		}
+		g := groups[cs.TwinGroup]
+		if g == nil {
+			g = &sides{}
+			groups[cs.TwinGroup] = g
+		}
+		correct := cs.Correct
+		if cs.AuditHalf == protocol.AuditHalfTransform {
+			g.xform = &correct
+		} else {
+			g.base = &correct
+		}
+	}
+	var out protocol.AuditPairCounts
+	for _, g := range groups {
+		// A half-delivered pair (a dropped or timed-out case) is dropped rather
+		// than counted, so a transport failure never reads as brittleness.
+		if g.base == nil || g.xform == nil {
+			continue
+		}
+		switch {
+		case *g.base && *g.xform:
+			out.BothCorrect++
+		case *g.base && !*g.xform:
+			out.BaseOnly++
+		case !*g.base && *g.xform:
+			out.TransformOnly++
+		default:
+			out.BothWrong++
+		}
+	}
+	return out
+}
+
+// isAuditGroup reports whether a TwinGroup is a reproduce-under-transform audit
+// pair rather than an ordinary generator-chosen invariance family. The prefix is
+// the datagen constant, so there is one definition shared by the generator, the
+// scorer, and any third party recomputing the metric.
+func isAuditGroup(twinGroup string) bool {
+	return strings.HasPrefix(twinGroup, persona.AuditTwinPrefix)
+}
+
+// TransformRobustness is the reproduce-under-transform audit result (v3 Part A):
+// over the run's audit pairs, the fraction the harness answered CONSISTENTLY.
+// Each pair is a base case and the same underlying fact re-asked under a
+// transform derived from the block-hash-seeded dataset seed, which postdates the
+// submission's commit — so unlike the generator-chosen twins this generalizes,
+// the harness cannot have pre-handled the specific rephrasing.
+//
+// Consistency, not correctness, is the measurement: a harness that is wrong on
+// both halves is already penalized by accuracy, and counting it again here would
+// double-charge it. What this isolates is the SPLIT — right on the phrasing it
+// was built for, wrong on one it was not — which is the surface-brittleness
+// signature, plus the covariance case where a memorized answer is stale.
+//
+// The pairing rides TwinGroup, which both halves carry, and the agreement test
+// is symmetric, so no consumer needs to know which half was the transform.
+// Returns nil when no audit pairs ran.
+func TransformRobustness(perCase []protocol.CaseScore) (*float64, int) {
+	groups := map[string][]bool{}
+	for _, cs := range perCase {
+		if !isAuditGroup(cs.TwinGroup) {
+			continue
+		}
+		groups[cs.TwinGroup] = append(groups[cs.TwinGroup], cs.Correct)
+	}
+	// A pair needs both halves to say anything. A half-delivered pair (a case
+	// dropped by a timeout) is dropped rather than scored, so a transport failure
+	// never reads as brittleness.
+	pairs := 0
+	consistent := 0
+	for _, verdicts := range groups {
+		if len(verdicts) != 2 {
+			continue
+		}
+		pairs++
+		if verdicts[0] == verdicts[1] {
+			consistent++
+		}
+	}
+	if pairs == 0 {
+		return nil, 0
+	}
+	v := round6(float64(consistent) / float64(pairs))
+	return &v, pairs
+}
+
+// memoryOverCallMaxPenalty is the deepest the memory over-call factor can drop
+// the composite. Deliberately small: this penalizes a WASTEFUL but not
+// necessarily dishonest behaviour, and accuracy stays dominant.
+const memoryOverCallMaxPenalty = 0.10
+
+// MemoryOverCallFactor is the memory over-call multiplier (v3 B4). A pure-memory
+// question is answered from the harness's own store; emitting a NON-memory tool
+// call on such a case is observable but was previously unscored, so a harness
+// could hedge — take an action AND give a memory answer — at no cost, on the
+// theory that "only one is graded".
+//
+// Only non-memory calls count. A search_memories / fetch_memories call is how a
+// harness legitimately retrieves, and penalizing it would be penalizing a
+// competent harness for its retrieval mechanism, which is explicitly not the
+// intent (same reasoning as the memory-tool routing rule above).
+//
+// Scored off the VALIDATOR-OBSERVED trajectory only (cs.Observed): a self-report
+// cannot create or hide an over-call, so this cannot be laundered by editing the
+// transcript. A run where nothing was observed yields 1.0 — no effect — so a
+// harness that never routed through the endpoint is not penalized for a call the
+// validator cannot see.
+//
+// The penalty scales with the FRACTION of observed memory cases that over-called,
+// so an isolated stray call is nearly free while a harness that acts on every
+// memory question takes the full bounded hit.
+func MemoryOverCallFactor(perCase []protocol.CaseScore) float64 {
+	observed, overCalled := 0, 0
+	for _, cs := range perCase {
+		if cs.Kind != protocol.KindMemory || !cs.Observed {
+			continue
+		}
+		observed++
+		for _, name := range cs.Called {
+			if !memoryTools[name] {
+				overCalled++
+				break
+			}
+		}
+	}
+	if observed == 0 {
+		return 1.0
+	}
+	rate := float64(overCalled) / float64(observed)
+	return round6(1.0 - memoryOverCallMaxPenalty*rate)
 }
 
 // metamorphicMaxPenalty is the deepest the metamorphic-consistency factor can
@@ -388,6 +657,7 @@ func memoryCaseScore(mc protocol.MemoryCase, resp protocol.RunResponse, score fl
 		Score:      clamp01(round6(score)),
 		Correct:    score >= 0.5,
 		TwinGroup:  mc.TwinGroup,
+		AuditHalf:  auditHalf(mc),
 		Confidence: resp.Confidence,
 		LatencyMs:  resp.LatencyMs,
 		Called:     calledNames(resp.ToolCalls),
@@ -517,6 +787,10 @@ func Aggregate(runID string, perCase []protocol.CaseScore) protocol.ScoreReport 
 	// the composite only, like efficiency and canary — tool_mean, memory_mean, and
 	// per_category stay pure accuracy. 1.0 (no effect) when no twin groups ran.
 	composite = round6(composite * MetamorphicConsistencyFactor(perCase))
+	// Memory over-call factor (B4): a bounded penalty for taking a non-memory
+	// action on a pure-memory question. Observed trajectory only, so it cannot be
+	// laundered by self-report; 1.0 when nothing was observed.
+	composite = round6(composite * MemoryOverCallFactor(perCase))
 
 	perCat := make([]protocol.CategoryStat, 0, len(catOrder))
 	for _, cat := range catOrder {
@@ -555,7 +829,8 @@ func Aggregate(runID string, perCase []protocol.CaseScore) protocol.ScoreReport 
 	// applied to the composite above.
 	gate := ToolEfficiencyFactor(perCase) *
 		CanaryIntegrityFactor(perCase) *
-		MetamorphicConsistencyFactor(perCase)
+		MetamorphicConsistencyFactor(perCase) *
+		MemoryOverCallFactor(perCase)
 	compositeStderr *= gate
 
 	return protocol.ScoreReport{
@@ -572,7 +847,7 @@ func Aggregate(runID string, perCase []protocol.CaseScore) protocol.ScoreReport 
 	}
 }
 
-func scoreCase(c protocol.ToolCase, resp protocol.RunResponse, ok bool) protocol.CaseScore {
+func scoreCase(c protocol.ToolCase, resp protocol.RunResponse, ok bool, scope Scope) protocol.CaseScore {
 	cs := protocol.CaseScore{
 		CaseID:    c.ID,
 		Category:  c.Category,
@@ -608,6 +883,18 @@ func scoreCase(c protocol.ToolCase, resp protocol.RunResponse, ok bool) protocol
 	// penalizing a competent memory harness for how it retrieves; retrieval
 	// accuracy itself is the memory suite's job.
 	if allMemoryTools(c.ExpectedTools) {
+		// Memory retrieval is INTERNAL and unobservable: the endpoint never serves
+		// a memory tool, so a legitimate harness may answer straight from its
+		// seeded store with no catalog call. Score this case only on what is
+		// verifiable in the OBSERVED trajectory — routing — and never on a
+		// self-reported memory call. resp.ToolCalls here is the validator-observed
+		// trajectory (auth.ToolCalls = observed), so a memory-tool name that was
+		// not routed through the endpoint does not appear and cannot earn credit.
+		//
+		// The previous scored rule required a memory-tool call as "evidence": that
+		// was both spoofable (a fabricated search_memories self-report scored 1)
+		// and a false positive (correct direct-store retrieval with no call scored
+		// 0). It is replaced by the same routing-only rule in both scopes.
 		for _, call := range resp.ToolCalls {
 			if !memoryTools[call.Name] {
 				cs.ToolScore = 0
@@ -615,16 +902,17 @@ func scoreCase(c protocol.ToolCase, resp protocol.RunResponse, ok bool) protocol
 				return cs
 			}
 		}
-		// Credit retrieval only with EVIDENCE of it — a memory tool call or a
-		// substantive answer. A pure no-op (no call and no answer) did not attempt
-		// to retrieve, so a routing trap still catches a harness that just ignores
-		// the memory request.
-		if len(resp.ToolCalls) > 0 || strings.TrimSpace(resp.FinalText) != "" {
+		// No observed misrouting. Credit any genuine attempt (an observed memory
+		// call or a substantive answer, in either the answer slot or the prose);
+		// a pure no-op still fails the routing trap. Whether the answer is
+		// CORRECT is the memory suite's job, not this case's.
+		if len(resp.ToolCalls) > 0 || strings.TrimSpace(resp.FinalText) != "" ||
+			strings.TrimSpace(resp.Answer) != "" {
 			cs.ToolScore = 1.0
-			cs.Notes = append(cs.Notes, "memory request handled via memory retrieval (internal or memory tool)")
+			cs.Notes = append(cs.Notes, "memory request routed to internal/memory retrieval, no non-memory misrouting observed")
 		} else {
 			cs.ToolScore = 0
-			cs.Notes = append(cs.Notes, "no memory retrieval attempted (no memory tool call and no answer)")
+			cs.Notes = append(cs.Notes, "no memory retrieval attempted (no observed call and no answer)")
 		}
 		return cs
 	}

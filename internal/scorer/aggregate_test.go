@@ -141,9 +141,11 @@ func TestCompositeStderrCombinesHalves(t *testing.T) {
 // factor below 1 scales the stderr by the same factor it scales the composite,
 // so the KOTH indifference band is not widened by the SE of the ungated mean.
 // Two runs with identical per-case scores that differ only in the canary note
-// (an honest miss ×0.85 vs a leak ×0.5) isolate the gate: their ungated SE is
-// the same, so each run's stderr must equal that gate factor times the ungated
-// SE, and the leaked run's stderr must be lower.
+// (a clean run, gate ×1.0, vs a leak, gate ×0.5) isolate the gate: their ungated
+// SE is the same, so each run's stderr must equal that gate factor times the
+// ungated SE, and the leaked run's stderr must be lower. (An honest canary miss
+// no longer applies a gate factor after the de-inversion, so a clean run is the
+// ×1.0 comparator.)
 func TestCompositeStderrScaledByGateFactor(t *testing.T) {
 	withNote := func(note string) []protocol.CaseScore {
 		return []protocol.CaseScore{
@@ -158,30 +160,31 @@ func TestCompositeStderrScaledByGateFactor(t *testing.T) {
 				}()},
 		}
 	}
-	miss := withNote("")             // honest canary miss: factor 0.85
+	clean := withNote("")            // honest canary miss, no gate: factor 1.0
 	leak := withNote(canaryLeakNote) // canary leak: factor 0.50
-	fMiss := CanaryIntegrityFactor(miss)
+	fClean := CanaryIntegrityFactor(clean)
 	fLeak := CanaryIntegrityFactor(leak)
-	if fMiss != round6(1.0-canaryMissMaxPenalty) || fLeak != canaryLeakPenalty {
-		t.Fatalf("canary factors: miss=%v (want %v), leak=%v (want %v)",
-			fMiss, 1.0-canaryMissMaxPenalty, fLeak, canaryLeakPenalty)
+	if fClean != 1.0 || fLeak != canaryLeakPenalty {
+		t.Fatalf("canary factors: clean=%v (want 1.0), leak=%v (want %v)",
+			fClean, fLeak, canaryLeakPenalty)
 	}
-	repMiss := Aggregate("run", miss)
+	repClean := Aggregate("run", clean)
 	repLeak := Aggregate("run", leak)
-	if repMiss.CompositeStderr <= 0 || repLeak.CompositeStderr <= 0 {
-		t.Fatalf("expected positive stderrs, got miss=%v leak=%v",
-			repMiss.CompositeStderr, repLeak.CompositeStderr)
+	if repClean.CompositeStderr <= 0 || repLeak.CompositeStderr <= 0 {
+		t.Fatalf("expected positive stderrs, got clean=%v leak=%v",
+			repClean.CompositeStderr, repLeak.CompositeStderr)
 	}
 	// Recover the ungated SE from each (stderr = gate * ungated) and require they
 	// agree, then require the leaked run's stderr is strictly the smaller.
-	ungatedMiss := repMiss.CompositeStderr / fMiss
+	ungatedClean := repClean.CompositeStderr / fClean
 	ungatedLeak := repLeak.CompositeStderr / fLeak
-	if math.Abs(ungatedMiss-ungatedLeak) > 1e-6 {
+	// Tolerance accommodates round6 on the stored stderr divided by the 0.5 gate.
+	if math.Abs(ungatedClean-ungatedLeak) > 5e-6 {
 		t.Fatalf("ungated SE should match across identical scores: %v vs %v",
-			ungatedMiss, ungatedLeak)
+			ungatedClean, ungatedLeak)
 	}
-	if repLeak.CompositeStderr >= repMiss.CompositeStderr {
-		t.Fatalf("leak stderr %v must be below miss stderr %v (harder gate)",
-			repLeak.CompositeStderr, repMiss.CompositeStderr)
+	if repLeak.CompositeStderr >= repClean.CompositeStderr {
+		t.Fatalf("leak stderr %v must be below clean stderr %v (harder gate)",
+			repLeak.CompositeStderr, repClean.CompositeStderr)
 	}
 }

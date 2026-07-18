@@ -4,6 +4,14 @@
 // tools) — the calibration harness relies on that determinism so the only thing
 // varying between runs is the dataset (i.e. dataset difficulty). Shared by
 // cmd/refharness (the HTTP server) and cmd/benchcal (the offline calibrator).
+//
+// CALIBRATION TRUST NOTE: this router has NO model and ZERO run-to-run variance.
+// It is the right instrument for isolating dataset difficulty, but it is the
+// WRONG instrument for setting any variance/sigma gate: a real locked-model
+// reasoning harness has materially higher variance, so a gate tuned against this
+// lookup table will certify a deterministic parser as a stable champion.
+// Recalibrate variance gates against a real locked-model harness's measured
+// spread. See docs/calibration-trust.md.
 package refharness
 
 import (

@@ -1,29 +1,34 @@
 // model-relay is the model-pinning gateway for validators that back the model
-// lock with a hosted provider (Chutes) instead of local GPUs. It terminates
-// the sandbox's OpenAI-compatible chat requests locally, FORCES the model
-// field to the locked id, injects the upstream API key, and forwards to the
-// upstream. The sandbox never holds the key and cannot choose the model, so
-// the lock's semantics are identical to a local Ollama/vLLM gateway.
+// lock with a hosted provider instead of local GPUs. It terminates the
+// sandbox's OpenAI-compatible chat requests locally, FORCES the model field to
+// the locked id, injects the upstream API key, and forwards to the upstream.
+// The sandbox never holds the key and cannot choose the model, so the lock's
+// semantics are identical to a local Ollama/vLLM gateway. The egress side stays
+// fail-closed: the sandbox reaches only this relay (host.docker.internal), and
+// the relay is the only process that reaches the upstream.
 //
-// The egress side stays fail-closed: the sandbox reaches only this relay
-// (host.docker.internal), and the relay is the only process that reaches the
-// upstream. A CONNECT-only egress proxy cannot pin the model field (it cannot
-// see request bodies); this relay exists because it can.
+// The same locked model (Qwen3-32B) is served by two interchangeable certified
+// providers, and each validator picks one with RELAY_PROVIDER. This spreads
+// scoring load: pinning the whole fleet to Chutes saturated that endpoint and
+// drove up latency, so validators now split across Chutes (the hardware-
+// attested TEE deployment, "chutes") and OpenRouter (the same weights via the
+// certified Nebius deployment, "openrouter"). The two are certified as
+// comparable, so a submission's k=3 quorum may mix providers by design; every
+// score reports the same harness model id (llm.LockedHarnessModel), so the
+// median is taken over comparable numbers.
 //
-// The forced model and thinking mode are frozen, not env vars: both are
-// consensus-critical (a hybrid-reasoning model must run one mode fleet-wide or
-// the k=3 validators' scores of a submission are not comparable), so every
-// validator's relay pins the same model (llm.LockedUpstreamModel) and the same
-// thinking mode (lockedThinking, off, which keeps replies inside per-case
-// budgets and cuts variance). Bump either in code (a network-wide change), then
-// redeploy.
+// Each profile is CODE-FROZEN: RELAY_PROVIDER only chooses which certified
+// profile runs, never what it pins (upstream, exact model id, serving-provider
+// routing, thinking mode). All of those are consensus-critical constants a
+// hybrid-reasoning model must share fleet-wide; change them in code (a
+// network-wide change), then redeploy. There is deliberately no upstream-URL
+// override: the pin is enforced in code, not left to a validator's env.
 //
-// Env (deployment only; nothing that affects scoring):
-//   - RELAY_UPSTREAM_URL  upstream chat-completions URL
-//     (default https://llm.chutes.ai/v1/chat/completions)
-//   - RELAY_API_KEY       upstream bearer key (required)
-//   - PORT                listen port (default 11434, the gateway port the
-//     sandbox already expects)
+// Env (deployment only):
+//   - RELAY_PROVIDER  "chutes" (default) or "openrouter"
+//   - RELAY_API_KEY   upstream bearer key for the selected provider (required)
+//   - PORT            listen port (default 11434, the gateway port the sandbox
+//     already expects)
 package main
 
 import (
@@ -39,7 +44,67 @@ import (
 	"github.com/ditto-assistant/dittobench-api/internal/llm"
 )
 
-const defaultUpstream = "https://llm.chutes.ai/v1/chat/completions"
+// providerProfile is one code-frozen upstream the relay may pin to. Every
+// field is consensus-critical and therefore a constant: RELAY_PROVIDER only
+// chooses WHICH profile runs, never what a profile pins.
+type providerProfile struct {
+	upstream string
+	model    string
+	// pinBody applies provider-specific consensus pins beyond the model id.
+	pinBody func(body map[string]any)
+}
+
+// providers are the certified profiles for the locked Qwen3-32B. Chutes serves
+// the hardware-attested TEE deployment; OpenRouter serves the same weights with
+// routing locked to the certified Nebius deployment (the throughput evidence
+// behind the certification measured that exact provider, and free routing would
+// un-pin the scored backend).
+var providers = map[string]providerProfile{
+	"chutes": {
+		upstream: "https://llm.chutes.ai/v1/chat/completions",
+		model:    llm.LockedUpstreamModel,
+	},
+	"openrouter": {
+		upstream: "https://openrouter.ai/api/v1/chat/completions",
+		model:    llm.LockedHarnessModel,
+		pinBody: func(body map[string]any) {
+			body["provider"] = map[string]any{
+				"only":            []string{"nebius"},
+				"allow_fallbacks": false,
+			}
+			appendNoThink(body)
+		},
+	},
+}
+
+// appendNoThink applies Qwen3's soft thinking switch on the openrouter
+// profile. Nebius via OpenRouter ignores chat_template_kwargs.enable_thinking
+// and OpenRouter's reasoning parameter (verified live 2026-07-17: reasoning
+// tokens still arrive with both set), so the hard switch the Chutes profile
+// relies on does not exist here; the documented Qwen3 soft switch does. The
+// LATEST /think|/no_think directive in the conversation wins, so the relay
+// appends /no_think after everything the sandbox wrote — a sandbox-supplied
+// "/think" can never come later. On Chutes the hard template switch makes
+// soft directives inert, so this pin is openrouter-only.
+func appendNoThink(body map[string]any) {
+	msgs, _ := body["messages"].([]any)
+	if len(msgs) == 0 {
+		body["messages"] = []any{map[string]any{"role": "system", "content": "/no_think"}}
+		return
+	}
+	last, _ := msgs[len(msgs)-1].(map[string]any)
+	if last == nil {
+		return
+	}
+	switch c := last["content"].(type) {
+	case string:
+		last["content"] = c + "\n/no_think"
+	case []any:
+		last["content"] = append(c, map[string]any{"type": "text", "text": "/no_think"})
+	default:
+		body["messages"] = append(msgs, map[string]any{"role": "user", "content": "/no_think"})
+	}
+}
 
 // lockedThinking is the frozen fleet-wide thinking mode. Off: a hybrid-reasoning
 // model (Qwen3) must not pick per request, and off keeps replies inside per-case
@@ -54,15 +119,22 @@ type relay struct {
 	apiKey   string
 	model    string
 	thinking bool
+	pinBody  func(body map[string]any)
 	client   *http.Client
 }
 
 func main() {
+	providerName := envOr("RELAY_PROVIDER", "chutes")
+	profile, ok := providers[providerName]
+	if !ok {
+		log.Fatalf("RELAY_PROVIDER %q is not a certified profile (chutes|openrouter)", providerName)
+	}
 	r := &relay{
-		upstream: envOr("RELAY_UPSTREAM_URL", defaultUpstream),
+		upstream: profile.upstream,
 		apiKey:   strings.TrimSpace(os.Getenv("RELAY_API_KEY")),
-		model:    llm.LockedUpstreamModel,
+		model:    profile.model,
 		thinking: lockedThinking,
+		pinBody:  profile.pinBody,
 		client:   &http.Client{Timeout: 300 * time.Second},
 	}
 	if r.apiKey == "" {
@@ -104,6 +176,9 @@ func (r *relay) handle(w http.ResponseWriter, req *http.Request) {
 	}
 	ctk["enable_thinking"] = r.thinking
 	body["chat_template_kwargs"] = ctk
+	if r.pinBody != nil {
+		r.pinBody(body)
+	}
 	out, err := json.Marshal(body)
 	if err != nil {
 		http.Error(w, "marshal body", http.StatusInternalServerError)

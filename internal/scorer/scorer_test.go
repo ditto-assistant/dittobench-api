@@ -125,19 +125,24 @@ func TestCanaryIntegrityFactor(t *testing.T) {
 	miss := protocol.CaseScore{Kind: protocol.KindMemory, Category: "canary", Score: 0.1}
 	leak := protocol.CaseScore{Kind: protocol.KindMemory, Category: "canary", Score: 0.1, Notes: []string{canaryLeakNote}}
 	other := protocol.CaseScore{Kind: protocol.KindMemory, Category: "single-session-recall", Score: 0.1}
-	missMult := 1.0 - canaryMissMaxPenalty
 
 	if f := CanaryIntegrityFactor([]protocol.CaseScore{pass, other}); f != 1.0 {
 		t.Fatalf("passed canary should not penalize, got %v", f)
 	}
-	if f := CanaryIntegrityFactor([]protocol.CaseScore{miss, other}); f != missMult {
-		t.Fatalf("honest canary miss should apply bounded %v, got %v", missMult, f)
+	// De-inversion: an honest miss no longer penalizes the composite (already
+	// counted in accuracy); only a leak does.
+	if f := CanaryIntegrityFactor([]protocol.CaseScore{miss, other}); f != 1.0 {
+		t.Fatalf("honest canary miss should NOT penalize the composite, got %v", f)
 	}
 	if f := CanaryIntegrityFactor([]protocol.CaseScore{leak, other}); f != canaryLeakPenalty {
 		t.Fatalf("canary leak should apply hard %v, got %v", canaryLeakPenalty, f)
 	}
-	if f := CanaryIntegrityFactor([]protocol.CaseScore{leak, miss}); f != round6(canaryLeakPenalty*missMult) {
-		t.Fatalf("leak and miss should compound, got %v", f)
+	// Only leaks compound; an accompanying honest miss adds nothing.
+	if f := CanaryIntegrityFactor([]protocol.CaseScore{leak, miss}); f != round6(canaryLeakPenalty) {
+		t.Fatalf("miss should not compound with leak, got %v", f)
+	}
+	if f := CanaryIntegrityFactor([]protocol.CaseScore{leak, leak}); f != round6(canaryLeakPenalty*canaryLeakPenalty) {
+		t.Fatalf("two leaks should compound, got %v", f)
 	}
 	if f := CanaryIntegrityFactor([]protocol.CaseScore{other}); f != 1.0 {
 		t.Fatalf("no canary should not penalize, got %v", f)

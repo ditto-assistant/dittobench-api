@@ -209,7 +209,8 @@ submit a reachable `harness_url` instead.
 
 ### `GET /v1/runs/{id}`
 Fetch the job: `status`, `mode`, and (when `done`) the full `ScoreReport` with
-the per-case breakdown. Returns `404` if unknown.
+the per-case breakdown, plus `transcript_sha256` — the digest of the run's
+canonical transcript artifact. Returns `404` if unknown.
 ```sh
 curl localhost:8000/v1/runs/<run_id>
 ```
@@ -221,6 +222,17 @@ diagnostics are limited to Docker state, exit code, OOM/cgroup counters, and
 aggregate `/tmp` usage. Container IDs, environment, output, paths, and source
 are never returned.
 
+### `GET /v1/runs/{id}/transcript`
+The run's canonical transcript artifact: every graded case's exact inputs (the
+`RunResponse` as graded plus the validator-observed trajectory), sorted by
+case id so the bytes — and therefore `transcript_sha256` — are deterministic.
+Together with the seed-regenerated dataset this is everything a third party
+needs to re-run the public grader and reproduce the score offline. Returns
+`404` until the run finishes.
+```sh
+curl localhost:8000/v1/runs/<run_id>/transcript
+```
+
 ## Scoring
 
 Scoring is deterministic: a pure function of (dataset, transcript), reproducible
@@ -230,8 +242,10 @@ by anyone from the public `dittobench-datagen` module. See
 Tool cases: deterministic trajectory and argument accuracy
 (0.4 name-F1 + 0.4 arg-F1 + 0.2 order and extra-call discipline), scored on the
 validator-observed trajectory. An observable case the harness did not execute
-through the tool endpoint is capped at 0.5. Result-usage cases also require the
-served needle value in the answer.
+through the tool endpoint is capped at 0.5 in practice and scores 0 on the
+scored path (observed execution is mandatory there). Result-usage cases also
+require the served needle value in the answer; an answer carrying the served
+decoy instead zeroes the usage half.
 
 Memory cases (`run_size` only): per-`answer_kind` deterministic grading (value,
 number, list, ordered list, duration, reversal, decline) with distractor
@@ -241,8 +255,9 @@ Composite: the mean tool score in direct mode; in the full pipeline
 `0.5·tool_mean + 0.5·memory_mean`, then multiplied by three bounded integrity
 factors (each at most 1): observed tool-efficiency (penalizes overshooting the
 expected call budget on correctly-answered cases the validator watched execute
-through the tool endpoint), canary-integrity (a canary leak multiplies by 0.5, an
-honest miss by 0.85), and metamorphic-consistency (penalizes answering
+through the tool endpoint), canary-integrity (a canary leak multiplies by 0.5 and
+compounds; an honest miss carries no composite penalty, since it is already
+reflected in the case's own accuracy), and metamorphic-consistency (penalizes answering
 paraphrased twins of the same fact inconsistently). tool_mean, memory_mean, and
 per_category stay pure accuracy; the factors touch only the composite.
 
