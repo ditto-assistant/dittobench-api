@@ -422,6 +422,77 @@ func MetamorphicConsistency(perCase []protocol.CaseScore) *float64 {
 	return &v
 }
 
+// auditHalf classifies a case as the base or the transformed side of an audit
+// pair, or "" for everything else. Derived from the validator-internal question
+// id, so no new wire field is needed on the case itself and the harness sees
+// nothing new.
+func auditHalf(mc protocol.MemoryCase) string {
+	if !isAuditGroup(mc.TwinGroup) {
+		return ""
+	}
+	if strings.HasPrefix(mc.QuestionID, persona.AuditCaseIDPrefix) {
+		return protocol.AuditHalfTransform
+	}
+	return protocol.AuditHalfBase
+}
+
+// AuditPairs is the 2x2 outcome table over the run's transform-audit pairs, and
+// it is what a brittleness verdict should be built from rather than
+// TransformRobustness.
+//
+// The distinction that matters is DIRECTION. A pair the harness got right on
+// the base phrasing and wrong on the transformed one is the brittleness event;
+// the reverse is not, and a harness with a surface-keyed lookup has no reason to
+// produce it. The 2026-07-18 calibration measured an honest model at 5 base-only
+// vs 6 transform-only (symmetric, i.e. noise) and a surface-gated harness at 6
+// vs 0. Agreement collapses both of those to a single rate and cannot tell them
+// apart, which is why it did not separate the two.
+//
+// Counts rather than a rate because they POOL: a consumer sums them over an
+// agent's runs and over the k=3 validators and decides once on all the evidence,
+// instead of averaging per-run ratios that weight a one-pair run like a
+// seven-pair one.
+func AuditPairs(perCase []protocol.CaseScore) protocol.AuditPairCounts {
+	type sides struct{ base, xform *bool }
+	groups := map[string]*sides{}
+	for i := range perCase {
+		cs := perCase[i]
+		if !isAuditGroup(cs.TwinGroup) || cs.AuditHalf == "" {
+			continue
+		}
+		g := groups[cs.TwinGroup]
+		if g == nil {
+			g = &sides{}
+			groups[cs.TwinGroup] = g
+		}
+		correct := cs.Correct
+		if cs.AuditHalf == protocol.AuditHalfTransform {
+			g.xform = &correct
+		} else {
+			g.base = &correct
+		}
+	}
+	var out protocol.AuditPairCounts
+	for _, g := range groups {
+		// A half-delivered pair (a dropped or timed-out case) is dropped rather
+		// than counted, so a transport failure never reads as brittleness.
+		if g.base == nil || g.xform == nil {
+			continue
+		}
+		switch {
+		case *g.base && *g.xform:
+			out.BothCorrect++
+		case *g.base && !*g.xform:
+			out.BaseOnly++
+		case !*g.base && *g.xform:
+			out.TransformOnly++
+		default:
+			out.BothWrong++
+		}
+	}
+	return out
+}
+
 // isAuditGroup reports whether a TwinGroup is a reproduce-under-transform audit
 // pair rather than an ordinary generator-chosen invariance family. The prefix is
 // the datagen constant, so there is one definition shared by the generator, the
@@ -586,6 +657,7 @@ func memoryCaseScore(mc protocol.MemoryCase, resp protocol.RunResponse, score fl
 		Score:      clamp01(round6(score)),
 		Correct:    score >= 0.5,
 		TwinGroup:  mc.TwinGroup,
+		AuditHalf:  auditHalf(mc),
 		Confidence: resp.Confidence,
 		LatencyMs:  resp.LatencyMs,
 		Called:     calledNames(resp.ToolCalls),

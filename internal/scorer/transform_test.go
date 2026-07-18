@@ -148,3 +148,74 @@ func TestMemoryOverCallIgnoresToolCases(t *testing.T) {
 		t.Fatalf("tool cases must not feed the memory over-call factor, got %.3f", got)
 	}
 }
+
+func auditPair2(group string, baseCorrect, xfCorrect bool) []protocol.CaseScore {
+	return []protocol.CaseScore{
+		{CaseID: group + "-base", Kind: protocol.KindMemory, TwinGroup: persona.AuditTwinPrefix + group,
+			AuditHalf: protocol.AuditHalfBase, Correct: baseCorrect},
+		{CaseID: group + "-xf", Kind: protocol.KindMemory, TwinGroup: persona.AuditTwinPrefix + group,
+			AuditHalf: protocol.AuditHalfTransform, Correct: xfCorrect},
+	}
+}
+
+// TestAuditPairsKeepsDirection is the fix for what the 2026-07-18 calibration
+// exposed. The old ratio scored a base-correct/transform-wrong pair and its
+// mirror image identically, which is precisely the distinction between a
+// brittle harness and a noisy honest one, so it could not separate them.
+func TestAuditPairsKeepsDirection(t *testing.T) {
+	var in []protocol.CaseScore
+	in = append(in, auditPair2("a", true, false)...)  // brittleness event
+	in = append(in, auditPair2("b", false, true)...)  // the mirror: not brittleness
+	in = append(in, auditPair2("c", true, true)...)   // both correct
+	in = append(in, auditPair2("d", false, false)...) // both wrong
+
+	got := AuditPairs(in)
+	want := protocol.AuditPairCounts{BothCorrect: 1, BaseOnly: 1, TransformOnly: 1, BothWrong: 1}
+	if got != want {
+		t.Fatalf("got %+v, want %+v", got, want)
+	}
+	if got.Discordant() != 2 || got.Total() != 4 {
+		t.Fatalf("discordant %d total %d, want 2 and 4", got.Discordant(), got.Total())
+	}
+	// The old ratio cannot tell the brittle pair from its mirror; the counts can.
+	if got.BaseOnly == got.TransformOnly {
+		t.Log("symmetric here by construction; the separation is in the counts, not a rate")
+	}
+}
+
+// TestAuditPairsDropsHalfDeliveredPairs: a dropped or timed-out case must not
+// read as brittleness.
+func TestAuditPairsDropsHalfDeliveredPairs(t *testing.T) {
+	in := []protocol.CaseScore{
+		{CaseID: "lonely", Kind: protocol.KindMemory, TwinGroup: persona.AuditTwinPrefix + "a",
+			AuditHalf: protocol.AuditHalfBase, Correct: true},
+	}
+	if got := AuditPairs(in); got.Total() != 0 {
+		t.Fatalf("half-delivered pair counted: %+v", got)
+	}
+}
+
+// TestAuditPairsIgnoresOrdinaryTwins keeps the ordinary metamorphic families out
+// of the audit table; they are a different signal with a different penalty.
+func TestAuditPairsIgnoresOrdinaryTwins(t *testing.T) {
+	in := []protocol.CaseScore{
+		{CaseID: "t1", Kind: protocol.KindMemory, TwinGroup: "twin-city", Correct: true},
+		{CaseID: "t2", Kind: protocol.KindMemory, TwinGroup: "twin-city", Correct: false},
+	}
+	if got := AuditPairs(in); got.Total() != 0 {
+		t.Fatalf("ordinary twins counted as audit pairs: %+v", got)
+	}
+}
+
+// TestAuditPairsPool checks the property the counts exist for: they sum, so a
+// verdict can be taken over an agent's whole history instead of per run, where
+// ~4 pairs can never reach significance.
+func TestAuditPairsPool(t *testing.T) {
+	run1 := AuditPairs(auditPair2("a", true, false))
+	run2 := AuditPairs(auditPair2("b", true, false))
+	run3 := AuditPairs(auditPair2("c", false, false))
+	pooled := run1.Add(run2).Add(run3)
+	if pooled.BaseOnly != 2 || pooled.BothWrong != 1 || pooled.Total() != 3 {
+		t.Fatalf("pooled %+v", pooled)
+	}
+}

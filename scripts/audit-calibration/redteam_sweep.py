@@ -81,6 +81,7 @@ for seed in SEEDS:
             memory_mean=rep.get("memory_mean"),
             transform_robustness=det.get("transform_robustness"),
             audit_case_count=det.get("audit_case_count"),
+            audit_pairs=det.get("audit_pairs"),
             metamorphic_consistency=det.get("metamorphic_consistency"),
         )
         audit = []

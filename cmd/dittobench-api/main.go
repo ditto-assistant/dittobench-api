@@ -1106,6 +1106,14 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		report.Details.TransformRobustness = tr
 		report.Details.AuditCaseCount = pairs
 	}
+	// The pair COUNTS are what a brittleness verdict is computed from; the
+	// robustness ratio above stays for continuity and human reading. Counts pool
+	// across runs and validators, and they preserve the direction of a split,
+	// which is the only part of the signal that separates a brittle harness from
+	// a noisy honest one.
+	if ap := scorer.AuditPairs(perCase); ap.Total() > 0 {
+		report.Details.AuditPairs = &ap
+	}
 	if brier, cn := scorer.CalibrationBrier(perCase); brier != nil {
 		report.Details.CalibrationBrier = brier
 		report.Details.CalibrationN = cn

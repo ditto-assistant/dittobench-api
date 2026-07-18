@@ -136,6 +136,7 @@ def run_seed(seed, port):
         rec["transform_robustness"] = det.get("transform_robustness")
         rec["audit_case_count"] = det.get("audit_case_count")
         rec["metamorphic_consistency"] = det.get("metamorphic_consistency")
+        rec["audit_pairs"] = det.get("audit_pairs")
         rec["error_detail"] = d.get("error")
         # Keep the per-case rows for audit pairs so a surprising aggregate is
         # debuggable after the fact.
