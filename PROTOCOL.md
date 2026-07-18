@@ -7,6 +7,21 @@ starter kit **byte-for-byte**.
 
 All payloads are JSON over HTTP.
 
+## Benchmark-version negotiation (validator control plane)
+
+The benchmark contract is a deliberate input, never inferred from a dataset
+hash. A capability-aware validator authenticates to `GET /v1/capabilities`,
+selects a member of `supported_bench_versions`, and sends it as the required
+integer `bench_version` on `POST /v2/score`. The accepted response, polled job,
+and completed `report.details` all echo the selected value. A validator must
+reject an omitted, unsupported, or contradictory value.
+
+During the mixed-fleet migration only, `POST /v1/score` and the public practice
+`POST /v1/submit` map an omitted version to v2. This is an exact legacy path;
+it must not silently advance to the current version. Version 3 has its own
+seed-domain and pinned deterministic vectors, while version 2 retains its
+existing byte goldens and scoring behavior.
+
 ## Dataset
 
 The validator generates a `Dataset` of tool-calling cases. The harness never

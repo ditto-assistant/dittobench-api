@@ -135,6 +135,34 @@ pinned (pinning only reproduces a specific set); `n` defaults to 30.
 curl 'localhost:8000/v1/dataset?n=10'
 ```
 
+### Validator capability negotiation
+
+`GET /v1/capabilities` is a private validator-control-plane endpoint. It is
+disabled (404) unless `DITTOBENCH_CAPABILITIES_TOKEN` is configured and requires
+`Authorization: Bearer <token>`. Do not expose or reuse that token in the public
+practice service. An authenticated response binds the running scorer release to
+the immutable descriptor supplied by Compose:
+
+```json
+{
+  "software_version": "0.10.0",
+  "source_revision": "0123456789abcdef0123456789abcdef01234567",
+  "supported_bench_versions": [2, 3]
+}
+```
+
+`DITTOBENCH_SOFTWARE_VERSION` and `DITTOBENCH_SOURCE_SHA` must identify the
+deployed image's release and exact 40-character source commit. The endpoint
+fails closed with 503 when either identity is absent or malformed.
+
+New validators send canonical work to `POST /v2/score`, where
+`bench_version` is required and must be `2` or `3`. The accepted response and
+every polled job echo `bench_version`; a completed report also echoes it at
+`report.details.bench_version`. Validators must reject disagreement at any
+layer. `POST /v1/score` remains available during the mixed-fleet migration and
+maps an omitted version to the exact historical v2 path. `/v1/submit` retains
+the same omission rule for public practice compatibility.
+
 ### `GET /v1/catalog`
 The Ditto tool catalog the harness receives on every `/run`.
 ```sh

@@ -73,11 +73,15 @@ func TestRunSizeProgressAndPartial(t *testing.T) {
 	s := New()
 	s.Create("r", "run_size", StatusQueued, 5, 12)
 	s.SetRunSize("r", "small")
+	s.SetBenchVersion("r", 3)
 	s.SetStage("r", StatusGenerating, 0, 12)
 
 	got, _ := s.Get("r")
 	if got.RunSize != "small" {
 		t.Fatalf("expected run_size small, got %q", got.RunSize)
+	}
+	if got.BenchVersion != 3 {
+		t.Fatalf("expected bench_version 3, got %d", got.BenchVersion)
 	}
 	if got.Status != StatusGenerating || got.Progress.Stage != string(StatusGenerating) || got.Progress.Total != 12 {
 		t.Fatalf("stage not set: %+v", got)

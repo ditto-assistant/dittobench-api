@@ -7,6 +7,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -123,6 +125,9 @@ type server struct {
 	allowPrivate         bool
 	allowScreenedImages  bool
 	requireScreenedImage bool
+	capabilitiesToken    string
+	softwareVersion      string
+	sourceRevision       string
 	limiter              *ratelimit.Limiter
 	runSlots             chan struct{} // bounds concurrent run_size jobs
 	cancelMu             sync.Mutex
@@ -145,6 +150,9 @@ func main() {
 	allowPrivate := envBool("DITTOBENCH_ALLOW_PRIVATE_HARNESS")
 	allowScreenedImages := envBool("DITTOBENCH_ALLOW_SCREENED_IMAGES")
 	requireScreenedImage := envBool("DITTOBENCH_REQUIRE_SCREENED_IMAGE")
+	capabilitiesToken := strings.TrimSpace(os.Getenv("DITTOBENCH_CAPABILITIES_TOKEN"))
+	softwareVersion := strings.TrimSpace(os.Getenv("DITTOBENCH_SOFTWARE_VERSION"))
+	sourceRevision := strings.TrimSpace(os.Getenv("DITTOBENCH_SOURCE_SHA"))
 	runner.Configure(allowPrivate)
 	if allowPrivate {
 		log.Printf("WARNING: DITTOBENCH_ALLOW_PRIVATE_HARNESS set — SSRF guard relaxed (local/dev only)")
@@ -162,6 +170,9 @@ func main() {
 		allowPrivate:         allowPrivate,
 		allowScreenedImages:  allowScreenedImages,
 		requireScreenedImage: requireScreenedImage,
+		capabilitiesToken:    capabilitiesToken,
+		softwareVersion:      softwareVersion,
+		sourceRevision:       sourceRevision,
 		limiter:              ratelimit.New(submitsPerWindow, submitWindow),
 		runSlots:             make(chan struct{}, maxConcurrentRuns),
 		runCancels:           make(map[string]context.CancelFunc),
@@ -169,11 +180,13 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.handleHealth)
+	mux.HandleFunc("GET /v1/capabilities", s.handleCapabilities)
 	mux.HandleFunc("GET /v1/dataset", s.handleDataset)
 	mux.HandleFunc("GET /v1/sample", s.handleSample)
 	mux.HandleFunc("GET /v1/catalog", s.handleCatalog)
 	mux.HandleFunc("POST /v1/submit", s.handleSubmit)
 	mux.HandleFunc("POST /v1/score", s.handleScore)
+	mux.HandleFunc("POST /v2/score", s.handleVersionedScore)
 	mux.HandleFunc("GET /v1/runs/{id}", s.handleGetRun)
 	mux.HandleFunc("GET /v1/runs/{id}/transcript", s.handleGetTranscript)
 	mux.HandleFunc("DELETE /v1/runs/{id}", s.handleCancelRun)
@@ -211,6 +224,57 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 
 func (s *server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+type capabilitiesResponse struct {
+	SoftwareVersion        string `json:"software_version"`
+	SourceRevision         string `json:"source_revision"`
+	SupportedBenchVersions []int  `json:"supported_bench_versions"`
+}
+
+// handleCapabilities is a validator-control-plane endpoint, not a public
+// practice discovery API. An unset token disables it; callers authenticate with
+// the same high-entropy token mounted into the validator and scorer services.
+// Identity is supplied by the immutable release descriptor at deploy time.
+func (s *server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	if s.capabilitiesToken == "" {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	const bearer = "Bearer "
+	auth := r.Header.Get("Authorization")
+	if !strings.HasPrefix(auth, bearer) || !constantTimeEqual(strings.TrimPrefix(auth, bearer), s.capabilitiesToken) {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if s.softwareVersion == "" || !canonicalSourceRevision(s.sourceRevision) {
+		writeError(w, http.StatusServiceUnavailable, "scorer release identity unavailable")
+		return
+	}
+	writeJSON(w, http.StatusOK, capabilitiesResponse{
+		SoftwareVersion:        s.softwareVersion,
+		SourceRevision:         s.sourceRevision,
+		SupportedBenchVersions: []int{protocol.BenchVersionV2, protocol.BenchVersionV3},
+	})
+}
+
+func constantTimeEqual(got, want string) bool {
+	gotHash := sha256.Sum256([]byte(got))
+	wantHash := sha256.Sum256([]byte(want))
+	return subtle.ConstantTimeCompare(gotHash[:], wantHash[:]) == 1
+}
+
+func canonicalSourceRevision(value string) bool {
+	if len(value) != 40 || value != strings.ToLower(value) {
+		return false
+	}
+	if value == strings.Repeat("0", 40) {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
 }
 
 func (s *server) handleCatalog(w http.ResponseWriter, _ *http.Request) {
@@ -286,9 +350,13 @@ func redactDataset(ds protocol.Dataset) publicDataset {
 // env is forwarded to the sandbox container (e.g. OPENROUTER_API_KEY and any
 // model override the miner's harness reads). It is ignored in direct mode.
 type submitRequest struct {
-	HarnessURL string `json:"harness_url,omitempty"`
-	GitURL     string `json:"git_url,omitempty"`
-	GitRef     string `json:"git_ref,omitempty"`
+	// BenchVersion selects the deterministic dataset/scoring contract. The
+	// version-bound canonical endpoint requires this field; the legacy endpoint
+	// and practice path preserve their historical omitted-means-v2 behavior.
+	BenchVersion int    `json:"bench_version,omitempty"`
+	HarnessURL   string `json:"harness_url,omitempty"`
+	GitURL       string `json:"git_url,omitempty"`
+	GitRef       string `json:"git_ref,omitempty"`
 	// TarballURL is a presigned https URL of a gzipped tar of the harness. The
 	// SN118 platform stores miner uploads as tarballs, so the validator hands us
 	// the platform's short-lived download URL instead of a git repo. Mutually
@@ -401,21 +469,23 @@ func validateScreenedImageRequired(req submitRequest, required bool) string {
 
 // submitResponse is returned by the direct (synchronous) path.
 type submitResponse struct {
-	RunID     string  `json:"run_id"`
-	Status    string  `json:"status"`
-	Composite float64 `json:"composite"`
-	ToolMean  float64 `json:"tool_mean"`
-	MedianMs  int64   `json:"median_ms"`
-	N         int     `json:"n"`
-	Seed      int64   `json:"seed"`
+	RunID        string  `json:"run_id"`
+	Status       string  `json:"status"`
+	Composite    float64 `json:"composite"`
+	ToolMean     float64 `json:"tool_mean"`
+	MedianMs     int64   `json:"median_ms"`
+	N            int     `json:"n"`
+	Seed         int64   `json:"seed"`
+	BenchVersion int     `json:"bench_version"`
 }
 
 // acceptedResponse is returned by the sandbox (asynchronous) path; poll
 // GET /v1/runs/{id} for status + report.
 type acceptedResponse struct {
-	RunID  string `json:"run_id"`
-	Status string `json:"status"`
-	Poll   string `json:"poll"`
+	RunID        string `json:"run_id"`
+	Status       string `json:"status"`
+	Poll         string `json:"poll"`
+	BenchVersion int    `json:"bench_version"`
 }
 
 func (s *server) handleSubmit(w http.ResponseWriter, r *http.Request) {
@@ -433,6 +503,12 @@ func (s *server) handleSubmit(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid or oversized JSON body")
 		return
 	}
+	version, msg := requestedBenchVersion(req.BenchVersion, false)
+	if msg != "" {
+		writeError(w, http.StatusBadRequest, msg)
+		return
+	}
+	req.BenchVersion = version
 	// Exactly one submission source: a running harness (direct), a git repo, or
 	// a presigned platform tarball (mode B). git_url + tarball_url both build in
 	// the Docker sandbox.
@@ -493,6 +569,10 @@ func (s *server) handleSubmit(w http.ResponseWriter, r *http.Request) {
 		s.submitRunSize(w, r, req)
 		return
 	}
+	if req.BenchVersion != 2 {
+		writeError(w, http.StatusBadRequest, "bench_version 3 requires run_size so the complete versioned benchmark is administered")
+		return
+	}
 
 	n := req.N
 	if n <= 0 {
@@ -512,6 +592,17 @@ func (s *server) handleSubmit(w http.ResponseWriter, r *http.Request) {
 // regenerated dataset does not hash to that value (tamper-evidence). It reuses
 // the full run_size pipeline (build/run → seed → judge → score → signed report).
 func (s *server) handleScore(w http.ResponseWriter, r *http.Request) {
+	s.handleScoreRequest(w, r, false)
+}
+
+// handleVersionedScore is the capability-negotiated canonical scoring path.
+// Unlike the legacy /v1/score route, it never guesses the benchmark contract:
+// bench_version must be present and supported.
+func (s *server) handleVersionedScore(w http.ResponseWriter, r *http.Request) {
+	s.handleScoreRequest(w, r, true)
+}
+
+func (s *server) handleScoreRequest(w http.ResponseWriter, r *http.Request, requireExplicitVersion bool) {
 	if !s.allowPrivate && !s.limiter.Allow(clientIP(r)) {
 		writeError(w, http.StatusTooManyRequests, "rate limit exceeded; slow down and retry shortly")
 		return
@@ -522,17 +613,23 @@ func (s *server) handleScore(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid or oversized JSON body")
 		return
 	}
+	version, msg := requestedBenchVersion(req.BenchVersion, requireExplicitVersion)
+	if msg != "" {
+		writeError(w, http.StatusBadRequest, msg)
+		return
+	}
+	req.BenchVersion = version
 	// Validator-specific preconditions (beyond what submitRunSize enforces).
 	if req.Seed == 0 {
-		writeError(w, http.StatusBadRequest, "seed is required (the platform-issued dataset seed) for /v1/score")
+		writeError(w, http.StatusBadRequest, "seed is required (the platform-issued dataset seed) for canonical scoring")
 		return
 	}
 	if strings.TrimSpace(req.ExpectedDatasetSHA256) == "" {
-		writeError(w, http.StatusBadRequest, "dataset_sha256 is required (the platform-issued dataset hash) for /v1/score")
+		writeError(w, http.StatusBadRequest, "dataset_sha256 is required (the platform-issued dataset hash) for canonical scoring")
 		return
 	}
 	if req.RunSize == "" {
-		writeError(w, http.StatusBadRequest, "run_size is required (small|medium|full) for /v1/score")
+		writeError(w, http.StatusBadRequest, "run_size is required (small|medium|full) for canonical scoring")
 		return
 	}
 	// Exactly one harness source; SSRF-guard any caller-supplied URL (same rules
@@ -582,6 +679,19 @@ func (s *server) handleScore(w http.ResponseWriter, r *http.Request) {
 	s.submitRunSize(w, r, req)
 }
 
+func requestedBenchVersion(requested int, requireExplicit bool) (int, string) {
+	if requested == 0 {
+		if requireExplicit {
+			return 0, "bench_version is required (supported: 2, 3)"
+		}
+		return 2, ""
+	}
+	if !protocol.SupportedBenchVersion(requested) {
+		return 0, "unsupported bench_version (supported: 2, 3)"
+	}
+	return requested, ""
+}
+
 // submitDirect scores a harness the miner is already running, synchronously.
 func (s *server) submitDirect(w http.ResponseWriter, r *http.Request, req submitRequest, n int) {
 	ctx := r.Context()
@@ -597,6 +707,7 @@ func (s *server) submitDirect(w http.ResponseWriter, r *http.Request, req submit
 	seed := pinnedOrFreshSeed(req.Seed)
 	runID := uuid.NewString()
 	s.store.Create(runID, "direct", store.StatusRunning, seed, n)
+	s.store.SetBenchVersion(runID, req.BenchVersion)
 
 	// Direct harness_url path: no crate is built here, so there is no source tree
 	// to fingerprint (nil ⇒ the platform gate falls back to its lexical + size
@@ -609,13 +720,14 @@ func (s *server) submitDirect(w http.ResponseWriter, r *http.Request, req submit
 	}
 
 	writeJSON(w, http.StatusOK, submitResponse{
-		RunID:     report.RunID,
-		Status:    string(store.StatusDone),
-		Composite: report.Composite,
-		ToolMean:  report.ToolMean,
-		MedianMs:  report.MedianMs,
-		N:         report.N,
-		Seed:      seed,
+		RunID:        report.RunID,
+		Status:       string(store.StatusDone),
+		Composite:    report.Composite,
+		ToolMean:     report.ToolMean,
+		MedianMs:     report.MedianMs,
+		N:            report.N,
+		Seed:         seed,
+		BenchVersion: req.BenchVersion,
 	})
 }
 
@@ -637,14 +749,16 @@ func (s *server) submitSandbox(w http.ResponseWriter, r *http.Request, req submi
 	seed := pinnedOrFreshSeed(req.Seed)
 	runID := uuid.NewString()
 	s.store.Create(runID, "sandbox", store.StatusQueued, seed, n)
+	s.store.SetBenchVersion(runID, req.BenchVersion)
 
 	// Detach from the request context so the long build survives the response.
 	go s.runSandboxJob(context.Background(), runID, req, seed, n)
 
 	writeJSON(w, http.StatusAccepted, acceptedResponse{
-		RunID:  runID,
-		Status: string(store.StatusQueued),
-		Poll:   "/v1/runs/" + runID,
+		RunID:        runID,
+		Status:       string(store.StatusQueued),
+		Poll:         "/v1/runs/" + runID,
+		BenchVersion: req.BenchVersion,
 	})
 }
 
@@ -727,17 +841,19 @@ func (s *server) submitRunSize(w http.ResponseWriter, r *http.Request, req submi
 	runID := uuid.NewString()
 	s.store.Create(runID, "run_size", store.StatusQueued, seed, prof.Tools+prof.Mem)
 	s.store.SetRunSize(runID, req.RunSize)
-	log.Printf("run %s: run_size=%s seed=%d tools=%d mem=%d",
-		runID, req.RunSize, seed, prof.Tools, prof.Mem)
+	s.store.SetBenchVersion(runID, req.BenchVersion)
+	log.Printf("run %s: run_size=%s bench_version=%d seed=%d tools=%d mem=%d",
+		runID, req.RunSize, req.BenchVersion, seed, prof.Tools, prof.Mem)
 
 	runCtx, cancel := context.WithCancel(context.Background())
 	s.registerRunCancel(runID, cancel)
 	go s.runSizeJob(runCtx, runID, req, prof, seed)
 
 	writeJSON(w, http.StatusAccepted, acceptedResponse{
-		RunID:  runID,
-		Status: string(store.StatusQueued),
-		Poll:   "/v1/runs/" + runID,
+		RunID:        runID,
+		Status:       string(store.StatusQueued),
+		Poll:         "/v1/runs/" + runID,
+		BenchVersion: req.BenchVersion,
 	})
 }
 
@@ -800,28 +916,32 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 
 	// 2. generating — fresh, anti-cheat dataset (tools + memory haystack).
 	s.store.SetStage(runID, store.StatusGenerating, 0, total)
-	rng := gen.NewRNG(seed)
+	rng, rngErr := gen.NewRNGForVersion(seed, req.BenchVersion)
+	if rngErr != nil {
+		s.store.Fail(runID, "unsupported bench_version during generation")
+		return
+	}
 	toolCases, toolPara := gen.GenerateTools(rng, seed, prof.Tools)
 	// v2 memory engine (bench_version 2): a fresh procedural persona universe
 	// per seed replaces the static LongMemEval fixture. Generation is fully
 	// non-LLM and a pure function of the master `seed`; selection shares the run
 	// rng. The suite lays cases out across seeding tiers (A prepared, B raw-pairs)
 	// and staged Tier-C waves.
-	// Explicit version. The un-suffixed wrappers default to the FROZEN v2
-	// contract, so calling them here would score every run against the
-	// pre-hardening dataset while the report claimed bench_version 3.
-	memSuite, memErr := gen.GenerateMemorySuiteForVersion(rng, seed, prof.Mem, prof.Waves, prof.RawPairsFrac, protocol.CurrentBenchVersion)
+	// Always pass the version explicitly. The un-suffixed wrappers default to
+	// the FROZEN v2 contract, so an implicit call here would score the run
+	// against the pre-hardening dataset while the report claimed v3.
+	memSuite, memErr := gen.GenerateMemorySuiteForVersion(rng, seed, prof.Mem, prof.Waves, prof.RawPairsFrac, req.BenchVersion)
 	if memErr != nil {
-		s.store.Fail(runID, "generating memory suite failed: "+memErr.Error())
+		s.store.Fail(runID, "memory dataset generation failed for requested bench_version")
 		return
 	}
 	// Multi-graph isolation: seed a second persona under a different
 	// user_id and add cross-user isolation cases. The secondary graph is template-
 	// rendered. Cases carry the user_id they must be answered under; they merge
 	// into the primary staged-case stream.
-	iso, isoErr := gen.GenerateIsolationForVersion(seed, prof.Mem, prof.Waves, prof.IsoCases, protocol.CurrentBenchVersion)
+	iso, isoErr := gen.GenerateIsolationForVersion(seed, prof.Mem, prof.Waves, prof.IsoCases, req.BenchVersion)
 	if isoErr != nil {
-		s.store.Fail(runID, "generating isolation layer failed: "+isoErr.Error())
+		s.store.Fail(runID, "isolation dataset generation failed for requested bench_version")
 		return
 	}
 	memSuite.Cases = append(memSuite.Cases, iso.Cases...)
@@ -853,7 +973,15 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	// The hashed artifact covers the secondary isolation graph too (when present),
 	// so a dispute re-scores the exact multi-graph seeding.
 	memWaves := gen.MergeMemoryWaves(memSuite.Waves, iso.SecondaryWave)
-	artifact := gen.BuildArtifact(seed, toolCases, memSuite.Cases, memWaves)
+	artifact, artifactErr := gen.BuildArtifactForVersion(seed, req.BenchVersion, toolCases, memSuite.Cases, memWaves)
+	if artifactErr != nil {
+		s.store.Fail(runID, "dataset generation failed for requested bench_version")
+		return
+	}
+	if artifact.BenchVersion != req.BenchVersion {
+		s.store.Fail(runID, fmt.Sprintf("bench_version mismatch: requested %d but generated artifact reports %d", req.BenchVersion, artifact.BenchVersion))
+		return
+	}
 	datasetHash, artifactBytes, hashErr := artifact.SHA256Hex()
 	if hashErr != nil {
 		log.Printf("run %s: dataset hashing failed: %v", runID, hashErr)
@@ -1088,7 +1216,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		}
 	}
 	report.Details = &protocol.RunDetails{
-		BenchVersion:      protocol.BenchVersion,
+		BenchVersion:      req.BenchVersion,
 		DatasetSHA256:     datasetHash,
 		Paraphrase:        &para,
 		InjectionAttempts: injections,
@@ -1132,6 +1260,11 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	if injections > 0 {
 		log.Printf("run %s: %d injection-compliance case(s) flagged", runID, injections)
 	}
+	if err := validateBenchVersionResult(req.BenchVersion, artifact.BenchVersion, report.Details); err != nil {
+		s.store.Fail(runID, err.Error())
+		return
+	}
+
 	// Offline reproducibility: content-address the transcript artifact (the
 	// graded per-case inputs) and attach it to the run. The grader is public and
 	// deterministic, so (dataset regenerated from seed) + (this transcript)
@@ -1142,7 +1275,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	tArtifact := transcriptArtifact{
 		RunID:         runID,
 		Seed:          seed,
-		BenchVersion:  protocol.BenchVersion,
+		BenchVersion:  artifact.BenchVersion,
 		DatasetSHA256: datasetHash,
 		Cases:         transcripts,
 	}
@@ -1159,7 +1292,21 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	}
 	s.store.Finish(runID, report)
 	log.Printf("run %s done: bench_version=%d composite=%.3f tool_mean=%.3f memory_mean=%.3f observed=%d capped=%d",
-		runID, protocol.BenchVersion, report.Composite, report.ToolMean, report.MemoryMean, observedTool, cappedTool)
+		runID, req.BenchVersion, report.Composite, report.ToolMean, report.MemoryMean, observedTool, cappedTool)
+}
+
+func validateBenchVersionResult(requested, artifactVersion int, details *protocol.RunDetails) error {
+	if requested != artifactVersion {
+		return fmt.Errorf("bench_version contradiction: request=%d artifact=%d", requested, artifactVersion)
+	}
+	if details == nil || details.BenchVersion != requested {
+		reported := 0
+		if details != nil {
+			reported = details.BenchVersion
+		}
+		return fmt.Errorf("bench_version contradiction: request=%d report=%d", requested, reported)
+	}
+	return nil
 }
 
 func (s *server) finishSandboxRun(runID string, handle *sandbox.Handle) {
