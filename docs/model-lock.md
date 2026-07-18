@@ -76,6 +76,12 @@ harden the container itself. The container config is env-driven
 `DITTOBENCH_SANDBOX_HARDEN`); the proxy allowlist and firewall are provisioned
 on the validator host.
 
+The full-run resource envelope is fixed at 3 GiB memory, 2 CPUs, 512 PIDs, and
+a 512 MiB `noexec,nosuid,nodev` tmpfs at `/tmp`, with a read-only root
+filesystem. Each scorer admits one full run at a time so the miner envelope
+cannot multiply past host capacity. Resource-failure diagnostics are captured
+before teardown and expose aggregate counters only.
+
 ## Enforcement in the engine
 
 The engine forces the provider, model, and gateway on the sandbox and drops any

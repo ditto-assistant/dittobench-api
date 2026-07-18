@@ -26,6 +26,7 @@ package sandbox
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -53,6 +54,9 @@ type Sandbox interface {
 	Release(ctx context.Context, image string)
 	// Stop force-removes the container behind h. Safe to call more than once.
 	Stop(ctx context.Context, h *Handle)
+	// Diagnostics captures sanitized container resource evidence before Stop.
+	// It never returns miner output, environment variables, paths, or source.
+	Diagnostics(ctx context.Context, h *Handle) RuntimeDiagnostics
 }
 
 // Source identifies a submission to build. Exactly one of GitURL or TarballURL
@@ -84,6 +88,33 @@ type Handle struct {
 	ImageRef string
 }
 
+// RuntimeDiagnostics is bounded, source-free evidence captured before teardown.
+// Pointer fields distinguish an observed zero from a runtime that could not
+// expose the corresponding cgroup/tmpfs counter (for example after a hard exit).
+type RuntimeDiagnostics struct {
+	Running            bool              `json:"running"`
+	OOMKilled          bool              `json:"oom_killed"`
+	ExitCode           int               `json:"exit_code"`
+	MemoryPeakBytes    *uint64           `json:"memory_peak_bytes,omitempty"`
+	MemoryEvents       map[string]uint64 `json:"memory_events,omitempty"`
+	TmpfsUsedBytes     *uint64           `json:"tmpfs_used_bytes,omitempty"`
+	TmpfsCapacityBytes *uint64           `json:"tmpfs_capacity_bytes,omitempty"`
+}
+
+// InfrastructureCode returns a stable retry classification only for evidence
+// that the validator-owned resource envelope was exhausted. An ordinary
+// non-zero process exit remains a miner/runtime failure.
+func (d RuntimeDiagnostics) InfrastructureCode() string {
+	if d.OOMKilled || d.MemoryEvents["oom_kill"] > 0 {
+		return "sandbox_oom"
+	}
+	if d.TmpfsUsedBytes != nil && d.TmpfsCapacityBytes != nil &&
+		*d.TmpfsCapacityBytes > 0 && *d.TmpfsUsedBytes >= *d.TmpfsCapacityBytes {
+		return "sandbox_tmpfs_exhausted"
+	}
+	return ""
+}
+
 // LocalDocker runs submissions on the host Docker daemon via the `docker` CLI.
 type LocalDocker struct {
 	// HarnessPort is the in-container port the harness serves on (the kit's
@@ -91,6 +122,8 @@ type LocalDocker struct {
 	HarnessPort string
 	// MemoryLimit / CPULimit cap the container (docker --memory / --cpus).
 	MemoryLimit string
+	// TmpfsLimit caps the only writable filesystem mounted at /tmp.
+	TmpfsLimit string
 	// CPULimit is passed to docker --cpus.
 	CPULimit string
 	// BuildTimeout bounds a single `docker build` (Rust cold builds are slow).
@@ -125,13 +158,16 @@ type LocalDocker struct {
 	// outbound calls are forced through the allowlisting forward proxy (loopback +
 	// the host gateway bypass it via NO_PROXY). Env DITTOBENCH_SANDBOX_EGRESS_PROXY.
 	EgressProxy string
+	// dockerCommand is injectable only for deterministic command/parse tests.
+	dockerCommand func(context.Context, ...string) ([]byte, error)
 }
 
 // NewLocalDocker returns a LocalDocker with sensible defaults.
 func NewLocalDocker() *LocalDocker {
 	return &LocalDocker{
 		HarnessPort:     "8080",
-		MemoryLimit:     "2g",
+		MemoryLimit:     "3g",
+		TmpfsLimit:      "512m",
 		CPULimit:        "2",
 		BuildTimeout:    25 * time.Minute,
 		GitHubTokenFile: os.Getenv("GITHUB_TOKEN_FILE"),
@@ -317,15 +353,32 @@ func (d *LocalDocker) pidsLimit() int {
 	return 512
 }
 
+func (d *LocalDocker) tmpfsLimit() string {
+	if strings.TrimSpace(d.TmpfsLimit) != "" {
+		return d.TmpfsLimit
+	}
+	return "512m"
+}
+
+func (d *LocalDocker) dockerOutput(ctx context.Context, args ...string) ([]byte, error) {
+	if d.dockerCommand != nil {
+		return d.dockerCommand(ctx, args...)
+	}
+	return exec.CommandContext(ctx, "docker", args...).CombinedOutput()
+}
+
 // runArgs builds the `docker run` argument vector. Extracted from Run so the
 // isolation/egress flags can be unit-tested without a live docker daemon.
 func (d *LocalDocker) runArgs(image string, env map[string]string) []string {
 	args := []string{
-		"run", "-d", "--rm",
+		// Do not use --rm: Docker would erase an OOM-killed container before the
+		// scorer can inspect State.OOMKilled/ExitCode. Every successful Run path
+		// owns a deferred Stop, which removes it immediately after diagnostics.
+		"run", "-d",
 		"--init",
 		"--user", "65532:65532",
 		"--read-only",
-		"--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=256m",
+		"--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=" + d.tmpfsLimit(),
 		"--memory", d.MemoryLimit,
 		"--cpus", d.CPULimit,
 		"--pids-limit", strconv.Itoa(d.pidsLimit()),
@@ -369,6 +422,99 @@ func (d *LocalDocker) runArgs(image string, env map[string]string) []string {
 		)
 	}
 	return append(args, image)
+}
+
+type dockerState struct {
+	Running   bool `json:"Running"`
+	OOMKilled bool `json:"OOMKilled"`
+	ExitCode  int  `json:"ExitCode"`
+}
+
+// Diagnostics collects Docker state plus best-effort cgroup-v2 and /tmp usage.
+// The inner image may be distroless or already stopped, so unavailable counters
+// stay nil while the authoritative Docker State remains available.
+func (d *LocalDocker) Diagnostics(ctx context.Context, h *Handle) RuntimeDiagnostics {
+	diagnostics := RuntimeDiagnostics{}
+	if h == nil || h.ContainerID == "" {
+		return diagnostics
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	if out, err := d.dockerOutput(ctx, "inspect", "--format", "{{json .State}}", h.ContainerID); err == nil {
+		var state dockerState
+		if json.Unmarshal(bytes.TrimSpace(out), &state) == nil {
+			diagnostics.Running = state.Running
+			diagnostics.OOMKilled = state.OOMKilled
+			diagnostics.ExitCode = state.ExitCode
+		}
+	}
+	if !diagnostics.Running {
+		return diagnostics
+	}
+
+	const script = `
+printf '%s\n' __memory_events__
+cat /sys/fs/cgroup/memory.events 2>/dev/null || true
+printf '%s\n' __memory_peak__
+cat /sys/fs/cgroup/memory.peak 2>/dev/null || true
+printf '%s\n' __tmpfs__
+df -Pk /tmp 2>/dev/null | tail -n 1 || true
+`
+	out, err := d.dockerOutput(ctx, "exec", h.ContainerID, "/bin/sh", "-c", script)
+	if err != nil {
+		return diagnostics
+	}
+	parseRuntimeMetrics(&diagnostics, string(out))
+	return diagnostics
+}
+
+func parseRuntimeMetrics(diagnostics *RuntimeDiagnostics, output string) {
+	section := ""
+	for _, raw := range strings.Split(output, "\n") {
+		line := strings.TrimSpace(raw)
+		switch line {
+		case "__memory_events__", "__memory_peak__", "__tmpfs__":
+			section = line
+			continue
+		}
+		if line == "" {
+			continue
+		}
+		switch section {
+		case "__memory_events__":
+			fields := strings.Fields(line)
+			if len(fields) != 2 {
+				continue
+			}
+			value, err := strconv.ParseUint(fields[1], 10, 64)
+			if err != nil {
+				continue
+			}
+			if diagnostics.MemoryEvents == nil {
+				diagnostics.MemoryEvents = make(map[string]uint64)
+			}
+			diagnostics.MemoryEvents[fields[0]] = value
+		case "__memory_peak__":
+			value, err := strconv.ParseUint(line, 10, 64)
+			if err == nil {
+				diagnostics.MemoryPeakBytes = &value
+			}
+		case "__tmpfs__":
+			fields := strings.Fields(line)
+			if len(fields) < 6 {
+				continue
+			}
+			capacityKB, capErr := strconv.ParseUint(fields[len(fields)-5], 10, 64)
+			usedKB, usedErr := strconv.ParseUint(fields[len(fields)-4], 10, 64)
+			if capErr == nil && usedErr == nil {
+				capacity := capacityKB * 1024
+				used := usedKB * 1024
+				diagnostics.TmpfsCapacityBytes = &capacity
+				diagnostics.TmpfsUsedBytes = &used
+			}
+		}
+	}
 }
 
 // Run starts the image detached with resource caps and a random host port, then

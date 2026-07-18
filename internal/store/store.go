@@ -36,6 +36,16 @@ type Progress struct {
 	Total int    `json:"total"`
 }
 
+// Failure is the sanitized terminal classification returned to a validator.
+// Diagnostics contain aggregate resource counters only; miner output, source,
+// environment variables, and container identifiers are never included.
+type Failure struct {
+	Kind        string         `json:"kind"`
+	Code        string         `json:"code"`
+	Retryable   bool           `json:"retryable"`
+	Diagnostics map[string]any `json:"diagnostics,omitempty"`
+}
+
 // Job is one evaluation, in any lifecycle state.
 type Job struct {
 	RunID     string                `json:"run_id"`
@@ -45,6 +55,7 @@ type Job struct {
 	Seed      int64                 `json:"seed,omitempty"`     // dataset seed used
 	N         int                   `json:"n,omitempty"`        // case count requested
 	Error     string                `json:"error,omitempty"`    // set when Status == failed
+	Failure   *Failure              `json:"failure,omitempty"`  // sanitized machine contract
 	Progress  Progress              `json:"progress"`           // stage/done/total for the UI
 	Partial   []protocol.CaseScore  `json:"partial,omitempty"`  // case scores appended as they complete
 	Report    *protocol.ScoreReport `json:"report,omitempty"`   // set when Status == done
@@ -120,9 +131,15 @@ func (s *Store) AppendPartial(runID string, cs protocol.CaseScore) {
 
 // Fail marks a job failed with the given error message.
 func (s *Store) Fail(runID, msg string) {
+	s.FailWith(runID, msg, nil)
+}
+
+// FailWith marks a job failed and attaches an optional sanitized classifier.
+func (s *Store) FailWith(runID, msg string, failure *Failure) {
 	s.Update(runID, func(j *Job) {
 		j.Status = StatusFailed
 		j.Error = msg
+		j.Failure = failure
 	})
 }
 
