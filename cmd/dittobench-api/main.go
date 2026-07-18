@@ -1102,6 +1102,10 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		report.Details.LexicalGap = &lg
 	}
 	report.Details.MetamorphicConsistency = scorer.MetamorphicConsistency(perCase)
+	if tr, pairs := scorer.TransformRobustness(perCase); tr != nil {
+		report.Details.TransformRobustness = tr
+		report.Details.AuditCaseCount = pairs
+	}
 	if brier, cn := scorer.CalibrationBrier(perCase); brier != nil {
 		report.Details.CalibrationBrier = brier
 		report.Details.CalibrationN = cn

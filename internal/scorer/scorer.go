@@ -20,6 +20,7 @@ import (
 	"strings"
 
 	"github.com/ditto-assistant/dittobench-datagen/grade"
+	"github.com/ditto-assistant/dittobench-datagen/persona"
 	"github.com/ditto-assistant/dittobench-datagen/protocol"
 )
 
@@ -391,6 +392,13 @@ func MetamorphicConsistency(perCase []protocol.CaseScore) *float64 {
 		if cs.TwinGroup == "" {
 			continue
 		}
+		// Transform-audit pairs share a TwinGroup too, but they are reported and
+		// acted on separately (TransformRobustness). Counting them here as well
+		// would apply two composite penalties for one signal, which is a silent
+		// extra cost to a miner rather than a stronger defense.
+		if isAuditGroup(cs.TwinGroup) {
+			continue
+		}
 		groups[cs.TwinGroup] = append(groups[cs.TwinGroup], cs.Correct)
 	}
 	if len(groups) == 0 {
@@ -412,6 +420,105 @@ func MetamorphicConsistency(perCase []protocol.CaseScore) *float64 {
 	}
 	v := round6(float64(consistent) / float64(len(groups)))
 	return &v
+}
+
+// isAuditGroup reports whether a TwinGroup is a reproduce-under-transform audit
+// pair rather than an ordinary generator-chosen invariance family. The prefix is
+// the datagen constant, so there is one definition shared by the generator, the
+// scorer, and any third party recomputing the metric.
+func isAuditGroup(twinGroup string) bool {
+	return strings.HasPrefix(twinGroup, persona.AuditTwinPrefix)
+}
+
+// TransformRobustness is the reproduce-under-transform audit result (v3 Part A):
+// over the run's audit pairs, the fraction the harness answered CONSISTENTLY.
+// Each pair is a base case and the same underlying fact re-asked under a
+// transform derived from the block-hash-seeded dataset seed, which postdates the
+// submission's commit — so unlike the generator-chosen twins this generalizes,
+// the harness cannot have pre-handled the specific rephrasing.
+//
+// Consistency, not correctness, is the measurement: a harness that is wrong on
+// both halves is already penalized by accuracy, and counting it again here would
+// double-charge it. What this isolates is the SPLIT — right on the phrasing it
+// was built for, wrong on one it was not — which is the surface-brittleness
+// signature, plus the covariance case where a memorized answer is stale.
+//
+// The pairing rides TwinGroup, which both halves carry, and the agreement test
+// is symmetric, so no consumer needs to know which half was the transform.
+// Returns nil when no audit pairs ran.
+func TransformRobustness(perCase []protocol.CaseScore) (*float64, int) {
+	groups := map[string][]bool{}
+	for _, cs := range perCase {
+		if !isAuditGroup(cs.TwinGroup) {
+			continue
+		}
+		groups[cs.TwinGroup] = append(groups[cs.TwinGroup], cs.Correct)
+	}
+	// A pair needs both halves to say anything. A half-delivered pair (a case
+	// dropped by a timeout) is dropped rather than scored, so a transport failure
+	// never reads as brittleness.
+	pairs := 0
+	consistent := 0
+	for _, verdicts := range groups {
+		if len(verdicts) != 2 {
+			continue
+		}
+		pairs++
+		if verdicts[0] == verdicts[1] {
+			consistent++
+		}
+	}
+	if pairs == 0 {
+		return nil, 0
+	}
+	v := round6(float64(consistent) / float64(pairs))
+	return &v, pairs
+}
+
+// memoryOverCallMaxPenalty is the deepest the memory over-call factor can drop
+// the composite. Deliberately small: this penalizes a WASTEFUL but not
+// necessarily dishonest behaviour, and accuracy stays dominant.
+const memoryOverCallMaxPenalty = 0.10
+
+// MemoryOverCallFactor is the memory over-call multiplier (v3 B4). A pure-memory
+// question is answered from the harness's own store; emitting a NON-memory tool
+// call on such a case is observable but was previously unscored, so a harness
+// could hedge — take an action AND give a memory answer — at no cost, on the
+// theory that "only one is graded".
+//
+// Only non-memory calls count. A search_memories / fetch_memories call is how a
+// harness legitimately retrieves, and penalizing it would be penalizing a
+// competent harness for its retrieval mechanism, which is explicitly not the
+// intent (same reasoning as the memory-tool routing rule above).
+//
+// Scored off the VALIDATOR-OBSERVED trajectory only (cs.Observed): a self-report
+// cannot create or hide an over-call, so this cannot be laundered by editing the
+// transcript. A run where nothing was observed yields 1.0 — no effect — so a
+// harness that never routed through the endpoint is not penalized for a call the
+// validator cannot see.
+//
+// The penalty scales with the FRACTION of observed memory cases that over-called,
+// so an isolated stray call is nearly free while a harness that acts on every
+// memory question takes the full bounded hit.
+func MemoryOverCallFactor(perCase []protocol.CaseScore) float64 {
+	observed, overCalled := 0, 0
+	for _, cs := range perCase {
+		if cs.Kind != protocol.KindMemory || !cs.Observed {
+			continue
+		}
+		observed++
+		for _, name := range cs.Called {
+			if !memoryTools[name] {
+				overCalled++
+				break
+			}
+		}
+	}
+	if observed == 0 {
+		return 1.0
+	}
+	rate := float64(overCalled) / float64(observed)
+	return round6(1.0 - memoryOverCallMaxPenalty*rate)
 }
 
 // metamorphicMaxPenalty is the deepest the metamorphic-consistency factor can
@@ -608,6 +715,10 @@ func Aggregate(runID string, perCase []protocol.CaseScore) protocol.ScoreReport 
 	// the composite only, like efficiency and canary — tool_mean, memory_mean, and
 	// per_category stay pure accuracy. 1.0 (no effect) when no twin groups ran.
 	composite = round6(composite * MetamorphicConsistencyFactor(perCase))
+	// Memory over-call factor (B4): a bounded penalty for taking a non-memory
+	// action on a pure-memory question. Observed trajectory only, so it cannot be
+	// laundered by self-report; 1.0 when nothing was observed.
+	composite = round6(composite * MemoryOverCallFactor(perCase))
 
 	perCat := make([]protocol.CategoryStat, 0, len(catOrder))
 	for _, cat := range catOrder {
@@ -646,7 +757,8 @@ func Aggregate(runID string, perCase []protocol.CaseScore) protocol.ScoreReport 
 	// applied to the composite above.
 	gate := ToolEfficiencyFactor(perCase) *
 		CanaryIntegrityFactor(perCase) *
-		MetamorphicConsistencyFactor(perCase)
+		MetamorphicConsistencyFactor(perCase) *
+		MemoryOverCallFactor(perCase)
 	compositeStderr *= gate
 
 	return protocol.ScoreReport{
