@@ -18,15 +18,26 @@
 // budgets and cuts variance). Bump either in code (a network-wide change), then
 // redeploy.
 //
-// Env (deployment only; nothing that affects scoring):
-//   - RELAY_PROVIDER      which CODE-FROZEN upstream profile serves the locked
-//     model: "chutes" (default) or "openrouter". The env selects among
-//     profiles; everything inside a profile (upstream URL, exact model id,
-//     serving-provider routing) is a code constant, so the lock's semantics
-//     are identical across the fleet regardless of whose key a validator
-//     holds.
+// The relay pins the model against a COMPROMISED SANDBOX, not against the
+// validator running it: the sandbox reaches only this relay and cannot choose
+// the model, provider, upstream, or see the key. A validator operator who
+// points RELAY_UPSTREAM_URL at an arbitrary server DOES change which model
+// answers (the forced `model` field is just a string an alternate server can
+// ignore), so the model lock is honor-system against the operator, backstopped
+// by k=3 quorum consensus: a single validator scoring on a different model is
+// outvoted by the median. Every validator must therefore run a certified
+// profile with its default upstream; overriding RELAY_UPSTREAM_URL is a
+// consensus-affecting deviation, not a neutral deployment knob.
+//
+// Env:
+//   - RELAY_PROVIDER      which CODE-FROZEN profile serves the locked model:
+//     "chutes" (default) or "openrouter". The env selects among profiles;
+//     everything inside a profile (default upstream, exact model id,
+//     serving-provider routing, thinking lock) is a code constant.
 //   - RELAY_UPSTREAM_URL  upstream chat-completions URL override for the
-//     selected profile (proxies/self-hosted mirrors; default per profile)
+//     selected profile. Intended only for a transparent same-model mirror
+//     (proxy in front of the SAME certified upstream). Pointing it elsewhere
+//     un-pins the scored model — see the consensus note above.
 //   - RELAY_API_KEY       upstream bearer key for the selected provider
 //     (required)
 //   - PORT                listen port (default 11434, the gateway port the
