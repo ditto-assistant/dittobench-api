@@ -10,6 +10,8 @@ github.com/ditto-assistant/dittobench-datagen v0.7.2-0.20260718213037-531597f2a2
 github.com/ditto-assistant/dittobench-datagen v0.7.2-0.20260718213037-531597f2a24c/go.mod h1:b5oKfDqwoHFDt8eaJ/J6SXIM07jxVdENUl+D3sm/Z+g=
 github.com/ditto-assistant/dittobench-datagen v0.7.2-0.20260718213912-b47e724c7236 h1:K8wMFFB9ON6qvmcBci588x1XSrUbL+7HgK/xl7ykrx4=
 github.com/ditto-assistant/dittobench-datagen v0.7.2-0.20260718213912-b47e724c7236/go.mod h1:b5oKfDqwoHFDt8eaJ/J6SXIM07jxVdENUl+D3sm/Z+g=
+github.com/ditto-assistant/dittobench-datagen v0.7.2-0.20260718234348-7894f3b4b33b h1:qbFWljoSSj+U4ZwSt0EP+uBWyupGVQ29j9cnEE44RnY=
+github.com/ditto-assistant/dittobench-datagen v0.7.2-0.20260718234348-7894f3b4b33b/go.mod h1:b5oKfDqwoHFDt8eaJ/J6SXIM07jxVdENUl+D3sm/Z+g=
 github.com/google/uuid v1.6.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=
 github.com/google/uuid v1.6.0/go.mod h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=

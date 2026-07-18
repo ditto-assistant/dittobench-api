@@ -807,12 +807,23 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	// non-LLM and a pure function of the master `seed`; selection shares the run
 	// rng. The suite lays cases out across seeding tiers (A prepared, B raw-pairs)
 	// and staged Tier-C waves.
-	memSuite := gen.GenerateMemorySuite(rng, seed, prof.Mem, prof.Waves, prof.RawPairsFrac)
+	// Explicit version. The un-suffixed wrappers default to the FROZEN v2
+	// contract, so calling them here would score every run against the
+	// pre-hardening dataset while the report claimed bench_version 3.
+	memSuite, memErr := gen.GenerateMemorySuiteForVersion(rng, seed, prof.Mem, prof.Waves, prof.RawPairsFrac, protocol.CurrentBenchVersion)
+	if memErr != nil {
+		s.store.Fail(runID, "generating memory suite failed: "+memErr.Error())
+		return
+	}
 	// Multi-graph isolation: seed a second persona under a different
 	// user_id and add cross-user isolation cases. The secondary graph is template-
 	// rendered. Cases carry the user_id they must be answered under; they merge
 	// into the primary staged-case stream.
-	iso := gen.GenerateIsolation(seed, prof.Mem, prof.Waves, prof.IsoCases)
+	iso, isoErr := gen.GenerateIsolationForVersion(seed, prof.Mem, prof.Waves, prof.IsoCases, protocol.CurrentBenchVersion)
+	if isoErr != nil {
+		s.store.Fail(runID, "generating isolation layer failed: "+isoErr.Error())
+		return
+	}
 	memSuite.Cases = append(memSuite.Cases, iso.Cases...)
 	para := toolPara
 	para.Add(memSuite.Stats)

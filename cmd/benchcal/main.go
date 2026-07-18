@@ -148,8 +148,8 @@ type Report struct {
 	NTools           int             `json:"n_tools"`
 	NMem             int             `json:"n_mem"`
 	Harness          string          `json:"harness"`
-	MemProfileSource string          `json:"mem_profile_source"`  // provenance of the memory competence policy
-	TargetSigma      float64         `json:"target_sigma"`        // design-target composite σ the KOTH retune assumes
+	MemProfileSource string          `json:"mem_profile_source"` // provenance of the memory competence policy
+	TargetSigma      float64         `json:"target_sigma"`       // design-target composite σ the KOTH retune assumes
 	ToolMean         Stat            `json:"tool_mean"`
 	MemoryMean       Stat            `json:"memory_mean"` // structural (fixed reference policy)
 	Composite        Stat            `json:"composite"`   // 0.5 tool + 0.5 memory, per seed
@@ -189,7 +189,12 @@ func runOnce(seed int64, n int) (float64, map[string]float64) {
 // scores it under the fixed reference-competence policy — a hermetic proxy for
 // structural memory_mean.
 func memRunOnce(seed int64, nMem int, profile map[string]float64) float64 {
-	suite := gen.GenerateMemorySuite(gen.NewRNG(seed), seed, nMem, 1, 0)
+	// Calibration measures the CURRENT benchmark, so pin the version explicitly;
+	// the un-suffixed wrapper now defaults to the frozen v2 contract.
+	suite, err := gen.GenerateMemorySuiteForVersion(gen.NewRNG(seed), seed, nMem, 1, 0, protocol.CurrentBenchVersion)
+	if err != nil {
+		log.Fatalf("generate memory suite: %v", err)
+	}
 	if len(suite.Cases) == 0 {
 		return 0
 	}
