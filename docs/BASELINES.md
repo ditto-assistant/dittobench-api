@@ -310,3 +310,73 @@ and would yield more informative pairs. Attempts to build a champion-competence
 local solver for this run plateaued at memory_mean 0.242, so the informative-pair
 rate at champion competence is unmeasured. It is a reasonable expectation that
 the metric improves there, and not evidence that it does.
+
+## Run 4: directional audit metric — validation
+
+- Date: 2026-07-18
+- Config: as Run 3, plus the directional metric (audit pair COUNTS + exact
+  binomial verdict) and the audit rate raised 1500 -> 2500 bps.
+- Method: 24 seeds at `run_size=full` on the honest model, and 14 seeds each for
+  three non-LLM local solvers through the same scored pipeline. The brittle
+  solver is the SAME solver as the robust one, gated on recognising the exact
+  question surface, so answering ability is constant and surface-keying is the
+  only variable.
+
+### The metric now separates
+
+Verdict is a one-sided exact binomial test on discordant pairs (null p=0.5),
+alpha 0.01. Pooled over all runs:
+
+| harness | pairs | n10 base-only | n01 transform-only | p | verdict | memory_mean |
+| --- | --- | --- | --- | --- | --- | --- |
+| honest LLM | 149 | 11 | 11 | 0.584 | clear | 0.233 |
+| **brittle** | 92 | **10** | **0** | **0.00098** | **FLAGGED** | 0.139 |
+| robust solver | 92 | 3 | 2 | 0.500 | clear | 0.216 |
+| strong solver | 92 | 4 | 2 | 0.344 | clear | 0.241 |
+
+Two things this establishes that Run 3's agreement metric could not:
+
+- **The honest model is exactly symmetric (11 vs 11).** That is the null
+  holding, and it also shows the transforms carry no intrinsic difficulty bias:
+  if the transformed half were simply harder, an honest harness would show
+  n10 > n01 systematically and the test would flag it. It does not.
+- **The brittle harness is fully directional (10 vs 0)**, with answering
+  ability held identical to the robust solver, which is clear at 3 vs 2.
+
+Audit pairs rose from 3.8 to 6.2-6.6 per run with the rate change.
+
+### Detection needs ACCUMULATION, not one finalization
+
+Simulating verdicts on groups of 3 runs (a single k=3 finalization):
+
+| harness | flagged groups |
+| --- | --- |
+| honest LLM | 0 / 8 |
+| brittle | 0 / 4 |
+| robust / strong | 0 / 4 each |
+
+The brittle harness is **not caught at k=3**. Three runs yield only ~2-3
+discordant pairs, below the six the test needs to reach alpha at all (with
+n01=0 the test needs n10 >= 7, since 6/6 gives p=0.0156). It is caught only
+once ~10 discordant pairs have accumulated, which at this harness's rate takes
+roughly 10-14 runs.
+
+That is why the verdict is computed from pooled COUNTS over every score an
+agent has: a brittle agent is caught as evidence accumulates across its
+lifetime, not at first finalization. It also means the audit is a slow
+instrument by construction, and cannot be the primary defense against a
+short-lived submission.
+
+The rate is competence-dependent and this is the weakest harness case: this
+brittle solver answers only 13.9% of memory cases, so it produces ~0.7
+base-only pairs per run. A brittle harness competitive enough to be champion
+would know the base answer far more often and accumulate the same evidence much
+faster. That remains unmeasured (see the champion-population caveat in Run 3).
+
+### False-positive posture
+
+Alpha is 0.01 per verdict by construction, and the honest model's pooled result
+sits at p=0.584 with a perfectly even split, which is about as far from the
+rejection region as the data can be. No honest group flagged in 8 simulated
+verdicts. Enforcement nevertheless stays OFF (`DITTO_TRANSFORM_AUDIT_ENFORCE`)
+until the same comparison is run against champion-competence harnesses.
