@@ -231,3 +231,82 @@ sometimes does. `calendar_create` remains the known v2 reference gap.
 | set_font | 1.000 | 1 |
 | set_model | 1.000 | 1 |
 | settings | 1.000 | 2 |
+
+## Run 3: bench_version 3 + transform audit — AUDIT CALIBRATION
+
+- Date: 2026-07-18
+- Config: v3 scorer + datagen at the `harden/anti-gaming` branch head, i.e.
+  including the reproduce-under-transform audit (Part A) and the B1-B4
+  task-side rollup. `bench_version` 3.
+- Harness: stock reference (dittobench starter kit baseline, unmodified)
+- Model: Qwen3-32B. Backend: OpenRouter `qwen/qwen3-32b` (same weights as the
+  scored Chutes `Qwen/Qwen3-32B-TEE`)
+- Method: 25 distinct seeds at `run_size=full`, one FRESH harness process per
+  run. The fresh process matters: `/seed` is an idempotent upsert with no
+  clear, so a reused harness stacks several personas' haystacks into one store
+  and both depresses retrieval and contaminates the pairs being measured.
+
+### Headline
+
+| metric | mean | sd | SE | min / max |
+| --- | --- | --- | --- | --- |
+| composite | 0.445 | 0.021 | 0.004 | 0.401 / 0.490 |
+| tool_mean | 0.790 | 0.035 | 0.007 | 0.716 / 0.871 |
+| memory_mean | 0.235 | 0.044 | 0.009 | 0.136 / 0.325 |
+| metamorphic_consistency | 0.770 | 0.186 | 0.037 | 0.500 / 1.000 |
+
+Versus Run 2 (single seed, pre-audit): composite 0.461 -> 0.445, memory
+0.284 -> 0.235. The B1 candidate salt and the audit cases account for the
+memory drop; tool is unchanged, as expected since neither touches the tool
+suite.
+
+### Transform-audit calibration (the reason for this run)
+
+`AUDIT_MIN_ROBUSTNESS` was a provisional 0.70 with no measurement behind it.
+This run measured what an honest model actually scores, alongside two
+purpose-built local solvers driven through the same scored pipeline. The
+brittle solver is the attacker the audit exists to catch: it is the SAME
+keyword solver as the robust one, gated on recognising the exact question
+surface, so answering ability is held constant and surface-keying is the only
+variable.
+
+| harness | transform_robustness | conditional agreement | informative pairs |
+| --- | --- | --- | --- |
+| honest LLM (qwen3-32b) | 0.910 (sd 0.148, min 0.60) | 0.389 | 18 / 95 |
+| **brittle (surface-gated solver)** | **0.863** (min 0.50) | **0.000** | 6 / 37 |
+| robust (same solver, ungated) | 0.924 | 0.625 | 8 / 37 |
+| strong (tf-idf solver) | 0.972 | 0.857 | 7 / 37 |
+
+**The metric does not currently separate a cheater from an honest miner.** The
+brittle harness (0.863) sits inside the honest model's own spread (0.910, sd
+0.148, min 0.60). At the 0.70 floor, 4 of 25 honest runs (16%) would be
+quarantined while only 2 of 12 brittle runs would be caught.
+
+The cause is structural, not a badly chosen threshold:
+
+- **81% of audit pairs came back both-wrong** (77 of 95 on the honest model).
+  Agreement counts a both-wrong pair as CONSISTENT, which is deliberate
+  (accuracy already penalizes it), but it means that on a benchmark this hard
+  the metric is dominated by pairs carrying no brittleness information at all.
+  Only 19% of pairs were informative.
+- **13 of 25 runs produced fewer than `AUDIT_MIN_PAIRS`=4 pairs**, so over half
+  would not be judged even if the floor were sound. Audit pairs averaged 3.8
+  per run (min 1, max 7).
+
+A CONDITIONAL statistic — agreement among pairs where at least one half was
+correct — does order the harnesses correctly (brittle 0.000, honest 0.389,
+robust 0.625, strong 0.857) and is the obvious candidate replacement. It is not
+yet actionable either: the honest model sits at 0.389, not far above the
+brittle 0.000, and the whole comparison rests on 6-18 informative pairs.
+
+Consequence: the audit ships OBSERVATIONAL. `DITTO_TRANSFORM_AUDIT_ENFORCE`
+defaults to false, so the metric is computed, `EVENT_AUDIT` is recorded, and
+the value is published, but no agent's status changes. That is what will
+accumulate the real-world distribution a future threshold can be set from.
+
+Caveat on population: this is the STOCK reference harness at memory_mean 0.235,
+while the audit only ever judges champion/tail agents, which are more accurate
+and would yield more informative pairs. Attempts to build a champion-competence
+local solver for this run plateaued at memory_mean 0.242, so the informative-pair
+rate at champion competence is unmeasured. It is a reasonable expectation that
+the metric improves there, and not evidence that it does.

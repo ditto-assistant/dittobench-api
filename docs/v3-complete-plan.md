@@ -1,10 +1,12 @@
 # Complete v3: reproduce-under-transform audit + task-side hardening rollup
 
-Status: IMPLEMENTED (2026-07-18), except calibration. Parts A1-A4 and B1-B4 have
-landed across the five PRs listed below and every suite is green. What is NOT
-done is the one thing that gates shipping: `AUDIT_MIN_ROBUSTNESS` is a
-provisional 0.70 and has never been calibrated against a real locked model. See
-"Remaining before this ships" at the bottom before merging any of this.
+Status: IMPLEMENTED and CALIBRATED (2026-07-18). The calibration result was
+negative: the audit ships OBSERVATIONAL (enforcement off) because the metric
+does not yet separate a brittle harness from an honest one. See "Calibration
+result" below before changing that.
+
+Parts A1-A4 and B1-B4 have landed across the five PRs listed below and every
+suite is green.
 
 Originally a handoff spec for folding the deferred v3.1 items into the existing
 v3 PR train so v3 ships "complete" rather than shipping now and following up
@@ -411,35 +413,64 @@ NOT done:
       reproducing the composite AND the transform-robustness metric.
 - [ ] `docs/v3-release.md` release checklist updated for the audit.
 
-## Remaining before this ships
+## Calibration result (2026-07-18) — the audit ships OBSERVATIONAL
 
-**The calibration is the blocker, and it is not optional.** `AUDIT_MIN_ROBUSTNESS`
-is currently a provisional 0.70, picked to be obviously below a consistent
-harness and above a brittle one. It has never been measured against a real
-locked model. This plan says twice that a too-high floor false-fails honest
-models and that this is the main risk the mechanism carries, and that judgement
-still stands: the threshold is live in the platform's finalize path, so shipping
-it uncalibrated means holding real miners' agents on a number nobody has
-validated.
+Measured against the real locked model (OpenRouter `qwen/qwen3-32b`, stock
+reference harness, 25 seeds at `run_size=full`) and two purpose-built local
+solvers driven through the same scored pipeline. Full numbers in
+`docs/BASELINES.md` Run 3.
 
-Before merging, either:
+| harness | transform_robustness | conditional agreement |
+| --- | --- | --- |
+| honest LLM | 0.910 (sd 0.148, min 0.60) | 0.389 |
+| **brittle (surface-gated solver)** | **0.863** | **0.000** |
+| robust (same solver, ungated) | 0.924 | 0.625 |
 
-1. Run the calibration sweep (starter-kit baseline on the real locked model over
-   a seed sweep with audits enabled), record it in `docs/BASELINES.md` as a new
-   run, and set the floor below the observed honest-model robustness with
-   margin; or
-2. Ship the audit INERT first: keep the metric, the audit chain entry, and the
-   public surfacing, but do not let the platform's finalize branch act on the
-   verdict until a calibrated floor exists. This gets real-world robustness
-   distributions from live traffic at zero risk to honest miners, and the hold
-   can be switched on afterward.
+**The metric does not separate the cheater from the honest miner.** The brittle
+harness sits inside the honest model's own spread. At the provisional 0.70
+floor, 4 of 25 honest runs (16%) would have been quarantined while only 2 of 12
+brittle runs would have been caught. Shipping that floor would have cost
+legitimate miners for almost no detection.
 
-Option 2 is the safer default given no calibration data exists yet. The verdict
-already rides advisory `details` and never the composite, so gating only the
-`ATH_PENDING_REVIEW` transition is a small, local change.
+Why, and it is structural rather than a bad threshold:
 
-The honest-scope framing is load-bearing here too: a failed audit is the
-surface-brittleness or memorization signature, NOT evidence about a robust local
-solver, which recomputes correctly under the transform. Any operator UI or miner
-communication built on this verdict must say so, or the quarantine will read as
-an accusation the metric cannot support.
+- 81% of audit pairs came back BOTH-WRONG. A both-wrong pair counts as
+  consistent (deliberate: accuracy already penalizes it), so on a benchmark this
+  hard the metric is dominated by pairs that say nothing about brittleness. Only
+  19% were informative.
+- 13 of 25 runs produced fewer than `AUDIT_MIN_PAIRS`=4 pairs, so more than half
+  would not be judged at all.
+
+What DID validate:
+
+- The mechanism itself works where it can see anything. On informative pairs the
+  brittle harness scored 0.000 conditional agreement against the robust
+  solver's 0.625, with answering ability held identical between them — so
+  surface-keying, and nothing else, produced the split.
+- The honest-scope claim holds empirically. A robust local solver that
+  recomputes from the cleartext haystack passes the audit (0.924, conditional
+  0.625) at memory_mean 0.218, comparable to the real LLM harness's 0.235. The
+  audit does not defeat it, exactly as documented.
+
+Consequently `DITTO_TRANSFORM_AUDIT_ENFORCE` defaults to false: the metric is
+computed, `EVENT_AUDIT` is recorded (carrying `enforced: false`), and the value
+is published, but no agent's status changes.
+
+## Remaining before enforcement can be turned on
+
+1. **A metric that discriminates.** The conditional statistic (agreement among
+   pairs with at least one correct half) orders the harnesses correctly and is
+   the obvious candidate, but the honest model sits at 0.389 against the brittle
+   0.000 on 6-18 informative pairs. That is not yet a threshold.
+2. **More pairs per run.** At `AUDIT_BPS`=1500 a full run yields ~3.8 pairs. Any
+   per-run verdict on that many pairs is noise. Either raise the rate, widen
+   eligibility (injection cases and twins are currently excluded), or judge over
+   an agent's accumulated runs rather than per run.
+3. **Calibration on the population it judges.** These numbers come from the
+   stock reference harness at memory_mean 0.235; the audit only judges
+   champion/tail agents. A champion-competence local solver could not be built
+   cheaply for this run (attempts plateaued at 0.242), so the informative-pair
+   rate at champion competence is unmeasured.
+4. Then, and only then, set the floor from the measured honest distribution with
+   margin, and re-run this comparison to confirm separation.
+
