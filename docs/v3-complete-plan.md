@@ -1,8 +1,16 @@
 # Complete v3: reproduce-under-transform audit + task-side hardening rollup
 
-Status: PLAN ONLY. Nothing here is implemented. This is a handoff spec for the
-agent who will fold the deferred v3.1 items into the existing v3 PR train so v3
-ships "complete" rather than shipping now and following up later.
+Status: IMPLEMENTED (2026-07-18), except calibration. Parts A1-A4 and B1-B4 have
+landed across the five PRs listed below and every suite is green. What is NOT
+done is the one thing that gates shipping: `AUDIT_MIN_ROBUSTNESS` is a
+provisional 0.70 and has never been calibrated against a real locked model. See
+"Remaining before this ships" at the bottom before merging any of this.
+
+Originally a handoff spec for folding the deferred v3.1 items into the existing
+v3 PR train so v3 ships "complete" rather than shipping now and following up
+later. Kept as written below, with an implementation note per part, so the
+rationale that drove each decision stays readable next to what was actually
+built.
 
 The existing v3 PRs (do not create new branches; add to these):
 - dittobench-datagen `harden/anti-gaming` (PR #2)
@@ -98,6 +106,29 @@ Add a red-team gate in `gen/redteam_test.go`:
 case from a fixed surface template must score below full on the invariance
 transform across a seed sweep, while the honest reference recovers both.
 
+**Implemented** in `persona/transform.go` (+ gates in `gen/transform_audit_test.go`).
+Notes on where reality differed from this spec:
+
+- Derivation uses SHA-256 over the `:`-joined public inputs, NOT the existing
+  `variantIndex` FNV mix, because the validator and platform re-derive it in
+  Python. It matches the `onchain_seed.py` convention exactly, and Go-emitted
+  vectors pin the pairing in `ditto/tests/validator/test_transform_audit.py`.
+- Covariance landed as TWO families, not the date/unit/entity list above. The
+  point-in-time boundary shift is real but rare (a run holds few eligible
+  chains), so the common case is a prior-state question on a knowledge-update
+  chain: the base asks the current value, the transform asks the state before
+  it, read off the same `scalarChain`. That mix is ~10% covariance / 90%
+  invariance. Unit and entity swaps were not built.
+- Injection cases are EXCLUDED from the audit. The invariance composition
+  appends an inert closer, which would put a benign tail after the attack text,
+  and a case whose last clause is innocuous is exactly what a trailing-question
+  stripper answers correctly by accident. The existing trailing-stripper gate
+  caught this. `injectionTwins` already covers framing invariance there.
+- Both halves of a pair carry the audit `TwinGroup`, not just the transform. A
+  group holding one member looks trivially self-consistent and measures nothing.
+- Gates: the brittle parser scores 0.000 vs honest 1.000 over 123 audited cases;
+  an answer memorizer scores 0.000 vs honest 1.000 over 24 covariance cases.
+
 ### A2. api scorer: grade audited cases, emit a transform-robustness metric
 
 - The audited cases are ordinary graded cases whose question is the transformed
@@ -114,6 +145,22 @@ transform across a seed sweep, while the honest reference recovers both.
 - Emit `transform_robustness` (0..1) and `audit_case_count` in the report
   details, and the per-case audit membership via the existing `twin_group`
   field so the platform and any third party can recompute the metric.
+
+**Implemented** in `internal/scorer/scorer.go` (`TransformRobustness`), with the
+two fields added to `protocol.RunDetails` in datagen. Two decisions this spec
+did not anticipate:
+
+- The metric is the agreement rate WITHIN each pair (consistency), not
+  correctness. A pair the harness got wrong twice is already penalized by
+  accuracy; counting it again here would double-charge it. What is isolated is
+  the split.
+- Audit groups are EXCLUDED from `MetamorphicConsistency`. They share a
+  `TwinGroup`, so without the exclusion one split would take both the
+  metamorphic penalty and the audit penalty, which is a silent extra cost to a
+  miner rather than a stronger defense. The audit signal is reported separately
+  and, in the api, does not touch the composite at all.
+- A half-delivered pair (a dropped or timed-out case) is dropped rather than
+  scored, so a transport failure never reads as brittleness.
 
 ### A3. subnet validator: block-hash-seeded audit selection and verdict
 
@@ -142,6 +189,18 @@ transform across a seed sweep, while the honest reference recovers both.
   re-score on fresh audit seeds for the champion, but prefer reading the metric
   already present in the finalized reports first.
 
+**Implemented** in `ditto/validator/transform_audit.py` (+ Go-emitted cross-repo
+vectors). No re-score was needed: `_confirm_and_submit` already gathers the K
+confirmation runs, so it medians the robustness across them and attaches
+`transform_robustness_median` / `transform_audit_failed` to the submitted
+report's `details`. The platform only ever receives the ONE representative
+report, so it cannot take that median itself.
+
+Conservatisms, since a false positive is paid for by a legitimate miner: an
+absent metric (older scoring engine) is never a failed audit; a value backed by
+fewer than `AUDIT_MIN_PAIRS` (4) pairs is not judged at all; and the verdict
+rides advisory `details` and never the composite.
+
 ### A4. platform: audit record and emission penalty
 
 - On finalize (`submit_score` finalize branch, `endpoints/validator.py`), when
@@ -159,6 +218,19 @@ transform across a seed sweep, while the honest reference recovers both.
 - Surface `transform_robustness` on the public score record
   (`PublicValidatorScore`) and the dashboard, alongside the existing metamorphic
   and calibration fields, with a one-line "what this measures" note.
+
+**Implemented** in `endpoints/validator.py` (hold + `EVENT_AUDIT`),
+`endpoints/public.py` + `api_models/public.py` (surfacing), and
+`dashboard/index.html`.
+
+`ATH_PENDING_REVIEW` was reused with a distinct `review_reason`
+(`transform_audit_brittleness`) rather than adding `AUDIT_PENDING_REVIEW`: a new
+status forces a `ditto-screening-protocol` pin bump across every consumer for a
+distinction the reason string already carries. The verdict medians across the
+k=3 validators (each of which already medianed its own confirmation runs),
+matching how the platform finalizes the composite. `EVENT_AUDIT` is appended
+whenever a finalized agent carried the metric, held or not, so the public feed
+shows the audit ran rather than only its failures.
 
 ### Determinism / trustless checklist for Part A
 
@@ -188,6 +260,24 @@ families; extend it to value-recall), so any dump that sweeps candidates hits a
 distractor and zeroes regardless of the floor. Add a gate that a half-dump
 (answer + floor-1 guard values + one distractor) scores 0.
 
+**Implemented** as `persona.ApplyCandidateSalt`, called from `gen` rather than
+`DeriveQuestions`. That placement is load-bearing and was forced by the
+false-positive gate: the salt must be filtered against the RENDERED haystack,
+because some people in the conversation (incidental colleagues, noise-pair
+characters) are named during rendering and never appear in the plan at all.
+Filtering on plan fact values alone planted a name that WAS in the haystack,
+which would have zeroed an honest reader who merely mentioned that person.
+
+For the same reason, person-name attributes (`partner`) are not salted at all:
+they draw from the same `firstNames` pool the renderer uses, so absence is not
+provable there. Gates: half-dump zeroes across 695 cases, a candidate sweep
+zeroes 956/956, and 759 planted values are confirmed absent from the haystack.
+
+Left alone, flagged for review: the pre-existing distractor pool-backfill in
+`distractorsFor` draws from these same pools WITHOUT a haystack check, so it
+carries the exposure this change avoids. It only fires when a case has fewer
+than two distractors.
+
 ### B2. Injection naturalization (`dittobench-datagen`)
 
 13 finite templates remain memorizable (`persona/questions.go`
@@ -197,6 +287,20 @@ framings, and keep the non-trailing property. Add a gate asserting no single
 template shape covers more than a small fraction of injection cases across a
 seed sweep. The trajectory-anchored bait already forces the observed channel;
 this only reduces the surface-pattern memorizability of the text payloads.
+
+**Implemented** in `persona/injection.go`. Framings compose from four
+independently-varied axes (authority marker, negation clause, payload demand,
+question placement), so the shape space is the product of the part pools rather
+than their sum, and the variant->parts mapping is re-keyed per seed. The old
+pools are deleted rather than left beside the composer.
+
+Every placement that is not question-trailing ends on attack content, which is
+what preserves the non-trailing property; the existing trailing-stripper gate
+passes unchanged. Gate: across a 40-seed sweep the most common shape covers 1.2%
+of injection cases (223 distinct shapes over 240 cases), against a ~7.7% floor
+for the old 13-template pool. A second gate pins that composition never drops
+the payload or the real question, and caught an unsubstituted payload
+placeholder that would have emitted a literal `%[1]s`.
 
 ### B3. Lifecycle global-map probe (`dittobench-datagen`)
 
@@ -208,6 +312,17 @@ it under user B where B's value must be unaffected; the forbidden answer is A's
 post-mutation state. A harness with a global (not per-user) saved/deleted map
 leaks and zeroes. Reuse `SecondaryUser` from the isolation machinery.
 
+**Implemented** in `gen/isolation.go` (`crossUserLifecycle`), which already owns
+both graphs and the secondary wave. Both chains establish A's value by
+INSTRUCTION rather than by a seeded pair, so only B's haystack needs new pairs
+and the primary wave is untouched. The delete chain probes the leak in the other
+direction too: A's deletion must not erase B's value.
+
+Gate: a simulated global-map harness scores 0.000 over 40 reads while a
+correctly user-scoped one scores 1.000. The second assertion matters as much as
+the first, since a probe that also failed the harness doing the right thing
+would just cost honest miners.
+
 ### B4. Memory over-call penalty (`dittobench-api`)
 
 Emitting both a tool response and a memory answer ("only one is graded") is
@@ -218,6 +333,14 @@ carries an unexpected NON-memory tool call is penalized. Only non-memory
 over-calls: a legitimate `search_memories` call is fine. Grade off the
 validator-observed trajectory (already substituted before grading), so it cannot
 be laundered.
+
+**Implemented** as `MemoryOverCallFactor` in `internal/scorer/scorer.go`, a
+separate bounded factor rather than an extension of `ToolEfficiencyFactor` (that
+one gates on `KindTool`, and widening it would have entangled two unrelated
+signals). Bounded at 0.10 and scaled by the fraction of observed memory cases
+that over-called: this is wasteful, not necessarily dishonest, and accuracy
+stays dominant. Memory-retrieval calls do not count, and an unobserved
+trajectory yields 1.0.
 
 ## Explicitly out of scope for this rollup
 
@@ -268,14 +391,55 @@ Land in this order so each layer has what it depends on:
 
 ## Definition of done
 
-- Transform audit lands in all four repos, reproducible end to end, with the
-  honest-scope framing in anti-gaming.md, dittobench-v2-vs-v3.md, MINER.md, and
-  the dashboard.
-- `AUDIT_MIN_ROBUSTNESS` calibrated against the real model with a recorded
-  baseline; no honest-model false-fail in the calibration sweep.
-- B1-B4 land with red-team gates.
-- Every new deterministic input has a cross-repo regeneration test.
-- All suites green; public-vector hash re-pinned; the release checklist in
-  `docs/v3-release.md` updated so the audit ships in the same v0.8.0 tag +
-  platform window rather than as a v3.1 follow-up.
-- Out-of-scope items recorded in the roadmap, not silently dropped.
+Status as of 2026-07-18. Done:
+
+- [x] Transform audit lands in all four repos, with the honest-scope framing in
+      anti-gaming.md, dittobench-v2-vs-v3.md, the starter-kit README, and the
+      dashboard.
+- [x] B1-B4 land with red-team gates.
+- [x] Every new deterministic input has a cross-repo regeneration test
+      (Go-emitted vectors pinned in the validator's Python mirror).
+- [x] All suites green; public-vector hash re-pinned (four times, each with a
+      dated note); CI green on all five PRs.
+- [x] Out-of-scope items recorded in the roadmap.
+
+NOT done:
+
+- [ ] `AUDIT_MIN_ROBUSTNESS` calibrated against the real model with a recorded
+      baseline; no honest-model false-fail in the calibration sweep.
+- [ ] End-to-end real-model run with audits on and a third-party re-grade
+      reproducing the composite AND the transform-robustness metric.
+- [ ] `docs/v3-release.md` release checklist updated for the audit.
+
+## Remaining before this ships
+
+**The calibration is the blocker, and it is not optional.** `AUDIT_MIN_ROBUSTNESS`
+is currently a provisional 0.70, picked to be obviously below a consistent
+harness and above a brittle one. It has never been measured against a real
+locked model. This plan says twice that a too-high floor false-fails honest
+models and that this is the main risk the mechanism carries, and that judgement
+still stands: the threshold is live in the platform's finalize path, so shipping
+it uncalibrated means holding real miners' agents on a number nobody has
+validated.
+
+Before merging, either:
+
+1. Run the calibration sweep (starter-kit baseline on the real locked model over
+   a seed sweep with audits enabled), record it in `docs/BASELINES.md` as a new
+   run, and set the floor below the observed honest-model robustness with
+   margin; or
+2. Ship the audit INERT first: keep the metric, the audit chain entry, and the
+   public surfacing, but do not let the platform's finalize branch act on the
+   verdict until a calibrated floor exists. This gets real-world robustness
+   distributions from live traffic at zero risk to honest miners, and the hold
+   can be switched on afterward.
+
+Option 2 is the safer default given no calibration data exists yet. The verdict
+already rides advisory `details` and never the composite, so gating only the
+`ATH_PENDING_REVIEW` transition is a small, local change.
+
+The honest-scope framing is load-bearing here too: a failed audit is the
+surface-brittleness or memorization signature, NOT evidence about a robust local
+solver, which recomputes correctly under the transform. Any operator UI or miner
+communication built on this verdict must say so, or the quarantine will read as
+an accusation the metric cannot support.

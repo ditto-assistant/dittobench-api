@@ -44,11 +44,23 @@ answer is always a function of the cleartext haystack: a harness holding the
 public generator can compute count, reversal, and the timeline families
 (as-of, ordering, duration, occupation) without a model. v3's memory changes
 raise the cost of building that parser and lock difficulty against regression;
-they do not close it. The defenses that actually force model use are the
-screener behavioral oracle (shipped) and the on-chain reproduce-under-transform
-audit (roadmap). What v3 genuinely makes unforgeable is anchored to values a
+they do not close it. What v3 genuinely makes unforgeable is anchored to values a
 harness must retrieve or execute to obtain: mandatory observed tool execution,
 the per-seed attribution nonce, and the observed injection bait.
+
+The reproduce-under-transform audit (shipped 2026-07-18) does NOT change that
+conclusion, and should not be cited as if it did. It re-asks a public,
+seed-selected share of each run's cases under a transform derived from the
+post-commit seed, and reports the agreement rate as `transform_robustness`. That
+defeats answers keyed to a question's exact surface form, and prices
+memorization where the transform moves the answer. It does not touch the local
+solver: a harness that recomputes from the cleartext haystack recomputes
+correctly under the transform too. The only defense that forces model use
+remains the screener behavioral oracle, plus the per-submission fee.
+
+A low `transform_robustness` is therefore a brittleness/memorization signal, not
+proof of cheating, which is why it sends an agent to operator review rather than
+penalizing it.
 
 ## What did not change
 
