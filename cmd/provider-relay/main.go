@@ -25,6 +25,7 @@ const maxBody = 4 << 20
 type relay struct {
 	upstream string
 	apiKey   string
+	model    string
 	provider string
 	client   *http.Client
 	mu       sync.Mutex
@@ -67,19 +68,23 @@ type relayEnvelope struct {
 
 func main() {
 	provider := flag.String("provider", "", "exact OpenRouter provider slug")
+	model := flag.String("model", providercert.DefaultModel, "exact upstream model identifier")
+	upstream := flag.String("upstream", providercert.DefaultAPIURL+"/chat/completions", "upstream chat completions endpoint")
 	port := flag.String("port", "11435", "listen port")
 	flag.Parse()
-	if strings.TrimSpace(*provider) == "" {
-		log.Fatal("-provider is required")
+	apiKey := strings.TrimSpace(os.Getenv("PROVIDER_RELAY_API_KEY"))
+	if apiKey == "" {
+		apiKey = strings.TrimSpace(os.Getenv("OPENROUTER_API_KEY"))
 	}
 	r := &relay{
-		upstream: providercert.DefaultAPIURL + "/chat/completions",
-		apiKey:   strings.TrimSpace(os.Getenv("OPENROUTER_API_KEY")),
+		upstream: strings.TrimSpace(*upstream),
+		apiKey:   apiKey,
+		model:    strings.TrimSpace(*model),
 		provider: strings.TrimSpace(*provider),
 		client:   &http.Client{Timeout: 300 * time.Second},
 	}
-	if r.apiKey == "" {
-		log.Fatal("OPENROUTER_API_KEY is required")
+	if r.apiKey == "" || r.model == "" || r.upstream == "" {
+		log.Fatal("-model, -upstream, and PROVIDER_RELAY_API_KEY (or OPENROUTER_API_KEY) are required")
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/chat/completions", r.handle)
@@ -90,7 +95,7 @@ func main() {
 	})
 	mux.HandleFunc("GET /stats", r.handleStats)
 	mux.HandleFunc("POST /stats/reset", r.handleStatsReset)
-	log.Printf("local provider relay on :%s (model=%s provider=%s)", *port, providercert.DefaultModel, r.provider)
+	log.Printf("local provider relay on :%s (model=%s provider=%s)", *port, r.model, r.provider)
 	log.Fatal(http.ListenAndServe(":"+*port, mux))
 }
 
@@ -106,13 +111,17 @@ func (r *relay) handle(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "body must be a JSON object", http.StatusBadRequest)
 		return
 	}
-	body["model"] = providercert.DefaultModel
+	body["model"] = r.model
 	body["stream"] = false
 	body["reasoning"] = map[string]any{"enabled": false, "exclude": false}
 	body["chat_template_kwargs"] = map[string]any{"enable_thinking": false}
-	body["provider"] = map[string]any{
-		"only": []string{r.provider}, "order": []string{r.provider},
-		"allow_fallbacks": false, "require_parameters": false,
+	if r.provider != "" {
+		body["provider"] = map[string]any{
+			"only": []string{r.provider}, "order": []string{r.provider},
+			"allow_fallbacks": false, "require_parameters": false,
+		}
+	} else {
+		delete(body, "provider")
 	}
 	out, err := json.Marshal(body)
 	if err != nil {
@@ -126,9 +135,9 @@ func (r *relay) handle(w http.ResponseWriter, req *http.Request) {
 	}
 	up.Header.Set("Content-Type", "application/json")
 	up.Header.Set("Authorization", "Bearer "+r.apiKey)
-	up.Header.Set("HTTP-Referer", providercert.AppReferer)
-	up.Header.Set("X-OpenRouter-Title", providercert.AppTitle)
-	up.Header.Set("X-Title", providercert.AppTitle)
+	if strings.Contains(strings.ToLower(r.upstream), "openrouter.ai") {
+		providercert.SetAttributionHeaders(up.Header)
+	}
 	resp, err := r.client.Do(up)
 	if err != nil {
 		r.recordUpstreamError(time.Since(started))
@@ -187,7 +196,7 @@ func (r *relay) recordResponse(status int, body []byte, elapsed time.Duration) {
 
 func (r *relay) initStatsLocked() {
 	if r.stats.Model == "" {
-		r.stats.Model = providercert.DefaultModel
+		r.stats.Model = r.model
 		r.stats.Provider = r.provider
 		r.stats.FinishReasons = map[string]int{}
 		r.stats.ResponseProviders = map[string]int{}

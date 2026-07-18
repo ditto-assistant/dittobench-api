@@ -33,7 +33,7 @@ func TestRelayPinsModelProviderAndKey(t *testing.T) {
 		_, _ = w.Write([]byte(`{"provider":"DeepInfra","choices":[{"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":4,"total_tokens":14,"cost":0.001}}`))
 	}))
 	defer upstream.Close()
-	r := &relay{upstream: upstream.URL, apiKey: "host-key", provider: "deepinfra", client: &http.Client{Timeout: time.Second}}
+	r := &relay{upstream: upstream.URL + "?openrouter.ai", apiKey: "host-key", model: providercert.DefaultModel, provider: "deepinfra", client: &http.Client{Timeout: time.Second}}
 	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"other","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
 	request.Header.Set("Authorization", "Bearer attacker-key")
 	response := httptest.NewRecorder()
@@ -62,5 +62,27 @@ func TestRelayPinsModelProviderAndKey(t *testing.T) {
 	r.handleStatsReset(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/stats/reset", nil))
 	if reset := r.statsSnapshot(); reset.Requests != 0 || reset.CostUSD != 0 {
 		t.Fatalf("reset stats = %#v", reset)
+	}
+}
+
+func TestDirectRelayPinsModelWithoutOpenRouterRouting(t *testing.T) {
+	var got map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("HTTP-Referer") != "" || r.Header.Get("X-Title") != "" {
+			t.Fatalf("direct request received OpenRouter attribution")
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer upstream.Close()
+	r := &relay{upstream: upstream.URL, apiKey: "host-key", model: "Qwen/Qwen3.6-27B-TEE", client: &http.Client{Timeout: time.Second}}
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"other","provider":{"only":["attacker"]}}`))
+	response := httptest.NewRecorder()
+	r.handle(response, request)
+	if response.Code != http.StatusOK || got["model"] != "Qwen/Qwen3.6-27B-TEE" || got["provider"] != nil {
+		t.Fatalf("status=%d body=%#v", response.Code, got)
 	}
 }
