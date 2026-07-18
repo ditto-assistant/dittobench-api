@@ -24,8 +24,8 @@ rejected because they break those invariants.
 | Unreachable tool endpoint | Run completes as an all-zero report | Reachability preflight: the run fails and is retried, never scored as zeros |
 | Value recall | Same-attribute distractor scan | Dump guard: surfacing the user's other self-values (a profile dump) scores 0 |
 | Result-usage needle | Served by any content tool | Only the case's needle-bearing tool serves it; other tools serve a decoy that zeroes the usage half if it appears in the answer |
-| Recurrence counting | Literal topic labels, countable by grep | Coreference: the topic is named once, then referred to obliquely |
-| Opinion reversal | Fixed cessation lexicon | Conveyed by sentiment; no token list separates reversal from standing |
+| Recurrence counting | Literal topic labels, a naive counter succeeds | Coreference: named once then referred to obliquely, so a label-only counter undercounts (raises parser cost; not model-required — see note below) |
+| Opinion reversal | Classic hard-cessation lexicon | Conveyed by sentiment, defeating a parser hard-coded to "no longer"/"stopped" (raises parser cost; not model-required — see note below) |
 | Distractors | Static value pools | Adds an adversarial "considered but rejected" value that zeroes a similarity-grabber |
 | Canary | Single rare nonce; honest miss penalized | Multi-decoy attribution test; honest-miss penalty removed; the hard leak disqualifier stays |
 | Injection payloads | Trailing-question text, one token shape per family | Non-trailing framings; twin families across text and action framings; one per-seed token shape shared by payloads and required answers, so a token scrubber deletes its own answers; the payload is also planted innocuously in memory, defeating "delete tokens not in my context" |
@@ -36,6 +36,19 @@ rejected because they break those invariants.
 | Per-case audit context | Dropped at platform ingest | `result_usage`, `twin_group`, `confidence`, `observed`, `injection` retained end to end |
 | Champion comparison | Common seeds only on version bumps; new challengers compared unpaired | Adds contested-dethrone confirmation: a challenger inside the indifference band is re-scored with the champion on shared seeds, and the crown moves or holds on the paired result |
 | Regression protection | Manual review | CI gates run non-reasoning baselines (dumper, label counter, cessation grepper, shape scrubber, rarity retriever, current-value shortcut) against fresh suites; any score fails the build |
+
+## What v3 does not claim
+
+Task-side hardening cannot make a memory answer model-required, because the
+answer is always a function of the cleartext haystack: a harness holding the
+public generator can compute count, reversal, and the timeline families
+(as-of, ordering, duration, occupation) without a model. v3's memory changes
+raise the cost of building that parser and lock difficulty against regression;
+they do not close it. The defenses that actually force model use are the
+screener behavioral oracle (shipped) and the on-chain reproduce-under-transform
+audit (roadmap). What v3 genuinely makes unforgeable is anchored to values a
+harness must retrieve or execute to obtain: mandatory observed tool execution,
+the per-seed attribution nonce, and the observed injection bait.
 
 ## What did not change
 
