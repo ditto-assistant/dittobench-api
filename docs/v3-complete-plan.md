@@ -94,7 +94,7 @@ New package or file, e.g. `persona/transform.go` (or extend the twin machinery):
   source.
 
 Add a red-team gate in `gen/redteam_test.go`:
-`TestRedTeamSurfaceBrittleParserFailsTransform` — a parser that answers the base
+`TestRedTeamSurfaceBrittleParserFailsTransform`: a parser that answers the base
 case from a fixed surface template must score below full on the invariance
 transform across a seed sweep, while the honest reference recovers both.
 
