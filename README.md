@@ -214,6 +214,13 @@ the per-case breakdown. Returns `404` if unknown.
 curl localhost:8000/v1/runs/<run_id>
 ```
 
+Failed sandbox runs may also include a bounded `failure` object. Only
+validator-owned resource exhaustion is marked `kind=validator_infrastructure`
+with `retryable=true`; ordinary non-zero miner exits remain non-retryable. Its
+diagnostics are limited to Docker state, exit code, OOM/cgroup counters, and
+aggregate `/tmp` usage. Container IDs, environment, output, paths, and source
+are never returned.
+
 ## Scoring
 
 Scoring is deterministic: a pure function of (dataset, transcript), reproducible
@@ -271,7 +278,11 @@ caller-supplied harness URLs, so it guards against abuse:
   IP), CGNAT, and multicast are rejected up front (`internal/netguard`), and the
   outbound dialer re-checks the connected IP to defeat DNS rebinding.
 - Rate limiting: a per-IP sliding window on `/v1/submit` (`internal/ratelimit`)
-  plus a global cap on concurrent `run_size` jobs; both return `429`. A
+  plus a single active `run_size` job per scorer; both return `429`. A full
+  miner container is capped at 3 GiB RAM, 2 CPUs, 512 PIDs, and a 512 MiB
+  writable `/tmp`; the root filesystem remains read-only. Keeping concurrency
+  at one prevents those limits from overcommitting the validator's documented
+  16 GiB host alongside Ollama, Docker, the relay, Pylon, and the worker. A
   request-body cap rejects oversized payloads.
 - `DITTOBENCH_ALLOW_PRIVATE_HARNESS`: set truthy for local dev or the Docker
   sandbox (loopback containers) to relax the SSRF guard. Leave it unset in

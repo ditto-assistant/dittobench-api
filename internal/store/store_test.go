@@ -39,6 +39,25 @@ func TestFail(t *testing.T) {
 	}
 }
 
+func TestFailWithSanitizedInfrastructureClassification(t *testing.T) {
+	s := New()
+	s.Create("r-infra", "sandbox", StatusRunning, 1, 5)
+	failure := &Failure{
+		Kind:      "validator_infrastructure",
+		Code:      "sandbox_oom",
+		Retryable: true,
+		Diagnostics: map[string]any{
+			"oom_killed":        true,
+			"memory_peak_bytes": uint64(3 << 30),
+		},
+	}
+	s.FailWith("r-infra", "validator sandbox resource envelope exhausted", failure)
+	got, _ := s.Get("r-infra")
+	if got.Failure == nil || got.Failure.Kind != "validator_infrastructure" || !got.Failure.Retryable {
+		t.Fatalf("sanitized failure missing: %+v", got)
+	}
+}
+
 func TestGetReturnsCopy(t *testing.T) {
 	s := New()
 	s.Create("r3", "direct", StatusQueued, 0, 0)

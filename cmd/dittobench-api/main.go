@@ -46,10 +46,14 @@ const sandboxHealthTimeout = 3 * time.Minute
 
 // Abuse guards for the public submit endpoint.
 const (
-	maxSubmitBody     = 64 << 10        // request body cap (submissions are tiny)
-	submitsPerWindow  = 15              // per-IP submissions...
-	submitWindow      = 5 * time.Minute // ...per this window
-	maxConcurrentRuns = 8               // global cap on in-flight run_size jobs
+	maxSubmitBody    = 64 << 10        // request body cap (submissions are tiny)
+	submitsPerWindow = 15              // per-IP submissions...
+	submitWindow     = 5 * time.Minute // ...per this window
+	// One full miner sandbox has a 3 GiB cgroup cap and 512 MiB writable tmpfs
+	// within that cap. The
+	// validator host also runs Ollama, the relay, Docker, Pylon, and the worker,
+	// so multiple in-process full runs can overcommit the documented 16 GiB host.
+	maxConcurrentRuns = 1
 )
 
 type server struct {
@@ -566,6 +570,9 @@ func (s *server) submitSandbox(w http.ResponseWriter, r *http.Request, req submi
 		writeError(w, http.StatusServiceUnavailable, "sandbox backend unavailable: "+err.Error())
 		return
 	}
+	if !s.acquireRunSlot(w) {
+		return
+	}
 
 	seed := pinnedOrFreshSeed(req.Seed)
 	runID := uuid.NewString()
@@ -584,6 +591,7 @@ func (s *server) submitSandbox(w http.ResponseWriter, r *http.Request, req submi
 // runSandboxJob builds the submission, runs it, evaluates it, and tears it down,
 // updating the job status at each step.
 func (s *server) runSandboxJob(ctx context.Context, runID string, req submitRequest, seed int64, n int) {
+	defer func() { <-s.runSlots }()
 	defer func() {
 		if rec := recover(); rec != nil {
 			s.store.Fail(runID, "internal panic during sandbox job")
@@ -605,7 +613,7 @@ func (s *server) runSandboxJob(ctx context.Context, runID string, req submitRequ
 		s.store.Fail(runID, "container start failed: "+err.Error())
 		return
 	}
-	defer s.sandbox.Stop(context.Background(), handle)
+	defer s.finishSandboxRun(runID, handle)
 	ctx = runner.TrustSandbox(ctx)
 
 	if err := runner.WaitHealthy(ctx, handle.BaseURL, sandboxHealthTimeout); err != nil {
@@ -651,11 +659,7 @@ func (s *server) submitRunSize(w http.ResponseWriter, r *http.Request, req submi
 	// Generation is deterministic, scoring is judge-free, and the harness talks
 	// only to the locked-model gateway, so no LLM key exists anywhere in a run.
 
-	// Bound concurrent in-flight runs so a burst can't exhaust the instance.
-	select {
-	case s.runSlots <- struct{}{}:
-	default:
-		writeError(w, http.StatusTooManyRequests, "validator at capacity; retry shortly")
+	if !s.acquireRunSlot(w) {
 		return
 	}
 
@@ -675,6 +679,16 @@ func (s *server) submitRunSize(w http.ResponseWriter, r *http.Request, req submi
 		Status: string(store.StatusQueued),
 		Poll:   "/v1/runs/" + runID,
 	})
+}
+
+func (s *server) acquireRunSlot(w http.ResponseWriter) bool {
+	select {
+	case s.runSlots <- struct{}{}:
+		return true
+	default:
+		writeError(w, http.StatusTooManyRequests, "validator at capacity; retry shortly")
+		return false
+	}
 }
 
 // runSizeJob is the full SN118 pipeline: building → generating → seeding →
@@ -783,7 +797,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 			s.store.Fail(runID, "container start failed: "+err.Error())
 			return
 		}
-		defer s.sandbox.Stop(context.Background(), handle)
+		defer s.finishSandboxRun(runID, handle)
 		harnessURL = handle.BaseURL
 		ctx = runner.TrustSandbox(ctx)
 	}
@@ -938,6 +952,46 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	s.store.Finish(runID, report)
 	log.Printf("run %s done: bench_version=%d composite=%.3f tool_mean=%.3f memory_mean=%.3f observed=%d capped=%d",
 		runID, protocol.BenchVersion, report.Composite, report.ToolMean, report.MemoryMean, observedTool, cappedTool)
+}
+
+func (s *server) finishSandboxRun(runID string, handle *sandbox.Handle) {
+	job, ok := s.store.Get(runID)
+	if ok && job.Status == store.StatusFailed {
+		diagnostics := s.sandbox.Diagnostics(context.Background(), handle)
+		failure := &store.Failure{
+			Kind:      "sandbox_failure",
+			Code:      "sandbox_runtime",
+			Retryable: false,
+			Diagnostics: map[string]any{
+				"running":       diagnostics.Running,
+				"oom_killed":    diagnostics.OOMKilled,
+				"exit_code":     diagnostics.ExitCode,
+				"memory_events": diagnostics.MemoryEvents,
+			},
+		}
+		if diagnostics.MemoryPeakBytes != nil {
+			failure.Diagnostics["memory_peak_bytes"] = *diagnostics.MemoryPeakBytes
+		}
+		if diagnostics.TmpfsUsedBytes != nil {
+			failure.Diagnostics["tmpfs_used_bytes"] = *diagnostics.TmpfsUsedBytes
+		}
+		if diagnostics.TmpfsCapacityBytes != nil {
+			failure.Diagnostics["tmpfs_capacity_bytes"] = *diagnostics.TmpfsCapacityBytes
+		}
+		message := job.Error
+		if code := diagnostics.InfrastructureCode(); code != "" {
+			failure.Kind = "validator_infrastructure"
+			failure.Code = code
+			failure.Retryable = true
+			message = "validator sandbox resource envelope exhausted"
+			log.Printf(
+				"run %s validator infrastructure failure code=%s oom=%t exit=%d",
+				runID, code, diagnostics.OOMKilled, diagnostics.ExitCode,
+			)
+		}
+		s.store.FailWith(runID, message, failure)
+	}
+	s.sandbox.Stop(context.Background(), handle)
 }
 
 // startToolServer stands up the observed-execution mock tool endpoint on an

@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"context"
 	"slices"
 	"strings"
 	"testing"
@@ -39,7 +40,9 @@ func TestRunArgs_DefaultsHardenAndBound(t *testing.T) {
 	}
 	for flag, value := range map[string]string{
 		"--user":   "65532:65532",
-		"--tmpfs":  "/tmp:rw,noexec,nosuid,nodev,size=256m",
+		"--tmpfs":  "/tmp:rw,noexec,nosuid,nodev,size=512m",
+		"--memory": "3g",
+		"--cpus":   "2",
 		"--ulimit": "nofile=1024:1024",
 	} {
 		if !hasFlagPair(args, flag, value) {
@@ -49,6 +52,9 @@ func TestRunArgs_DefaultsHardenAndBound(t *testing.T) {
 	if !slices.Contains(args, "--read-only") || !slices.Contains(args, "--init") {
 		t.Errorf("expected read-only rootfs and init, got %v", args)
 	}
+	if slices.Contains(args, "--rm") {
+		t.Errorf("--rm would erase OOM evidence before diagnostics: %v", args)
+	}
 	for _, a := range args {
 		if strings.HasPrefix(a, "HTTPS_PROXY=") || strings.HasPrefix(a, "HTTP_PROXY=") {
 			t.Errorf("default must not inject a proxy, got %v", args)
@@ -57,6 +63,46 @@ func TestRunArgs_DefaultsHardenAndBound(t *testing.T) {
 	// The image is last.
 	if args[len(args)-1] != "img:latest" {
 		t.Errorf("image must be the final arg, got %v", args)
+	}
+}
+
+func TestDiagnosticsCapturesSanitizedResourceEvidence(t *testing.T) {
+	d := NewLocalDocker()
+	d.dockerCommand = func(_ context.Context, args ...string) ([]byte, error) {
+		switch args[0] {
+		case "inspect":
+			return []byte(`{"Running":true,"OOMKilled":false,"ExitCode":0}`), nil
+		case "exec":
+			return []byte("__memory_events__\nlow 0\nhigh 0\nmax 2\noom 1\noom_kill 1\n__memory_peak__\n3221225472\n__tmpfs__\ntmpfs 524288 524288 0 100% /tmp\n"), nil
+		default:
+			t.Fatalf("unexpected docker command: %v", args)
+			return nil, nil
+		}
+	}
+
+	diagnostics := d.Diagnostics(context.Background(), &Handle{ContainerID: "opaque"})
+	if diagnostics.InfrastructureCode() != "sandbox_oom" {
+		t.Fatalf("expected sandbox_oom, got %+v", diagnostics)
+	}
+	if diagnostics.MemoryPeakBytes == nil || *diagnostics.MemoryPeakBytes != 3221225472 {
+		t.Fatalf("memory peak missing: %+v", diagnostics)
+	}
+	if diagnostics.TmpfsUsedBytes == nil || *diagnostics.TmpfsUsedBytes != 512<<20 {
+		t.Fatalf("tmpfs usage missing: %+v", diagnostics)
+	}
+	if diagnostics.TmpfsCapacityBytes == nil || *diagnostics.TmpfsCapacityBytes != 512<<20 {
+		t.Fatalf("tmpfs capacity missing: %+v", diagnostics)
+	}
+}
+
+func TestDiagnosticsNonOOMExitIsNotInfrastructure(t *testing.T) {
+	d := NewLocalDocker()
+	d.dockerCommand = func(_ context.Context, _ ...string) ([]byte, error) {
+		return []byte(`{"Running":false,"OOMKilled":false,"ExitCode":2}`), nil
+	}
+	diagnostics := d.Diagnostics(context.Background(), &Handle{ContainerID: "opaque"})
+	if diagnostics.ExitCode != 2 || diagnostics.InfrastructureCode() != "" {
+		t.Fatalf("ordinary exit must remain non-infrastructure: %+v", diagnostics)
 	}
 }
 
