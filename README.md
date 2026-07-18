@@ -242,8 +242,10 @@ by anyone from the public `dittobench-datagen` module. See
 Tool cases: deterministic trajectory and argument accuracy
 (0.4 name-F1 + 0.4 arg-F1 + 0.2 order and extra-call discipline), scored on the
 validator-observed trajectory. An observable case the harness did not execute
-through the tool endpoint is capped at 0.5. Result-usage cases also require the
-served needle value in the answer.
+through the tool endpoint is capped at 0.5 in practice and scores 0 on the
+scored path (observed execution is mandatory there). Result-usage cases also
+require the served needle value in the answer; an answer carrying the served
+decoy instead zeroes the usage half.
 
 Memory cases (`run_size` only): per-`answer_kind` deterministic grading (value,
 number, list, ordered list, duration, reversal, decline) with distractor
