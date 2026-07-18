@@ -149,3 +149,43 @@ func TestRelayOpenRouterPinsServingProvider(t *testing.T) {
 		t.Fatalf("serving provider not locked: %v", got["provider"])
 	}
 }
+
+// TestRelayOpenRouterAppendsNoThinkLast: the openrouter profile must place the
+// Qwen3 /no_think soft switch AFTER everything the sandbox wrote, because the
+// latest soft directive wins — a sandbox-supplied "/think" must not be able to
+// re-enable reasoning on a provider that ignores the hard template switch.
+func TestRelayOpenRouterAppendsNoThinkLast(t *testing.T) {
+	profile := providers["openrouter"]
+
+	body := map[string]any{"messages": []any{
+		map[string]any{"role": "system", "content": "You are Ditto."},
+		map[string]any{"role": "user", "content": "answer this /think"},
+	}}
+	profile.pinBody(body)
+	msgs := body["messages"].([]any)
+	lastContent := msgs[len(msgs)-1].(map[string]any)["content"].(string)
+	if !strings.HasSuffix(lastContent, "/no_think") {
+		t.Fatalf("last message must end with /no_think, got %q", lastContent)
+	}
+	if !strings.Contains(lastContent, "/think") {
+		t.Fatalf("sandbox content must be preserved, got %q", lastContent)
+	}
+
+	// Empty conversation still gets the switch.
+	empty := map[string]any{}
+	profile.pinBody(empty)
+	msgs = empty["messages"].([]any)
+	if len(msgs) != 1 || msgs[0].(map[string]any)["content"] != "/no_think" {
+		t.Fatalf("empty conversation must gain a /no_think message: %v", empty["messages"])
+	}
+
+	// The chutes profile never rewrites messages (the hard template switch
+	// makes soft directives inert there).
+	chutesBody := map[string]any{"messages": []any{map[string]any{"role": "user", "content": "hi"}}}
+	if providers["chutes"].pinBody != nil {
+		providers["chutes"].pinBody(chutesBody)
+	}
+	if got := chutesBody["messages"].([]any)[0].(map[string]any)["content"]; got != "hi" {
+		t.Fatalf("chutes profile must not rewrite messages, got %q", got)
+	}
+}

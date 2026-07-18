@@ -76,8 +76,38 @@ var providers = map[string]providerProfile{
 				"only":            []string{"nebius"},
 				"allow_fallbacks": false,
 			}
+			appendNoThink(body)
 		},
 	},
+}
+
+// appendNoThink applies Qwen3's soft thinking switch on the openrouter
+// profile. Nebius via OpenRouter ignores chat_template_kwargs.enable_thinking
+// and OpenRouter's reasoning parameter (verified live 2026-07-17: reasoning
+// tokens still arrive with both set), so the hard switch the Chutes profile
+// relies on does not exist here; the documented Qwen3 soft switch does. The
+// LATEST /think|/no_think directive in the conversation wins, so the relay
+// appends /no_think after everything the sandbox wrote — a sandbox-supplied
+// "/think" can never come later. On Chutes the hard template switch makes
+// soft directives inert, so this pin is openrouter-only.
+func appendNoThink(body map[string]any) {
+	msgs, _ := body["messages"].([]any)
+	if len(msgs) == 0 {
+		body["messages"] = []any{map[string]any{"role": "system", "content": "/no_think"}}
+		return
+	}
+	last, _ := msgs[len(msgs)-1].(map[string]any)
+	if last == nil {
+		return
+	}
+	switch c := last["content"].(type) {
+	case string:
+		last["content"] = c + "\n/no_think"
+	case []any:
+		last["content"] = append(c, map[string]any{"type": "text", "text": "/no_think"})
+	default:
+		body["messages"] = append(msgs, map[string]any{"role": "user", "content": "/no_think"})
+	}
 }
 
 // lockedThinking is the frozen fleet-wide thinking mode. Off: a hybrid-reasoning
