@@ -48,17 +48,18 @@ type Failure struct {
 
 // Job is one evaluation, in any lifecycle state.
 type Job struct {
-	RunID     string                `json:"run_id"`
-	Status    Status                `json:"status"`
-	Mode      string                `json:"mode"`               // "direct" | "sandbox"
-	RunSize   string                `json:"run_size,omitempty"` // "small" | "medium" | "full"
-	Seed      int64                 `json:"seed,omitempty"`     // dataset seed used
-	N         int                   `json:"n,omitempty"`        // case count requested
-	Error     string                `json:"error,omitempty"`    // set when Status == failed
-	Failure   *Failure              `json:"failure,omitempty"`  // sanitized machine contract
-	Progress  Progress              `json:"progress"`           // stage/done/total for the UI
-	Partial   []protocol.CaseScore  `json:"partial,omitempty"`  // case scores appended as they complete
-	Report    *protocol.ScoreReport `json:"report,omitempty"`   // set when Status == done
+	RunID        string                `json:"run_id"`
+	Status       Status                `json:"status"`
+	Mode         string                `json:"mode"`               // "direct" | "sandbox"
+	RunSize      string                `json:"run_size,omitempty"` // "small" | "medium" | "full"
+	BenchVersion int                   `json:"bench_version"`      // deterministic benchmark contract
+	Seed         int64                 `json:"seed,omitempty"`     // dataset seed used
+	N            int                   `json:"n,omitempty"`        // case count requested
+	Error        string                `json:"error,omitempty"`    // set when Status == failed
+	Failure      *Failure              `json:"failure,omitempty"`  // sanitized machine contract
+	Progress     Progress              `json:"progress"`           // stage/done/total for the UI
+	Partial      []protocol.CaseScore  `json:"partial,omitempty"`  // case scores appended as they complete
+	Report       *protocol.ScoreReport `json:"report,omitempty"`   // set when Status == done
 	// TranscriptSHA256 content-addresses the canonical transcript artifact (the
 	// graded per-case inputs) for offline re-grading; the bytes themselves are
 	// served by GET /v1/runs/{id}/transcript, not inlined in run status.
@@ -116,6 +117,13 @@ func (s *Store) SetStatus(runID string, status Status) {
 // SetRunSize records the requested run_size on a job.
 func (s *Store) SetRunSize(runID, runSize string) {
 	s.Update(runID, func(j *Job) { j.RunSize = runSize })
+}
+
+// SetBenchVersion records the selected deterministic benchmark contract. It is
+// top-level polling state so a validator can reject a result before inspecting
+// the nested report.
+func (s *Store) SetBenchVersion(runID string, version int) {
+	s.Update(runID, func(j *Job) { j.BenchVersion = version })
 }
 
 // SetStage sets Status + the progress stage label together.

@@ -2,9 +2,9 @@ package main
 
 import (
 	"net/http"
+	"strconv"
 
 	"github.com/ditto-assistant/dittobench-datagen/gen"
-	"github.com/ditto-assistant/dittobench-datagen/protocol"
 )
 
 // Public dataset sampler (task #52).
@@ -35,7 +35,8 @@ const maxSampleIndex = 9
 
 // handleSample serves a full run-size dataset from a reserved public seed. Query:
 // ?run_size=small|medium|full (default small), ?sample=<0..maxSampleIndex>
-// (default 0). No key required, generation is deterministic and LLM-free.
+// (default 0), ?bench_version=2|3 (omitted preserves the historical v2 sample).
+// No key required, generation is deterministic and LLM-free.
 func (s *server) handleSample(w http.ResponseWriter, r *http.Request) {
 	runSize := r.URL.Query().Get("run_size")
 	if runSize == "" {
@@ -51,12 +52,23 @@ func (s *server) handleSample(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "sample must be between 0 and 9")
 		return
 	}
-	// Explicit version: the un-suffixed wrappers now default to the FROZEN v2
-	// contract, so an implicit call would silently serve the pre-hardening
-	// dataset while claiming to be current.
-	art, err := gen.GenerateDataset(publicSampleSeed(index), prof, protocol.CurrentBenchVersion)
+	version := 2
+	if rawVersion := r.URL.Query().Get("bench_version"); rawVersion != "" {
+		parsed, err := strconv.Atoi(rawVersion)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "bench_version must be an integer (supported: 2, 3)")
+			return
+		}
+		version = parsed
+	}
+	version, msg := requestedBenchVersion(version, true)
+	if msg != "" {
+		writeError(w, http.StatusBadRequest, msg)
+		return
+	}
+	art, err := gen.GenerateDataset(publicSampleSeed(index), prof, version)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "generating sample dataset failed")
+		writeError(w, http.StatusBadRequest, "unsupported bench_version")
 		return
 	}
 	writeJSON(w, http.StatusOK, art)

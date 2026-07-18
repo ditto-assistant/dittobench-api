@@ -67,33 +67,47 @@ func TestSampleIncludesAnswerKeys(t *testing.T) {
 }
 
 // TestSampleShapeMatchesProfile checks the sample is a real full-profile dataset
-// (60 tool + 9 user-scoped cases), so the community sees the real size.
+// (60 tool cases), so the community sees the real size, and it pins the
+// frozen-v2 / hardened-v3 split at the API surface.
 func TestSampleShapeMatchesProfile(t *testing.T) {
 	s := &server{}
-	_, art := getSample(t, s, "?run_size=full")
-	if len(art.ToolCases) != 60 {
-		t.Fatalf("full profile should have 60 tool cases, got %d", len(art.ToolCases))
+
+	// v2 is the FROZEN contract: 4 read-path isolation cases (the isoCases
+	// quota) and nothing else user-scoped. The cross-user lifecycle probe is
+	// v3-only, so if it ever shows up here, v2's bytes have drifted and every
+	// run already scored under v2 has become unauditable.
+	_, v2 := getSample(t, s, "?run_size=full&bench_version=2")
+	if len(v2.ToolCases) != 60 {
+		t.Fatalf("full profile should have 60 tool cases, got %d", len(v2.ToolCases))
 	}
-	iso := 0
-	for _, c := range art.MemoryCases {
-		if c.UserID != "" {
-			iso++
-		}
+	if got := userScopedCases(v2); got != 4 {
+		t.Fatalf("v2 should have 4 user-scoped cases (frozen), got %d", got)
 	}
-	// 4 read-path isolation cases (the isoCases quota) plus the 5 cross-user
-	// LIFECYCLE cases (v3 B3): a write and a delete under user A, and the reads
-	// under user B that must be unaffected by them. Those are a fixed always-on
-	// probe rather than part of the quota, and they carry a user id because being
-	// user-scoped is the whole point of the probe.
-	if iso != 9 {
-		t.Fatalf("full profile should have 9 user-scoped cases, got %d", iso)
+
+	// v3 adds the 5 cross-user LIFECYCLE cases (B3): a write and a delete under
+	// user A, and the reads under user B that must be unaffected by them.
+	_, v3 := getSample(t, s, "?run_size=full&bench_version=3")
+	if got := userScopedCases(v3); got != 9 {
+		t.Fatalf("v3 should have 9 user-scoped cases (4 isolation + 5 cross-user), got %d", got)
 	}
+	art := v3
 	if len(art.MemoryWaves) < 1 {
 		t.Fatalf("expected at least one memory wave, got %d", len(art.MemoryWaves))
 	}
 }
 
 // TestSampleDeterministic: the same (run_size, sample) yields identical bytes.
+// userScopedCases counts cases carrying an explicit memory graph.
+func userScopedCases(art gen.DatasetArtifact) int {
+	n := 0
+	for _, c := range art.MemoryCases {
+		if c.UserID != "" {
+			n++
+		}
+	}
+	return n
+}
+
 func TestSampleDeterministic(t *testing.T) {
 	s := &server{}
 	rr1, _ := getSample(t, s, "?run_size=medium&sample=3")
@@ -114,6 +128,8 @@ func TestSampleRejectsBadInput(t *testing.T) {
 		{"bad run_size", "?run_size=huge", "run_size must be one of"},
 		{"index too high", "?sample=99", "sample must be between"},
 		{"negative index", "?sample=-1", "sample must be between"},
+		{"unsupported bench version", "?bench_version=4", "unsupported bench_version"},
+		{"non-integer bench version", "?bench_version=latest", "bench_version must be an integer"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -136,6 +152,21 @@ func TestSampleDefaultsToSmall(t *testing.T) {
 	_, art := getSample(t, s, "")
 	if len(art.ToolCases) != 6 {
 		t.Fatalf("small profile should have 6 tool cases, got %d", len(art.ToolCases))
+	}
+	if art.BenchVersion != 2 {
+		t.Fatalf("omitted practice version must remain v2, got %d", art.BenchVersion)
+	}
+}
+
+func TestSampleCanDeliberatelySelectV3(t *testing.T) {
+	s := &server{}
+	v2, art2 := getSample(t, s, "?run_size=small&sample=2&bench_version=2")
+	v3, art3 := getSample(t, s, "?run_size=small&sample=2&bench_version=3")
+	if art2.BenchVersion != 2 || art3.BenchVersion != 3 {
+		t.Fatalf("wrong versions: v2=%d v3=%d", art2.BenchVersion, art3.BenchVersion)
+	}
+	if v2.Body.String() == v3.Body.String() {
+		t.Fatal("v2 and v3 sample paths produced identical bytes")
 	}
 }
 

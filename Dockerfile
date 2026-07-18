@@ -1,3 +1,10 @@
+# Immutable release identity is public metadata, not a credential. Production
+# builds pass both args from the signed full-stack release descriptor. Unknown
+# defaults keep ordinary local builds working but make /v1/capabilities fail
+# closed until an identity is deliberately supplied.
+ARG DITTOBENCH_SOFTWARE_VERSION=unknown
+ARG DITTOBENCH_SOURCE_SHA=unknown
+
 # ---- build stage ----
 FROM golang:1.23-alpine AS build
 WORKDIR /src
@@ -23,9 +30,13 @@ RUN CGO_ENABLED=1 GOOS=linux go build \
 # out to both git and docker when it materializes and runs miner submissions.
 # Keep the ordinary runtime below as the default target for hosted practice.
 FROM docker:28.3.3-cli-alpine3.22 AS sandbox
+ARG DITTOBENCH_SOFTWARE_VERSION
+ARG DITTOBENCH_SOURCE_SHA
 RUN apk add --no-cache git
 COPY --from=build /out/dittobench-api /dittobench-api
 ENV HOME=/tmp
+ENV DITTOBENCH_SOFTWARE_VERSION=${DITTOBENCH_SOFTWARE_VERSION}
+ENV DITTOBENCH_SOURCE_SHA=${DITTOBENCH_SOURCE_SHA}
 USER 65532:65532
 EXPOSE 8000
 ENTRYPOINT ["/dittobench-api", "-port", "8000"]
@@ -46,6 +57,10 @@ ENTRYPOINT ["/model-relay"]
 
 # ---- runtime stage ----
 FROM gcr.io/distroless/static-debian12:nonroot AS runtime
+ARG DITTOBENCH_SOFTWARE_VERSION
+ARG DITTOBENCH_SOURCE_SHA
 COPY --from=build /out/dittobench-api /dittobench-api
+ENV DITTOBENCH_SOFTWARE_VERSION=${DITTOBENCH_SOFTWARE_VERSION}
+ENV DITTOBENCH_SOURCE_SHA=${DITTOBENCH_SOURCE_SHA}
 EXPOSE 8000
 ENTRYPOINT ["/dittobench-api", "-port", "8000"]
