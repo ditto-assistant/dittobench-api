@@ -48,6 +48,9 @@ type Sandbox interface {
 	// Run starts image as a detached container exposing the harness port and
 	// returns a handle. Caller must Stop the handle.
 	Run(ctx context.Context, image string, env map[string]string) (*Handle, error)
+	// Release removes a request-scoped image returned by Build. It is safe to
+	// call more than once and must also be called when work fails before Run.
+	Release(ctx context.Context, image string)
 	// Stop force-removes the container behind h. Safe to call more than once.
 	Stop(ctx context.Context, h *Handle)
 }
@@ -63,13 +66,22 @@ type Source struct {
 	// TarballSHA256, when non-empty, is verified (hex) against the fetched bytes.
 	// The platform already checks it at upload; re-verifying makes the sandbox
 	// self-defending against a corrupted or swapped blob behind the URL.
-	TarballSHA256 string
+	TarballSHA256       string
+	ScreenedImageURL    string
+	ScreenedImageSHA256 string
+	ScreenedImageID     string
+	ScreenedImageRef    string
+	ScreenedImageSize   int64
 }
 
 // Handle references a running harness container.
 type Handle struct {
 	ContainerID string
 	BaseURL     string // e.g. http://127.0.0.1:49160 — pass to runner.RunHarness
+	// ImageRef is the request-scoped image created by Build. Stop removes it
+	// after removing the container so long-lived validators do not accumulate
+	// multi-gigabyte submission images.
+	ImageRef string
 }
 
 // LocalDocker runs submissions on the host Docker daemon via the `docker` CLI.
@@ -95,8 +107,14 @@ type LocalDocker struct {
 	// a fork-bomb bound. Always applied; defaults to 512.
 	PidsLimit int
 	// Harden, when true, drops all Linux capabilities (--cap-drop ALL). An
-	// untrusted userland HTTP harness needs none. Env DITTOBENCH_SANDBOX_HARDEN.
+	// untrusted userland HTTP harness needs none. Hardening is on by default;
+	// DITTOBENCH_SANDBOX_HARDEN=0 is reserved for local debugging.
 	Harden bool
+	// SeccompProfile and AppArmorProfile are explicit runtime policy names.
+	// Docker's built-in seccomp profile remains active when SeccompProfile is
+	// empty. AppArmor is opt-in because it is unavailable on some hosts.
+	SeccompProfile  string
+	AppArmorProfile string
 	// EgressNetwork, when set, attaches the container to this user-defined docker
 	// network — the egress-restricted sandbox network (allowlisting proxy + host
 	// firewall) — instead of the default full-egress bridge. Empty = today's
@@ -119,7 +137,9 @@ func NewLocalDocker() *LocalDocker {
 		GitHubTokenFile: os.Getenv("GITHUB_TOKEN_FILE"),
 		AllowPrivate:    envBool("DITTOBENCH_ALLOW_PRIVATE_HARNESS"),
 		PidsLimit:       envIntDefault("DITTOBENCH_SANDBOX_PIDS_LIMIT", 512),
-		Harden:          envBool("DITTOBENCH_SANDBOX_HARDEN"),
+		Harden:          envBoolDefault("DITTOBENCH_SANDBOX_HARDEN", true),
+		SeccompProfile:  strings.TrimSpace(os.Getenv("DITTOBENCH_SANDBOX_SECCOMP_PROFILE")),
+		AppArmorProfile: strings.TrimSpace(os.Getenv("DITTOBENCH_SANDBOX_APPARMOR_PROFILE")),
 		EgressNetwork:   strings.TrimSpace(os.Getenv("DITTOBENCH_SANDBOX_EGRESS_NETWORK")),
 		EgressProxy:     strings.TrimSpace(os.Getenv("DITTOBENCH_SANDBOX_EGRESS_PROXY")),
 	}
@@ -132,6 +152,21 @@ func envBool(name string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func envBoolDefault(name string, def bool) bool {
+	value, ok := os.LookupEnv(name)
+	if !ok || strings.TrimSpace(value) == "" {
+		return def
+	}
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return def
 	}
 }
 
@@ -157,7 +192,8 @@ func (d *LocalDocker) Available(ctx context.Context) error {
 	return nil
 }
 
-// Build clones the submission to a temp dir and builds it with BuildKit. We
+// Build materializes the submission in a temp dir, then either loads the
+// screener-built image or builds the source with BuildKit. We
 // clone ourselves (rather than docker's git-context form) so a PRIVATE
 // submission repo can be authenticated with the gh token; docker's remote
 // build-context fetch is unauthenticated and 404s on private repos. A mounted
@@ -210,7 +246,17 @@ func (d *LocalDocker) Build(ctx context.Context, src Source) (string, string, *p
 	//     failing the build over a moderation signal.
 	fingerprint := astfp.FromDir(ctx, contextDir)
 
-	// 2. Build the local context.
+	// 2. Load the screener-built image when present. The source tree above is
+	// still materialized so validators preserve structural anti-copy evidence.
+	if src.ScreenedImageURL != "" {
+		image, loadLog, err := d.loadScreenedImage(ctx, src, workdir)
+		if err != nil {
+			return "", loadLog, nil, err
+		}
+		return image, loadLog, fingerprint, nil
+	}
+
+	// 3. Build the local context for legacy/evaluating records without an image.
 	image := "dittobench-sub:" + safeTag(src)
 	args := []string{"build", "-t", image}
 	if d.GitHubTokenFile != "" {
@@ -276,14 +322,25 @@ func (d *LocalDocker) pidsLimit() int {
 func (d *LocalDocker) runArgs(image string, env map[string]string) []string {
 	args := []string{
 		"run", "-d", "--rm",
+		"--init",
+		"--user", "65532:65532",
+		"--read-only",
+		"--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=256m",
 		"--memory", d.MemoryLimit,
 		"--cpus", d.CPULimit,
 		"--pids-limit", strconv.Itoa(d.pidsLimit()),
+		"--ulimit", "nofile=1024:1024",
 		"--security-opt", "no-new-privileges",
 	}
 	if d.Harden {
 		// An untrusted userland HTTP harness needs no Linux capabilities.
 		args = append(args, "--cap-drop", "ALL")
+	}
+	if d.SeccompProfile != "" {
+		args = append(args, "--security-opt", "seccomp="+d.SeccompProfile)
+	}
+	if d.AppArmorProfile != "" {
+		args = append(args, "--security-opt", "apparmor="+d.AppArmorProfile)
 	}
 	if d.EgressNetwork != "" {
 		// The egress-restricted sandbox network (allowlisting proxy + host
@@ -322,18 +379,20 @@ func (d *LocalDocker) Run(ctx context.Context, image string, env map[string]stri
 
 	out, err := exec.CommandContext(runCtx, "docker", d.runArgs(image, env)...).CombinedOutput()
 	if err != nil {
+		d.Release(context.Background(), image)
 		return nil, fmt.Errorf("docker run failed: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 	containerID := strings.TrimSpace(string(out))
 
 	hostPort, err := d.mappedPort(runCtx, containerID)
 	if err != nil {
-		d.Stop(context.Background(), &Handle{ContainerID: containerID})
+		d.Stop(context.Background(), &Handle{ContainerID: containerID, ImageRef: image})
 		return nil, err
 	}
 	return &Handle{
 		ContainerID: containerID,
 		BaseURL:     "http://127.0.0.1:" + hostPort,
+		ImageRef:    image,
 	}, nil
 }
 
@@ -352,14 +411,30 @@ func (d *LocalDocker) mappedPort(ctx context.Context, containerID string) (strin
 	return strings.TrimSpace(first[idx+1:]), nil
 }
 
-// Stop force-removes the container. Errors are ignored (best-effort cleanup).
+// Stop force-removes the container and its request-scoped image tag. Errors are
+// ignored (best-effort cleanup); removing the container first lets Docker reclaim
+// the image layers when no concurrent run still references them.
 func (d *LocalDocker) Stop(ctx context.Context, h *Handle) {
-	if h == nil || h.ContainerID == "" {
+	if h == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	_ = exec.CommandContext(ctx, "docker", "rm", "-f", h.ContainerID).Run()
+	if h.ContainerID != "" {
+		_ = exec.CommandContext(ctx, "docker", "rm", "-f", h.ContainerID).Run()
+	}
+	d.Release(ctx, h.ImageRef)
+}
+
+func (d *LocalDocker) Release(ctx context.Context, image string) {
+	// Only delete images in the namespace Build owns. Run remains safe to use
+	// with an operator-managed image without unexpectedly deleting it.
+	if !strings.HasPrefix(image, "dittobench-sub:") {
+		return
+	}
+	cleanupCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	_ = exec.CommandContext(cleanupCtx, "docker", "image", "rm", image).Run()
 }
 
 // safeTag derives a docker-safe tag from the source ref.
@@ -378,18 +453,29 @@ func safeTag(src Source) string {
 	base = strings.TrimSuffix(base, ".git")
 	base = strings.TrimSuffix(base, ".tar.gz")
 	base = strings.TrimSuffix(base, ".tgz")
+	var suffix string
 	switch {
 	case src.GitRef != "":
-		base += "-" + src.GitRef
+		suffix = "-" + src.GitRef
 	case src.TarballSHA256 != "":
 		// Pin the tag to the content hash so re-runs of the same blob reuse the
 		// build cache and distinct blobs never collide on a tag.
 		if len(src.TarballSHA256) >= 12 {
-			base += "-" + src.TarballSHA256[:12]
+			suffix = "-" + src.TarballSHA256[:12]
 		} else {
-			base += "-" + src.TarballSHA256
+			suffix = "-" + src.TarballSHA256
 		}
 	}
+	// A screened image is already content-addressed. Include its image ID even
+	// when the practice caller omitted tarball_sha256, preventing two archives
+	// with the same URL basename from sharing a mutable local tag.
+	if id := strings.TrimPrefix(src.ScreenedImageID, "sha256:"); id != "" {
+		if len(id) > 12 {
+			id = id[:12]
+		}
+		suffix += "-image-" + id
+	}
+	base += suffix
 	var b strings.Builder
 	for _, r := range strings.ToLower(base) {
 		switch {
@@ -404,9 +490,29 @@ func safeTag(src Source) string {
 		t = "submission"
 	}
 	if len(t) > 100 {
-		t = t[:100]
+		// Preserve the content-addressed suffix when long presigned object names
+		// would otherwise truncate it away.
+		cleanSuffix := strings.TrimLeft(safeTagPart(suffix), "-._")
+		if cleanSuffix != "" && len(cleanSuffix) < 99 {
+			t = strings.TrimRight(t[:99-len(cleanSuffix)], "-._") + "-" + cleanSuffix
+		} else {
+			t = t[:100]
+		}
 	}
 	return t
+}
+
+func safeTagPart(value string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(value) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-', r == '.', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	return b.String()
 }
 
 // tail returns the last n bytes of s, prefixed with an ellipsis if truncated.

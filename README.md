@@ -23,7 +23,10 @@ transcript, so there is no central scorer to trust.
 A subnet validator scores miner submissions and sets on-chain weights from the
 results. This repo is the scoring half of that job. Per submission it:
 
-1. Builds the miner's crate in a Docker sandbox (`git_url` or `tarball_url`).
+1. Loads the exact image built by the trusted screener when screened-image
+   metadata is present. Legacy records fall back to building the crate in a
+   Docker sandbox (`git_url` or `tarball_url`). The source tarball is still
+   unpacked for structural anti-copy fingerprinting.
 2. Generates a fresh randomized DittoBench dataset, so no two evaluations match
    and a memorized lookup table cannot score.
 3. Seeds the harness, runs every tool and memory case, and grades each case
@@ -39,7 +42,7 @@ recomputes the deterministic weights it sets on-chain. Because scoring is
 judge-free and reproducible from the seed, any validator or third party can
 re-derive a composite independently; no validator has to trust another's number.
 
-Building a crate needs a Docker daemon, so a validator runs the engine on a VM or
+Loading or building an image needs a Docker daemon, so a validator runs the engine on a VM or
 similar host, not on a daemon-less platform. Run it directly:
 
 ```sh
@@ -273,6 +276,24 @@ caller-supplied harness URLs, so it guards against abuse:
 - `DITTOBENCH_ALLOW_PRIVATE_HARNESS`: set truthy for local dev or the Docker
   sandbox (loopback containers) to relax the SSRF guard. Leave it unset in
   production; the guard is on by default.
+- Screened-image metadata pins integrity but is not an authentication token.
+  The prebuilt-image path is therefore rejected on the public practice API and
+  is only enabled on validator-owned sandbox deployments by the narrow
+  `DITTOBENCH_ALLOW_SCREENED_IMAGES=1` opt-in. The validator must keep that API
+  private. `DITTOBENCH_ALLOW_PRIVATE_HARNESS` remains separate and is only
+  needed when local source/image URLs themselves resolve to private addresses.
+  Imported archive and local runner tags are removed after each run so validator
+  disks do not accumulate submission images.
+- Validators set `DITTOBENCH_REQUIRE_SCREENED_IMAGE=1`. This removes the
+  source-build fallback from the untrusted path: only the screener-built,
+  digest- and image-ID-bound archive may run. Practice deployments may leave
+  it unset when they intentionally build their own submissions.
+- Miner containers run as an unprivileged UID with a read-only root filesystem,
+  an ephemeral no-exec `/tmp`, all capabilities dropped, no-new-privileges,
+  bounded CPU/memory/PIDs/file descriptors, and request-scoped cleanup. Set
+  `DITTOBENCH_SANDBOX_SECCOMP_PROFILE` and
+  `DITTOBENCH_SANDBOX_APPARMOR_PROFILE` to reviewed host profiles where those
+  Linux security modules are available.
 
 ## See also
 

@@ -340,6 +340,23 @@ func TestSafeTagTarball(t *testing.T) {
 	}
 }
 
+func TestSafeTagScreenedImageIncludesImageID(t *testing.T) {
+	base := Source{TarballURL: "https://example.test/shared/source.tar.gz"}
+	first := base
+	first.ScreenedImageID = "sha256:" + strings.Repeat("1", 64)
+	second := base
+	second.ScreenedImageID = "sha256:" + strings.Repeat("2", 64)
+
+	firstTag := safeTag(first)
+	secondTag := safeTag(second)
+	if firstTag == secondTag {
+		t.Fatalf("screened image IDs collided on local tag %q", firstTag)
+	}
+	if !strings.Contains(firstTag, "image-111111111111") {
+		t.Fatalf("tag %q does not retain screened image ID", firstTag)
+	}
+}
+
 func writeFileT(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
