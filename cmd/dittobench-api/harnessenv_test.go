@@ -21,6 +21,22 @@ func TestHarnessSandboxEnvForcesModel(t *testing.T) {
 	if env["DITTOBENCH_PROVIDER"] != lockedProvider {
 		t.Fatalf("locked provider = %q, want the frozen %q", env["DITTOBENCH_PROVIDER"], lockedProvider)
 	}
+	if env["DITTOBENCH_DB"] != "/tmp/dittobench.db" {
+		t.Fatalf("sandbox DB path = %q, want bounded writable tmpfs", env["DITTOBENCH_DB"])
+	}
+}
+
+func TestSandboxRuntimeEnvLocksWritableDBWithoutChangingProvider(t *testing.T) {
+	env := sandboxRuntimeEnv(map[string]string{
+		"DITTOBENCH_DB":      "/app/read-only.db",
+		"OPENROUTER_API_KEY": "practice-key",
+	})
+	if env["DITTOBENCH_DB"] != "/tmp/dittobench.db" {
+		t.Fatalf("sandbox DB path = %q, want bounded writable tmpfs", env["DITTOBENCH_DB"])
+	}
+	if env["OPENROUTER_API_KEY"] != "practice-key" {
+		t.Fatal("practice provider env was unexpectedly changed")
+	}
 }
 
 // TestHarnessSandboxEnvRelayRouting: chat routes to the chat gateway via the
@@ -60,6 +76,7 @@ func TestHarnessSandboxEnvLockCannotBeOverridden(t *testing.T) {
 		"CHUTES_BASE_URL":     "http://attacker.example/v1",
 		"OPENAI_API_KEY":      "sk-attacker",
 		"OPENAI_BASE_URL":     "http://attacker.example/v1",
+		"DITTOBENCH_DB":       "/app/attacker.db",
 		"BENIGN":              "ok", // non-locked keys still pass through
 	}
 	env := harnessSandboxEnv(hostile)
@@ -89,5 +106,8 @@ func TestHarnessSandboxEnvLockCannotBeOverridden(t *testing.T) {
 	}
 	if env["BENIGN"] != "ok" {
 		t.Fatalf("non-locked caller env should still pass through, got %q", env["BENIGN"])
+	}
+	if env["DITTOBENCH_DB"] != "/tmp/dittobench.db" {
+		t.Fatalf("req.Env overrode the locked DB path: %q", env["DITTOBENCH_DB"])
 	}
 }

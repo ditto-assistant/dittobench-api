@@ -756,7 +756,7 @@ func (s *server) runSandboxJob(ctx context.Context, runID string, req submitRequ
 	}
 	defer s.sandbox.Release(context.Background(), image)
 
-	handle, err := s.sandbox.Run(ctx, image, req.Env)
+	handle, err := s.sandbox.Run(ctx, image, sandboxRuntimeEnv(req.Env))
 	if err != nil {
 		s.store.Fail(runID, "container start failed: "+err.Error())
 		return
@@ -764,7 +764,7 @@ func (s *server) runSandboxJob(ctx context.Context, runID string, req submitRequ
 	defer s.finishSandboxRun(runID, handle)
 	ctx = runner.TrustSandbox(ctx)
 
-	if err := runner.WaitHealthy(ctx, handle.BaseURL, sandboxHealthTimeout); err != nil {
+	if err := s.waitSandboxHealthy(ctx, handle, sandboxHealthTimeout); err != nil {
 		s.store.Fail(runID, "harness never became healthy: "+err.Error())
 		return
 	}
@@ -978,11 +978,13 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	// 3. start the container. On the local harness_url path we skip the container
 	//    and target the miner's already-running harness.
 	harnessURL := req.HarnessURL
+	var handle *sandbox.Handle
+	var runErr error
 	if image != "" {
 		env := harnessSandboxEnv(req.Env)
-		handle, err := s.sandbox.Run(ctx, image, env)
-		if err != nil {
-			s.store.Fail(runID, "container start failed: "+err.Error())
+		handle, runErr = s.sandbox.Run(ctx, image, env)
+		if runErr != nil {
+			s.store.Fail(runID, "container start failed: "+runErr.Error())
 			return
 		}
 		defer s.finishSandboxRun(runID, handle)
@@ -990,8 +992,14 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		ctx = runner.TrustSandbox(ctx)
 	}
 
-	if err := runner.WaitHealthy(ctx, harnessURL, sandboxHealthTimeout); err != nil {
-		s.store.Fail(runID, "harness never became healthy: "+err.Error())
+	var healthErr error
+	if handle != nil {
+		healthErr = s.waitSandboxHealthy(ctx, handle, sandboxHealthTimeout)
+	} else {
+		healthErr = runner.WaitHealthy(ctx, harnessURL, sandboxHealthTimeout)
+	}
+	if healthErr != nil {
+		s.store.Fail(runID, "harness never became healthy: "+healthErr.Error())
 		return
 	}
 
@@ -1515,6 +1523,38 @@ func envOr(name, def string) string {
 	return def
 }
 
+func (s *server) waitSandboxHealthy(
+	ctx context.Context, handle *sandbox.Handle, timeout time.Duration,
+) error {
+	deadline := time.Now().Add(timeout)
+	var last error
+	for time.Now().Before(deadline) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if last = runner.Health(ctx, handle.BaseURL); last == nil {
+			return nil
+		}
+		diagnostics := s.sandbox.Diagnostics(ctx, handle)
+		if diagnostics.StateKnown && !diagnostics.Running {
+			return fmt.Errorf(
+				"harness exited before health: exit_code=%d oom_killed=%t",
+				diagnostics.ExitCode,
+				diagnostics.OOMKilled,
+			)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Second):
+		}
+	}
+	if last == nil {
+		last = fmt.Errorf("timeout")
+	}
+	return fmt.Errorf("harness not healthy after %s: %w", timeout, last)
+}
+
 // lockedProvider is the frozen crate provider. The whole fleet reaches the
 // locked model through this one OpenAI-compatible path, so serving differences
 // do not make the k=3 validators' scores less comparable. Not env-tunable.
@@ -1534,6 +1574,20 @@ var lockedEnvKeys = map[string]bool{
 	"CHUTES_BASE_URL":     true,
 	"OPENAI_API_KEY":      true,
 	"OPENAI_BASE_URL":     true,
+	"DITTOBENCH_DB":       true,
+}
+
+// sandboxRuntimeEnv applies filesystem invariants shared by practice and
+// canonical scoring without changing the practice endpoint's provider env.
+func sandboxRuntimeEnv(reqEnv map[string]string) map[string]string {
+	env := make(map[string]string, len(reqEnv)+1)
+	for key, value := range reqEnv {
+		if key != "DITTOBENCH_DB" {
+			env[key] = value
+		}
+	}
+	env["DITTOBENCH_DB"] = "/tmp/dittobench.db"
+	return env
 }
 
 // harnessSandboxEnv builds the env for the miner sandbox container.
@@ -1556,7 +1610,7 @@ var lockedEnvKeys = map[string]bool{
 func harnessSandboxEnv(reqEnv map[string]string) map[string]string {
 	gateway := envOr("HARNESS_GATEWAY_URL", "http://host.docker.internal:11434")
 	env := map[string]string{}
-	for k, v := range reqEnv {
+	for k, v := range sandboxRuntimeEnv(reqEnv) {
 		if lockedEnvKeys[k] {
 			continue // the lock owns these; callers cannot set them
 		}
@@ -1572,6 +1626,11 @@ func harnessSandboxEnv(reqEnv map[string]string) map[string]string {
 	env["OLLAMA_BASE_URL"] = envOr("HARNESS_EMBED_URL", gateway)
 	env["CHUTES_BASE_URL"] = gateway
 	env["CHUTES_API_KEY"] = "relay"
+	// The production sandbox has a read-only root and exposes exactly one
+	// bounded writable filesystem at /tmp. Force the standard harness database
+	// there so an image cannot pass screening as root and then fail to boot as
+	// the validator's unprivileged UID.
+	env["DITTOBENCH_DB"] = "/tmp/dittobench.db"
 	return env
 }
 

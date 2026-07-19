@@ -348,7 +348,12 @@ caller-supplied harness URLs, so it guards against abuse:
   rollout; no fleet-wide requirement environment variable is used.
 - Miner containers run as an unprivileged UID with a read-only root filesystem,
   an ephemeral no-exec `/tmp`, all capabilities dropped, no-new-privileges,
-  bounded CPU/memory/PIDs/file descriptors, and request-scoped cleanup. Set
+  bounded CPU/memory/PIDs/file descriptors, and request-scoped cleanup.
+  `DITTOBENCH_DB=/tmp/dittobench.db` is enforced after caller/image environment
+  values so a screened image cannot depend on writing under `/app`. A container
+  that exits before health is reported immediately instead of consuming the
+  full health timeout.
+  Set
   `DITTOBENCH_SANDBOX_SECCOMP_PROFILE` and
   `DITTOBENCH_SANDBOX_APPARMOR_PROFILE` to reviewed host profiles where those
   Linux security modules are available.
