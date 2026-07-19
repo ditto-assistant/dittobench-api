@@ -54,15 +54,15 @@ func TestValidateScreenedImageAccess(t *testing.T) {
 	}
 }
 
-func TestValidateScreenedImageRequired(t *testing.T) {
-	if msg := validateScreenedImageRequired(submitRequest{TarballURL: "https://example.com/source.tgz"}, true); msg == "" {
-		t.Fatal("validator policy allowed an untrusted source build")
+func TestValidateBenchmarkImageContract(t *testing.T) {
+	if msg := validateBenchmarkImageContract(submitRequest{BenchVersion: 3, TarballURL: "https://example.com/source.tgz"}); msg == "" {
+		t.Fatal("benchmark v3 allowed an untrusted source build")
 	}
-	if msg := validateScreenedImageRequired(submitRequest{ScreenedImageURL: "https://example.com/image.tar"}, true); msg != "" {
-		t.Fatalf("screened image rejected: %s", msg)
+	if msg := validateBenchmarkImageContract(submitRequest{BenchVersion: 3, ScreenedImageURL: "https://example.com/image.tar"}); msg != "" {
+		t.Fatalf("benchmark v3 screened image rejected: %s", msg)
 	}
-	if msg := validateScreenedImageRequired(submitRequest{TarballURL: "https://example.com/source.tgz"}, false); msg != "" {
-		t.Fatalf("practice source build rejected: %s", msg)
+	if msg := validateBenchmarkImageContract(submitRequest{BenchVersion: 2, TarballURL: "https://example.com/source.tgz"}); msg != "" {
+		t.Fatalf("benchmark v2 source build rejected: %s", msg)
 	}
 }
 
