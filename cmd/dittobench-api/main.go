@@ -236,7 +236,7 @@ func (s *server) handleCapabilities(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, capabilitiesResponse{
 		SoftwareVersion:        s.softwareVersion,
 		SourceRevision:         s.sourceRevision,
-		SupportedBenchVersions: []int{protocol.BenchVersionV2, protocol.BenchVersionV3},
+		SupportedBenchVersions: []int{protocol.BenchVersionV2, protocol.BenchVersionV3, protocol.BenchVersionV4},
 	})
 }
 
@@ -544,7 +544,7 @@ func (s *server) handleSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.BenchVersion != 2 {
-		writeError(w, http.StatusBadRequest, "bench_version 3 requires run_size so the complete versioned benchmark is administered")
+		writeError(w, http.StatusBadRequest, "bench_version != 2 requires run_size so the complete versioned benchmark is administered")
 		return
 	}
 
@@ -656,12 +656,12 @@ func (s *server) handleScoreRequest(w http.ResponseWriter, r *http.Request, requ
 func requestedBenchVersion(requested int, requireExplicit bool) (int, string) {
 	if requested == 0 {
 		if requireExplicit {
-			return 0, "bench_version is required (supported: 2, 3)"
+			return 0, "bench_version is required (supported: 2, 3, 4)"
 		}
 		return 2, ""
 	}
 	if !protocol.SupportedBenchVersion(requested) {
-		return 0, "unsupported bench_version (supported: 2, 3)"
+		return 0, "unsupported bench_version (supported: 2, 3, 4)"
 	}
 	return requested, ""
 }
@@ -1160,11 +1160,19 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 			if uid == "" {
 				uid = wave.UserID
 			}
-			resp, _ := runner.RunCase(ctx, harnessURL, mc.ID, mc.Question, tools, runner.CaseOptions{ToolEndpoint: toolEndpoint, UserID: uid})
+			resp, runErr := runner.RunCase(ctx, harnessURL, mc.ID, mc.Question, tools, runner.CaseOptions{ToolEndpoint: toolEndpoint, UserID: uid})
 			observedCalls := toolSrv.Observed(mc.ID)
 			resp = withObservedTrajectory(resp, observedCalls)
 			waveTranscripts[i] = transcriptCase{CaseID: mc.ID, Kind: protocol.KindMemory, UserID: uid, Response: resp, Observed: observedCalls}
 			cs := scorer.GradeMemory(mc, resp)
+			if runErr != nil {
+				// The case still scores 0 on its own accuracy (an empty response
+				// grades 0); this only tells the group metrics to drop it, so a
+				// timeout is never read as phrasing brittleness or a failed audit
+				// pair. The tool loop has captured runErr all along; memory did not.
+				cs.Undelivered = true
+				cs.Notes = append(cs.Notes, "no response from harness (error or timeout)")
+			}
 			if len(observedCalls) > 0 {
 				// The graded response's ToolCalls (and thus cs.Called) are the
 				// validator-observed trajectory, not the harness self-report. Mark it
@@ -1188,7 +1196,10 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 
 	// 6. scoring — aggregate + finish.
 	s.store.SetStage(runID, store.StatusScoring, len(perCase), total)
-	report := scorer.Aggregate(runID, perCase)
+	// Score under the contract this run was GENERATED for, not the module's
+	// current release: a v2 run's composite is pure accuracy, and the v3+ gate
+	// factors must not retroactively apply to it.
+	report := scorer.AggregateForVersion(runID, perCase, req.BenchVersion)
 	report.Seed = seed
 	report.StructuralFingerprint = structuralFP
 	injections := 0

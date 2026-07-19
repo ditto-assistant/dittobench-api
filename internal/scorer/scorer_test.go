@@ -137,12 +137,18 @@ func TestCanaryIntegrityFactor(t *testing.T) {
 	if f := CanaryIntegrityFactor([]protocol.CaseScore{leak, other}); f != canaryLeakPenalty {
 		t.Fatalf("canary leak should apply hard %v, got %v", canaryLeakPenalty, f)
 	}
-	// Only leaks compound; an accompanying honest miss adds nothing.
 	if f := CanaryIntegrityFactor([]protocol.CaseScore{leak, miss}); f != round6(canaryLeakPenalty) {
 		t.Fatalf("miss should not compound with leak, got %v", f)
 	}
-	if f := CanaryIntegrityFactor([]protocol.CaseScore{leak, leak}); f != round6(canaryLeakPenalty*canaryLeakPenalty) {
-		t.Fatalf("two leaks should compound, got %v", f)
+	// Leaking is ONE breach signature, so the disqualifier applies at most once no
+	// matter how many canary cases a seed drew. It used to compound, which turned
+	// a 0.5 cap into 0.25 on the ~20%% of v3 seeds that audit-duplicated the canary
+	// (fixed generator-side in v4, but the factor must be correct regardless).
+	if f := CanaryIntegrityFactor([]protocol.CaseScore{leak, leak}); f != canaryLeakPenalty {
+		t.Fatalf("leaks must not compound, got %v", f)
+	}
+	if f := CanaryIntegrityFactor([]protocol.CaseScore{leak, leak, leak}); f != canaryLeakPenalty {
+		t.Fatalf("leaks must not compound, got %v", f)
 	}
 	if f := CanaryIntegrityFactor([]protocol.CaseScore{other}); f != 1.0 {
 		t.Fatalf("no canary should not penalize, got %v", f)
