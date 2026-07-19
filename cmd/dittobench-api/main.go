@@ -120,15 +120,14 @@ type server struct {
 	sandbox sandbox.Sandbox
 	// allowPrivate relaxes caller-supplied URL checks for local development.
 	// Validator-owned loopback sandboxes use a separate trusted client.
-	allowPrivate         bool
-	allowScreenedImages  bool
-	requireScreenedImage bool
-	softwareVersion      string
-	sourceRevision       string
-	limiter              *ratelimit.Limiter
-	runSlots             chan struct{} // bounds concurrent run_size jobs
-	cancelMu             sync.Mutex
-	runCancels           map[string]context.CancelFunc
+	allowPrivate        bool
+	allowScreenedImages bool
+	softwareVersion     string
+	sourceRevision      string
+	limiter             *ratelimit.Limiter
+	runSlots            chan struct{} // bounds concurrent run_size jobs
+	cancelMu            sync.Mutex
+	runCancels          map[string]context.CancelFunc
 }
 
 func main() {
@@ -146,7 +145,6 @@ func main() {
 	// SSRF guard is ON by default; opt out for local dev / sandbox containers.
 	allowPrivate := envBool("DITTOBENCH_ALLOW_PRIVATE_HARNESS")
 	allowScreenedImages := envBool("DITTOBENCH_ALLOW_SCREENED_IMAGES")
-	requireScreenedImage := envBool("DITTOBENCH_REQUIRE_SCREENED_IMAGE")
 	softwareVersion := strings.TrimSpace(os.Getenv("DITTOBENCH_SOFTWARE_VERSION"))
 	sourceRevision := strings.TrimSpace(os.Getenv("DITTOBENCH_SOURCE_SHA"))
 	runner.Configure(allowPrivate)
@@ -156,21 +154,17 @@ func main() {
 	if allowScreenedImages {
 		log.Printf("DITTOBENCH_ALLOW_SCREENED_IMAGES set — trusted validator image path enabled")
 	}
-	if requireScreenedImage && !allowScreenedImages {
-		log.Fatal("DITTOBENCH_REQUIRE_SCREENED_IMAGE requires DITTOBENCH_ALLOW_SCREENED_IMAGES")
-	}
 
 	s := &server{
-		store:                store.New(),
-		sandbox:              sandbox.NewLocalDocker(),
-		allowPrivate:         allowPrivate,
-		allowScreenedImages:  allowScreenedImages,
-		requireScreenedImage: requireScreenedImage,
-		softwareVersion:      softwareVersion,
-		sourceRevision:       sourceRevision,
-		limiter:              ratelimit.New(submitsPerWindow, submitWindow),
-		runSlots:             make(chan struct{}, maxConcurrentRuns),
-		runCancels:           make(map[string]context.CancelFunc),
+		store:               store.New(),
+		sandbox:             sandbox.NewLocalDocker(),
+		allowPrivate:        allowPrivate,
+		allowScreenedImages: allowScreenedImages,
+		softwareVersion:     softwareVersion,
+		sourceRevision:      sourceRevision,
+		limiter:             ratelimit.New(submitsPerWindow, submitWindow),
+		runSlots:            make(chan struct{}, maxConcurrentRuns),
+		runCancels:          make(map[string]context.CancelFunc),
 	}
 
 	mux := http.NewServeMux()
@@ -440,9 +434,9 @@ func validateScreenedImageAccess(req submitRequest, allowScreenedImages bool) st
 	return ""
 }
 
-func validateScreenedImageRequired(req submitRequest, required bool) string {
-	if required && req.HarnessURL == "" && req.ScreenedImageURL == "" {
-		return "validator policy requires a screener-built image; source builds are disabled"
+func validateBenchmarkImageContract(req submitRequest) string {
+	if req.BenchVersion == 3 && req.ScreenedImageURL == "" {
+		return "benchmark version 3 requires a screener-built image; source builds are disabled"
 	}
 	return ""
 }
@@ -517,7 +511,7 @@ func (s *server) handleSubmit(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, msg)
 		return
 	}
-	if msg := validateScreenedImageRequired(req, s.requireScreenedImage); msg != "" {
+	if msg := validateBenchmarkImageContract(req); msg != "" {
 		writeError(w, http.StatusForbidden, msg)
 		return
 	}
@@ -632,7 +626,7 @@ func (s *server) handleScoreRequest(w http.ResponseWriter, r *http.Request, requ
 		writeError(w, http.StatusForbidden, msg)
 		return
 	}
-	if msg := validateScreenedImageRequired(req, s.requireScreenedImage); msg != "" {
+	if msg := validateBenchmarkImageContract(req); msg != "" {
 		writeError(w, http.StatusForbidden, msg)
 		return
 	}

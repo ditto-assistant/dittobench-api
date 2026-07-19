@@ -342,10 +342,10 @@ caller-supplied harness URLs, so it guards against abuse:
   needed when local source/image URLs themselves resolve to private addresses.
   Imported archive and local runner tags are removed after each run so validator
   disks do not accumulate submission images.
-- Validators set `DITTOBENCH_REQUIRE_SCREENED_IMAGE=1`. This removes the
-  source-build fallback from the untrusted path: only the screener-built,
-  digest- and image-ID-bound archive may run. Practice deployments may leave
-  it unset when they intentionally build their own submissions.
+- Benchmark v3 always removes the source-build fallback: only the screener-built,
+  digest- and image-ID-bound archive may run. Benchmark v2 intentionally keeps
+  source builds available for validators that update later in the asynchronous
+  rollout; no fleet-wide requirement environment variable is used.
 - Miner containers run as an unprivileged UID with a read-only root filesystem,
   an ephemeral no-exec `/tmp`, all capabilities dropped, no-new-privileges,
   bounded CPU/memory/PIDs/file descriptors, and request-scoped cleanup. Set
