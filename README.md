@@ -137,11 +137,12 @@ curl 'localhost:8000/v1/dataset?n=10'
 
 ### Validator capability negotiation
 
-`GET /v1/capabilities` is a private validator-control-plane endpoint. It is
-disabled (404) unless `DITTOBENCH_CAPABILITIES_TOKEN` is configured and requires
-`Authorization: Bearer <token>`. Do not expose or reuse that token in the public
-practice service. An authenticated response binds the running scorer release to
-the immutable descriptor supplied by Compose:
+`GET /v1/capabilities` is a read-only validator-control-plane endpoint that
+reports only public release identity and supported protocol numbers. It needs no
+operator secret: a shared bearer token would not authenticate the scorer because
+the scorer itself would possess it. Production Compose does not publish the
+scorer port on the host. The validator instead binds the response to the
+immutable signed stack descriptor supplied by Compose:
 
 ```json
 {
@@ -153,7 +154,10 @@ the immutable descriptor supplied by Compose:
 
 `DITTOBENCH_SOFTWARE_VERSION` and `DITTOBENCH_SOURCE_SHA` must identify the
 deployed image's release and exact 40-character source commit. The endpoint
-fails closed with 503 when either identity is absent or malformed.
+fails closed with 503 when either identity is absent or malformed. Validators
+also fall back to v2 for an older scorer (404), an unreachable endpoint, a
+malformed response, or any descriptor identity mismatch. This makes scorer and
+validator upgrades order-independent without an `.env` cutover.
 
 New validators send canonical work to `POST /v2/score`, where
 `bench_version` is required and must be `2` or `3`. The accepted response and

@@ -9,32 +9,10 @@ import (
 
 const testSourceRevision = "0123456789abcdef0123456789abcdef01234567"
 
-func TestCapabilitiesDisabledWithoutToken(t *testing.T) {
-	rr := httptest.NewRecorder()
-	(&server{}).handleCapabilities(rr, httptest.NewRequest(http.MethodGet, "/v1/capabilities", nil))
-	if rr.Code != http.StatusNotFound {
-		t.Fatalf("public practice endpoint must not advertise private capabilities: got %d", rr.Code)
-	}
-}
-
-func TestCapabilitiesRequireBearerToken(t *testing.T) {
-	s := &server{capabilitiesToken: "high-entropy-secret", softwareVersion: "0.10.0", sourceRevision: testSourceRevision}
-	for _, auth := range []string{"", "Bearer wrong", "Basic high-entropy-secret"} {
-		rr := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodGet, "/v1/capabilities", nil)
-		req.Header.Set("Authorization", auth)
-		s.handleCapabilities(rr, req)
-		if rr.Code != http.StatusUnauthorized {
-			t.Fatalf("auth %q: expected 401, got %d", auth, rr.Code)
-		}
-	}
-}
-
 func TestCapabilitiesReportBoundReleaseIdentity(t *testing.T) {
-	s := &server{capabilitiesToken: "high-entropy-secret", softwareVersion: "0.10.0", sourceRevision: testSourceRevision}
+	s := &server{softwareVersion: "0.10.0", sourceRevision: testSourceRevision}
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/capabilities", nil)
-	req.Header.Set("Authorization", "Bearer high-entropy-secret")
 	s.handleCapabilities(rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
@@ -56,10 +34,9 @@ func TestCapabilitiesReportBoundReleaseIdentity(t *testing.T) {
 
 func TestCapabilitiesFailClosedOnUnboundIdentity(t *testing.T) {
 	for _, revision := range []string{"", "not-a-sha", "0123456789ABCDEF0123456789ABCDEF01234567", "0000000000000000000000000000000000000000"} {
-		s := &server{capabilitiesToken: "secret", softwareVersion: "0.10.0", sourceRevision: revision}
+		s := &server{softwareVersion: "0.10.0", sourceRevision: revision}
 		rr := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, "/v1/capabilities", nil)
-		req.Header.Set("Authorization", "Bearer secret")
 		s.handleCapabilities(rr, req)
 		if rr.Code != http.StatusServiceUnavailable {
 			t.Fatalf("revision %q: expected 503, got %d", revision, rr.Code)
