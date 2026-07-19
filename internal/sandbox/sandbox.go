@@ -92,6 +92,7 @@ type Handle struct {
 // Pointer fields distinguish an observed zero from a runtime that could not
 // expose the corresponding cgroup/tmpfs counter (for example after a hard exit).
 type RuntimeDiagnostics struct {
+	StateKnown         bool              `json:"-"`
 	Running            bool              `json:"running"`
 	OOMKilled          bool              `json:"oom_killed"`
 	ExitCode           int               `json:"exit_code"`
@@ -444,6 +445,7 @@ func (d *LocalDocker) Diagnostics(ctx context.Context, h *Handle) RuntimeDiagnos
 	if out, err := d.dockerOutput(ctx, "inspect", "--format", "{{json .State}}", h.ContainerID); err == nil {
 		var state dockerState
 		if json.Unmarshal(bytes.TrimSpace(out), &state) == nil {
+			diagnostics.StateKnown = true
 			diagnostics.Running = state.Running
 			diagnostics.OOMKilled = state.OOMKilled
 			diagnostics.ExitCode = state.ExitCode
