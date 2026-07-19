@@ -56,7 +56,7 @@ func (s *server) handleSample(w http.ResponseWriter, r *http.Request) {
 	if rawVersion := r.URL.Query().Get("bench_version"); rawVersion != "" {
 		parsed, err := strconv.Atoi(rawVersion)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "bench_version must be an integer (supported: 2, 3)")
+			writeError(w, http.StatusBadRequest, "bench_version must be an integer (supported: 2, 3, 4)")
 			return
 		}
 		version = parsed
