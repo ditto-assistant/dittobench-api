@@ -668,7 +668,7 @@ func MemoryOverCallFactor(perCase []protocol.CaseScore) float64 {
 		}
 		observed++
 		for _, name := range cs.Called {
-			if !isMemoryMechanism(name) {
+			if !memoryTools[name] {
 				overCalled++
 				break
 			}
@@ -1057,24 +1057,6 @@ var memoryTools = map[string]bool{
 	"search_subjects":             true,
 	"fetch_memories":              true,
 	"search_memories_in_subjects": true,
-}
-
-// memoryWriteTools are the catalog's memory-MUTATION tools. Like the retrieval
-// tools above they act on the harness's own store rather than the world, so they
-// are part of the memory mechanism, not an external action. A production memory
-// agent writes what it learns from a turn while answering it -- that is the
-// product, not hedging -- so charging it as an over-call taxed exactly the
-// architecture this suite exists to reward.
-var memoryWriteTools = map[string]bool{
-	"save_memory":   true,
-	"update_memory": true,
-	"delete_memory": true,
-}
-
-// isMemoryMechanism reports whether a tool call is the harness operating its own
-// memory (retrieval or mutation) rather than taking an action in the world.
-func isMemoryMechanism(name string) bool {
-	return memoryTools[name] || memoryWriteTools[name]
 }
 
 // allMemoryTools reports whether every expected tool is a memory-retrieval tool

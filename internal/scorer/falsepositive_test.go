@@ -336,20 +336,23 @@ func obsMemory(called ...string) protocol.CaseScore {
 	}
 }
 
-// TestMemoryOverCallFactorAllowsMemoryWrites pins that writing what the harness
-// learned from the turn is the product, not hedging. A production memory agent
-// saves while it answers; charging that as an over-call taxed exactly the
-// architecture the suite exists to reward.
-func TestMemoryOverCallFactorAllowsMemoryWrites(t *testing.T) {
+// TestMemoryOverCallFactorTreatsWritesAsOverCallsOnRecall pins the DELIBERATE
+// scope of the lifecycle exemption added in #39: lifecycle write CASES are
+// excluded from this factor (see TestMemoryOverCallExcludesLifecycleWrites), but
+// a write tool called during an ordinary recall question is still an over-call.
+//
+// Issue #38 states this explicitly: "Do not globally exempt memory write tools
+// on every recall case." There is a real argument on the other side -- an agent
+// that saves what it learns while answering is doing the product, not hedging --
+// but that is a product decision about what the benchmark should reward, so it
+// is pinned here as intended behaviour rather than quietly reversed.
+func TestMemoryOverCallFactorTreatsWritesAsOverCallsOnRecall(t *testing.T) {
+	want := round6(1.0 - memoryOverCallMaxPenalty)
 	for _, write := range []string{"save_memory", "update_memory", "delete_memory"} {
 		c := obsMemory("search_memories", write)
-		if f := MemoryOverCallFactor([]protocol.CaseScore{c}); f != 1.0 {
-			t.Fatalf("%s alongside retrieval must not be an over-call, got %v", write, f)
+		if f := MemoryOverCallFactor([]protocol.CaseScore{c}); f != want {
+			t.Fatalf("%s on a recall case is an over-call by design: got %v want %v", write, f, want)
 		}
-	}
-	// A write on its own is mechanism too.
-	if f := MemoryOverCallFactor([]protocol.CaseScore{obsMemory("save_memory")}); f != 1.0 {
-		t.Fatalf("a bare memory write must not be an over-call, got %v", f)
 	}
 }
 
@@ -365,8 +368,8 @@ func TestMemoryOverCallFactorStillPenalizesExternalActions(t *testing.T) {
 	}
 	// The penalty scales with the over-calling fraction, unchanged.
 	half := []protocol.CaseScore{
-		obsMemory("search_memories", "save_memory"), // clean
-		obsMemory("search_web"),                     // over-call
+		obsMemory("search_memories"), // clean
+		obsMemory("search_web"),      // over-call
 	}
 	if f := MemoryOverCallFactor(half); f != round6(1.0-memoryOverCallMaxPenalty*0.5) {
 		t.Fatalf("half-rate over-call should apply half the penalty, got %v", f)
@@ -533,8 +536,18 @@ func TestCompositeGateCleanRunIsUnity(t *testing.T) {
 	}
 	clean := []protocol.CaseScore{
 		obsTool([]string{"search_web"}, []string{"search_web"}, 1.0),
-		func() protocol.CaseScore { c := obsMemory("search_memories", "save_memory"); c.TwinGroup = "g1"; c.Correct = true; return c }(),
-		func() protocol.CaseScore { c := obsMemory("search_memories"); c.TwinGroup = "g1"; c.Correct = true; return c }(),
+		func() protocol.CaseScore {
+			c := obsMemory("search_memories")
+			c.TwinGroup = "g1"
+			c.Correct = true
+			return c
+		}(),
+		func() protocol.CaseScore {
+			c := obsMemory("search_memories")
+			c.TwinGroup = "g1"
+			c.Correct = true
+			return c
+		}(),
 	}
 	if g := CompositeGate(clean); g != 1.0 {
 		t.Fatalf("a clean run must not be gated, got %v", g)
