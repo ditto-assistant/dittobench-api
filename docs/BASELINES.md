@@ -380,3 +380,89 @@ sits at p=0.584 with a perfectly even split, which is about as far from the
 rejection region as the data can be. No honest group flagged in 8 simulated
 verdicts. Enforcement nevertheless stays OFF (`DITTO_TRANSFORM_AUDIT_ENFORCE`)
 until the same comparison is run against champion-competence harnesses.
+
+## Run 5: bench_version 4 — REFERENCE BASELINE
+
+- Date: 2026-07-19
+- Config: v4 scorer + datagen `v0.9.0`, `bench_version` 4. v4 is the
+  false-positive release: same suite as v3, with several ways of being CORRECT
+  no longer losing points (canary no longer audit-duplicated, delete
+  instructions graded as acknowledgements, memory-routing no longer charged by
+  the efficiency term, bounded composite factors floored).
+- Harness: stock reference (dittobench starter kit baseline, unmodified, with
+  the v3+ reachability preflight). Built in-sandbox from the kit tarball.
+- Model: Qwen3-32B through the model-lock relay (`RELAY_PROVIDER=chutes`), the
+  same locked weights a scored run uses.
+- Scorer: source build, `source_revision`
+  `b72a63d6d98678b35add5adf336d745eb4238027`, `supported_bench_versions`
+  `[2, 3, 4]`.
+- Method: ONE full run, seed `20260719`, 119 cases, ~11 min wall clock. Like
+  Run 2 this is a single seed, so there is no between-seed SE here; the
+  within-run `composite_stderr` is reported and the hermetic between-seed
+  spread comes from `cmd/benchcal`. `dataset_sha256`
+  `05fe5b2c070b2bc9da9f50242228dad29dbca8caf6dd867b10dee6679113a6b8`.
+- Scope: PRACTICE (`/v1/submit`), same as Run 2. 15 of 60 tool cases were not
+  observed through the endpoint and are capped rather than zeroed; the scored
+  path would zero them, so a scored composite for this harness would be LOWER.
+  Do not compare this number against an on-chain scored run.
+
+### Headline
+
+| metric | value |
+| --- | --- |
+| composite | 0.429 |
+| tool_mean | 0.768 |
+| memory_mean | 0.237 |
+| within-run composite_stderr | 0.0321 |
+
+Versus Run 2 (v3, single seed): composite 0.461 -> 0.429, tool 0.713 -> 0.768,
+memory 0.284 -> 0.237.
+
+The tool half RISING is the expected direction: v4's corrections are
+concentrated there (memory-routing no longer charged as overshoot, read-only
+retrieval no longer zeroing abstention cases, the efficiency and over-call
+factors no longer stacking past a floor).
+
+The memory half falling is NOT evidence that v4 made memory harder. Both runs
+are single seeds; the drop of 0.047 is about 1.5x the within-run
+`composite_stderr` of 0.032, so it is inside the range seed variance alone
+produces. v4 also changed the memory case mix (the canary is no longer
+audit-duplicated, delete instructions carry AnswerAcknowledge), so the two
+denominators are not the same set of questions. Treat the composite as the
+comparable figure and re-measure over 24 seeds, as Run 1 did, before drawing a
+conclusion about the memory half.
+
+### Gates and latency
+
+- Observed / capped tool cases: 45 / 15 (scored path would zero the capped 15)
+- Injection attempts flagged: 5
+- Transform robustness: 0.800
+- Metamorphic consistency: 0.667
+- Lexical gap: 40 questions, 0 rewritten, mean 0.288 (unchanged before/after)
+- Median latency: ~12.5 s per case (reported, not scored)
+
+### Hermetic between-seed spread (`cmd/benchcal`, 30 seeds, v4)
+
+| metric | mean | sd |
+| --- | --- | --- |
+| tool_mean | 0.371 | 0.0288 |
+| composite | 0.4935 | 0.0160 |
+
+Noise floor (repeat-seed) sd is exactly 0, confirming v4 generation is
+deterministic. Note `benchcal` scores the deterministic reference routing
+policy against a SYNTHETIC memory profile, so its absolute numbers are a
+dataset-difficulty signal, not a harness score — only the spread transfers.
+
+### Weakest categories (n = cases in this single run)
+
+Memory, all at 0.00: `computed-answer` (1), `injection-resistance` (5),
+`point-in-time` (3), `knowledge-update` (2), `preference` (1), `isolation` (4),
+`assistant-recall` (3), `memory-write-read` (5).
+
+Tool, all at 0.00: `multi_web_read` (1), `set_effort` (1), `web_result_usage`
+(1), `calendar_create` (1), `web_recovery_result_usage` (1),
+`arg_hallucination` (1). Then `web_search` 0.28 (2), `workflow_not_job` 0.30 (2).
+
+Single-run per-category counts are small; these are directional, not stable
+estimates. The memory half is still where the composite and the competition
+live, unchanged from v2 and v3.
