@@ -3,6 +3,7 @@ package scorer
 import (
 	"testing"
 
+	"github.com/ditto-assistant/dittobench-datagen/gen"
 	"github.com/ditto-assistant/dittobench-datagen/persona"
 	"github.com/ditto-assistant/dittobench-datagen/protocol"
 )
@@ -112,20 +113,20 @@ func TestMetamorphicExcludesAuditGroups(t *testing.T) {
 // unobserved trajectory is never penalized (the validator cannot see it, and a
 // self-report must not be able to create or hide the signal).
 func TestMemoryOverCallFactor(t *testing.T) {
-	mem := func(observed bool, called ...string) protocol.CaseScore {
-		return protocol.CaseScore{Kind: protocol.KindMemory, Observed: observed, Called: called}
+	mem := func(category string, observed bool, called ...string) protocol.CaseScore {
+		return protocol.CaseScore{Kind: protocol.KindMemory, Category: category, Observed: observed, Called: called}
 	}
 	cases := []struct {
 		name string
 		in   []protocol.CaseScore
 		want float64
 	}{
-		{"no observed memory cases", []protocol.CaseScore{mem(false, "gmail_send")}, 1.0},
-		{"memory retrieval is not an over-call", []protocol.CaseScore{mem(true, "search_memories")}, 1.0},
-		{"no calls at all", []protocol.CaseScore{mem(true)}, 1.0},
-		{"every case over-calls", []protocol.CaseScore{mem(true, "gmail_send")}, 1.0 - memoryOverCallMaxPenalty},
-		{"mixed retrieval and action still over-calls", []protocol.CaseScore{mem(true, "search_memories", "gmail_send")}, 1.0 - memoryOverCallMaxPenalty},
-		{"half the cases over-call", []protocol.CaseScore{mem(true, "gmail_send"), mem(true, "search_memories")}, 1.0 - memoryOverCallMaxPenalty/2},
+		{"no observed memory cases", []protocol.CaseScore{mem("recall", false, "gmail_send")}, 1.0},
+		{"memory retrieval is not an over-call", []protocol.CaseScore{mem("recall", true, "search_memories")}, 1.0},
+		{"no calls at all", []protocol.CaseScore{mem("recall", true)}, 1.0},
+		{"every case over-calls", []protocol.CaseScore{mem("recall", true, "gmail_send")}, 1.0 - memoryOverCallMaxPenalty},
+		{"mixed retrieval and action still over-calls", []protocol.CaseScore{mem("recall", true, "search_memories", "gmail_send")}, 1.0 - memoryOverCallMaxPenalty},
+		{"half the cases over-call", []protocol.CaseScore{mem("recall", true, "gmail_send"), mem("recall", true, "search_memories")}, 1.0 - memoryOverCallMaxPenalty/2},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -133,6 +134,33 @@ func TestMemoryOverCallFactor(t *testing.T) {
 				t.Fatalf("got %.6f, want %.6f", got, round6(tc.want))
 			}
 		})
+	}
+}
+
+// Lifecycle writes are action prompts, not recall prompts. B4 must leave their
+// mutation calls to the lifecycle read case's persistence grading, while the
+// same calls on ordinary recall cases remain over-calls.
+func TestMemoryOverCallExcludesLifecycleWrites(t *testing.T) {
+	for _, tool := range []string{"save_memory", "update_memory", "delete_memory"} {
+		t.Run(tool, func(t *testing.T) {
+			in := []protocol.CaseScore{
+				{Kind: protocol.KindMemory, Category: gen.QTLifecycleWrite, Observed: true, Called: []string{tool}},
+				{Kind: protocol.KindMemory, Category: "single-session-recall", Observed: true, Called: []string{tool}},
+			}
+			if got := MemoryOverCallFactor(in); got != 1.0-memoryOverCallMaxPenalty {
+				t.Fatalf("lifecycle write must be excluded and recall write penalized: got %.3f", got)
+			}
+		})
+	}
+}
+
+func TestMemoryOverCallLifecycleExemptionIsCategorySpecific(t *testing.T) {
+	in := []protocol.CaseScore{
+		{Kind: protocol.KindMemory, Category: gen.QTLifecycleWrite, Observed: true, Called: []string{"gmail_send"}},
+		{Kind: protocol.KindMemory, Category: gen.QTLifecycleRead, Observed: true, Called: []string{"gmail_send"}},
+	}
+	if got := MemoryOverCallFactor(in); got != 1.0-memoryOverCallMaxPenalty {
+		t.Fatalf("only the lifecycle write half should be exempt, got %.3f", got)
 	}
 }
 

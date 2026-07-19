@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/ditto-assistant/dittobench-datagen/gen"
 	"github.com/ditto-assistant/dittobench-datagen/grade"
 	"github.com/ditto-assistant/dittobench-datagen/persona"
 	"github.com/ditto-assistant/dittobench-datagen/protocol"
@@ -568,13 +569,19 @@ const memoryOverCallMaxPenalty = 0.10
 // harness that never routed through the endpoint is not penalized for a call the
 // validator cannot see.
 //
-// The penalty scales with the FRACTION of observed memory cases that over-called,
-// so an isolated stray call is nearly free while a harness that acts on every
-// memory question takes the full bounded hit.
+// Lifecycle mutation cases are excluded from both the numerator and denominator:
+// save_memory, update_memory, and delete_memory are the intended work there, and
+// the later memory-write-read case is the authoritative persistence check. The
+// exemption is category-specific, so those same writes (and unrelated external
+// actions) remain over-calls on ordinary memory retrieval cases.
+//
+// The penalty scales with the FRACTION of other observed memory cases that
+// over-called, so an isolated stray call is nearly free while a harness that acts
+// on every recall question takes the full bounded hit.
 func MemoryOverCallFactor(perCase []protocol.CaseScore) float64 {
 	observed, overCalled := 0, 0
 	for _, cs := range perCase {
-		if cs.Kind != protocol.KindMemory || !cs.Observed {
+		if cs.Kind != protocol.KindMemory || !cs.Observed || cs.Category == gen.QTLifecycleWrite {
 			continue
 		}
 		observed++
