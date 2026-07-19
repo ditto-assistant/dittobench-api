@@ -10,8 +10,9 @@ All payloads are JSON over HTTP.
 ## Benchmark-version negotiation (validator control plane)
 
 The benchmark contract is a deliberate input, never inferred from a dataset
-hash. A capability-aware validator authenticates to `GET /v1/capabilities`,
-selects a member of `supported_bench_versions`, and sends it as the required
+hash. A capability-aware validator reads `GET /v1/capabilities`, verifies that
+the reported scorer identity matches its signed stack descriptor, selects a
+member of `supported_bench_versions`, and sends it as the required
 integer `bench_version` on `POST /v2/score`. The accepted response, polled job,
 and completed `report.details` all echo the selected value. A validator must
 reject an omitted, unsupported, or contradictory value.

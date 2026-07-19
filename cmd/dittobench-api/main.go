@@ -7,8 +7,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -125,7 +123,6 @@ type server struct {
 	allowPrivate         bool
 	allowScreenedImages  bool
 	requireScreenedImage bool
-	capabilitiesToken    string
 	softwareVersion      string
 	sourceRevision       string
 	limiter              *ratelimit.Limiter
@@ -150,7 +147,6 @@ func main() {
 	allowPrivate := envBool("DITTOBENCH_ALLOW_PRIVATE_HARNESS")
 	allowScreenedImages := envBool("DITTOBENCH_ALLOW_SCREENED_IMAGES")
 	requireScreenedImage := envBool("DITTOBENCH_REQUIRE_SCREENED_IMAGE")
-	capabilitiesToken := strings.TrimSpace(os.Getenv("DITTOBENCH_CAPABILITIES_TOKEN"))
 	softwareVersion := strings.TrimSpace(os.Getenv("DITTOBENCH_SOFTWARE_VERSION"))
 	sourceRevision := strings.TrimSpace(os.Getenv("DITTOBENCH_SOURCE_SHA"))
 	runner.Configure(allowPrivate)
@@ -170,7 +166,6 @@ func main() {
 		allowPrivate:         allowPrivate,
 		allowScreenedImages:  allowScreenedImages,
 		requireScreenedImage: requireScreenedImage,
-		capabilitiesToken:    capabilitiesToken,
 		softwareVersion:      softwareVersion,
 		sourceRevision:       sourceRevision,
 		limiter:              ratelimit.New(submitsPerWindow, submitWindow),
@@ -232,23 +227,14 @@ type capabilitiesResponse struct {
 	SupportedBenchVersions []int  `json:"supported_bench_versions"`
 }
 
-// handleCapabilities is a validator-control-plane endpoint, not a public
-// practice discovery API. An unset token disables it; callers authenticate with
-// the same high-entropy token mounted into the validator and scorer services.
-// Identity is supplied by the immutable release descriptor at deploy time.
-func (s *server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
+// handleCapabilities reports public release metadata to a co-located validator.
+// Identity is supplied by the immutable release descriptor at deploy time and
+// the validator accepts a v3 claim only when both fields match that descriptor.
+// A bearer token would not authenticate the scorer: the scorer itself would hold
+// the token and could use it while lying. Keeping this read-only response
+// secretless avoids an operator cutover without weakening the identity binding.
+func (s *server) handleCapabilities(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
-	if s.capabilitiesToken == "" {
-		writeError(w, http.StatusNotFound, "not found")
-		return
-	}
-	const bearer = "Bearer "
-	auth := r.Header.Get("Authorization")
-	if !strings.HasPrefix(auth, bearer) || !constantTimeEqual(strings.TrimPrefix(auth, bearer), s.capabilitiesToken) {
-		w.Header().Set("WWW-Authenticate", "Bearer")
-		writeError(w, http.StatusUnauthorized, "unauthorized")
-		return
-	}
 	if s.softwareVersion == "" || !canonicalSourceRevision(s.sourceRevision) {
 		writeError(w, http.StatusServiceUnavailable, "scorer release identity unavailable")
 		return
@@ -258,12 +244,6 @@ func (s *server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 		SourceRevision:         s.sourceRevision,
 		SupportedBenchVersions: []int{protocol.BenchVersionV2, protocol.BenchVersionV3},
 	})
-}
-
-func constantTimeEqual(got, want string) bool {
-	gotHash := sha256.Sum256([]byte(got))
-	wantHash := sha256.Sum256([]byte(want))
-	return subtle.ConstantTimeCompare(gotHash[:], wantHash[:]) == 1
 }
 
 func canonicalSourceRevision(value string) bool {
