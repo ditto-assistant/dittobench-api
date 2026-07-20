@@ -31,19 +31,29 @@ v2/v3/v4 bytes and already-recorded scores are byte-identical. What landed:
   to `DITTO_TRANSFORM_AUDIT_ENFORCE` (default OFF, so the published-configuration
   composite stays a pure function of (dataset, transcript)); calibration against a
   champion-competence solver is the gate to flipping it.
-- 4.11 offline ship-gate demonstration: `TestV5ShipGateRegression`
+- 4.11 offline ship gate, two levels. Single-run: `TestV5ShipGateRegression`
   (`internal/scorer`) shows a Unicorn-style leak-router drops from a 0.900 v4-view
   to 0.368 under v5 while an honest harness with the same retrieval stays at 0.921;
   `TestV5RegressionAuroraNine` (`dittobench-datagen/gen`) shows honest 1.000 vs
   leak-router 0.000 on the conversational cases of a real generated v5 dataset.
+  Multi-seed (the offline 4.10 + 4.11 analog): `cmd/v5calibrate` runs harness
+  archetypes against real v5 datasets over 24 rotating seeds through the real
+  scorer, and `TestV5ShipGateMultiSeed` pins the bar: the leak-router (0.292±0.006)
+  and a no-model cleartext parser (0.289±0.004) fall below 0.85 on every seed with
+  conversational-sanity 0.0, while a strong harness sharing the router's retrieval
+  stack but grounding conversation stays at 0.758±0.023 (reaching 0.92) and retains
+  0.94 of its memory mean vs the router's 0.50 -- the counter-guard that the drop is
+  specific to the conversational margin. See `docs/BASELINES-v5-phaseA.md`.
 
 Not yet done (Phase B/C, tracked below): 4.3 non-verbatim rendering, 4.4 live
 passive learning, 4.6 multi-query/temporal-depth, 4.7 efficiency, 4.8 injection
-resistance, 4.9 multi-hop, and the on-model winnability/statistical-power precheck
-runs of 4.10 against the frozen-Qwen reference (which needs the model relay). The
-conversational factor's single-case variance at small run sizes (4.10 statistical
-power) is bounded by giving full runs two declarative chains; it is a candidate for
-the observational-first treatment before the composite fully depends on it.
+resistance, 4.9 multi-hop. The one remaining Phase-A gate is the ON-MODEL
+winnability/statistical-power precheck of 4.10/4.11 against the frozen-Qwen
+reference (`cmd/calibrate` against a running API): it needs the model relay, which
+is unreachable here (no `RELAY_API_KEY`), so v5 Phase A must ship OBSERVATIONAL
+until that run confirms the honest-minus-parser gap on-model and the non-degenerate
+ceiling. The conversational factor's single-case variance at small run sizes (4.10
+statistical power) is bounded by giving full runs two declarative chains.
 
 Goal of v5, stated once: a high leaderboard score must mean an agent behaves like
 a strong Ditto agent in a real chat, not that it reverse-engineered the
