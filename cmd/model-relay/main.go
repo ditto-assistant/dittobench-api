@@ -29,15 +29,29 @@
 //   - RELAY_API_KEY   upstream bearer key for the selected provider (required)
 //   - PORT            listen port (default 11434, the gateway port the sandbox
 //     already expects)
+//
+// Retry env (deployment-tunable, transport-layer only — never touches the pins):
+// a transient upstream failure (dropped connection, read error, 408/429/5xx) is
+// retried with capped exponential backoff+jitter before it is ever counted as an
+// infrastructure_failure, so a flaky provider does not discard whole runs.
+//   - RELAY_RETRY_MAX_ATTEMPTS  total upstream attempts incl. the first (default 6)
+//   - RELAY_RETRY_BASE_MS       first backoff delay in ms (default 200)
+//   - RELAY_RETRY_CAP_MS        ceiling on any single backoff in ms (default 2000)
+//   - RELAY_RETRY_FACTOR        exponential growth per attempt (default 2)
 package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
+	"math"
+	"math/rand"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -131,15 +145,49 @@ const maxResponseBody = 16 << 20
 // it can poison a run total. It is deliberately far above every case budget.
 const maxUsageTokensPerCompletion = 10_000_000
 
+// retryConfig bounds how aggressively the relay re-sends a transiently-failed
+// upstream request before it counts as an infrastructure_failure. The scorer is
+// fail-closed on that counter, so turning a flaky upstream (dropped connections,
+// 429s, 5xx) into a success is what keeps whole runs from being discarded. A
+// zero-value config means maxAttempts==0, i.e. a single shot with no retry — the
+// exact pre-retry behavior, which keeps the relay honest under tests that do not
+// opt in.
+type retryConfig struct {
+	maxAttempts int           // total upstream attempts, including the first
+	base        time.Duration // first backoff delay
+	cap         time.Duration // ceiling on any single backoff delay
+	factor      float64       // exponential growth per attempt
+}
+
+// backoff returns the delay before the next attempt after `attempt` (1-based)
+// has failed: exponential base*factor^(attempt-1), capped, with full jitter in
+// [d/2, d] so a saturated upstream is not hammered in lockstep. The result never
+// exceeds cap.
+func (c retryConfig) backoff(attempt int) time.Duration {
+	d := float64(c.base) * math.Pow(c.factor, float64(attempt-1))
+	if capF := float64(c.cap); c.cap > 0 && d > capF {
+		d = capF
+	}
+	if d <= 0 {
+		return 0
+	}
+	return time.Duration(d/2 + rand.Float64()*(d/2))
+}
+
 type relay struct {
-	provider               string
-	profileRevision        string
-	upstream               string
-	apiKey                 string
-	model                  string
-	thinking               bool
-	pinBody                func(body map[string]any)
-	client                 *http.Client
+	provider        string
+	profileRevision string
+	upstream        string
+	apiKey          string
+	model           string
+	thinking        bool
+	pinBody         func(body map[string]any)
+	client          *http.Client
+	retry           retryConfig
+	// sleep waits for d or until ctx is done, returning ctx.Err() if the
+	// context ends first. Injected so tests can assert backoff bounds without
+	// real delay; nil falls back to the context-aware real sleep.
+	sleep                  func(ctx context.Context, d time.Duration) error
 	requests               atomic.Uint64
 	successes              atomic.Uint64
 	infrastructureFailures atomic.Uint64
@@ -149,6 +197,22 @@ type relay struct {
 	promptBytes            atomic.Uint64
 	completionTokens       atomic.Uint64
 	providerLatencyMs      atomic.Uint64
+}
+
+// ctxSleep is the default relay.sleep: it honors the incoming request deadline
+// so retries never outlive the sandbox's context.
+func ctxSleep(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return ctx.Err()
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
 }
 
 type relayHealth struct {
@@ -184,6 +248,13 @@ func main() {
 		thinking:        lockedThinking,
 		pinBody:         profile.pinBody,
 		client:          &http.Client{Timeout: 300 * time.Second},
+		retry: retryConfig{
+			maxAttempts: envInt("RELAY_RETRY_MAX_ATTEMPTS", 6),
+			base:        time.Duration(envInt("RELAY_RETRY_BASE_MS", 200)) * time.Millisecond,
+			cap:         time.Duration(envInt("RELAY_RETRY_CAP_MS", 2000)) * time.Millisecond,
+			factor:      envFloat("RELAY_RETRY_FACTOR", 2),
+		},
+		sleep: ctxSleep,
 	}
 	if r.apiKey == "" {
 		log.Fatal("RELAY_API_KEY is required")
@@ -232,57 +303,122 @@ func (r *relay) handle(w http.ResponseWriter, req *http.Request) {
 	r.promptBytes.Add(uint64(len(out)))
 	r.requests.Add(1)
 
-	up, err := http.NewRequestWithContext(req.Context(), http.MethodPost, r.upstream, bytes.NewReader(out))
-	if err != nil {
-		http.Error(w, "build upstream request", http.StatusInternalServerError)
-		return
-	}
-	up.Header.Set("Content-Type", "application/json")
-	up.Header.Set("Authorization", "Bearer "+r.apiKey) // never the sandbox's header
-
-	providerStarted := time.Now()
-	resp, err := r.client.Do(up)
-	r.providerLatencyMs.Add(uint64(time.Since(providerStarted).Milliseconds()))
-	if err != nil {
-		r.infrastructureFailures.Add(1)
-		http.Error(w, "upstream unreachable", http.StatusBadGateway)
-		return
-	}
-	defer resp.Body.Close()
-	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody+1))
-	if err != nil {
-		r.infrastructureFailures.Add(1)
-		http.Error(w, "read upstream response", http.StatusBadGateway)
-		return
-	}
-	if len(responseBody) > maxResponseBody {
-		r.infrastructureFailures.Add(1)
-		http.Error(w, "upstream response too large", http.StatusBadGateway)
-		return
-	}
-	if isInfrastructureStatus(resp.StatusCode) {
-		r.infrastructureFailures.Add(1)
-	} else if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
-		var completion struct {
-			Choices []json.RawMessage `json:"choices"`
-			Usage   *providerUsage    `json:"usage"`
+	// One relayed request may take several upstream attempts: a transient
+	// upstream failure (dropped connection, read error, 429, or 5xx) is retried
+	// with capped exponential backoff before it is ever counted as an
+	// infrastructure_failure. `out` is already a buffered []byte, so each attempt
+	// rebuilds a fresh single-use bytes.Reader over the same bytes. The counters
+	// are authoritative-outcome counters: requests is incremented once above, and
+	// infrastructure_failures / successes are incremented exactly once below, on
+	// the final outcome — never per attempt.
+	for attempt := 1; ; attempt++ {
+		up, err := http.NewRequestWithContext(req.Context(), http.MethodPost, r.upstream, bytes.NewReader(out))
+		if err != nil {
+			http.Error(w, "build upstream request", http.StatusInternalServerError)
+			return
 		}
-		if err := json.Unmarshal(responseBody, &completion); err != nil || len(completion.Choices) == 0 {
+		up.Header.Set("Content-Type", "application/json")
+		up.Header.Set("Authorization", "Bearer "+r.apiKey) // never the sandbox's header
+
+		providerStarted := time.Now()
+		resp, err := r.client.Do(up)
+		r.providerLatencyMs.Add(uint64(time.Since(providerStarted).Milliseconds()))
+		if err != nil {
+			// Transport/connection failure — transient, retryable.
+			if r.retryUpstream(req.Context(), attempt, fmt.Sprintf("transport error: %v", err)) {
+				continue
+			}
 			r.infrastructureFailures.Add(1)
-		} else {
-			r.successes.Add(1)
-			if validProviderUsage(completion.Usage) {
-				r.usageAvailable.Add(1)
-				r.promptTokens.Add(uint64(completion.Usage.PromptTokens))
-				r.completionTokens.Add(uint64(completion.Usage.CompletionTokens))
+			http.Error(w, "upstream unreachable", http.StatusBadGateway)
+			return
+		}
+		responseBody, rerr := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody+1))
+		resp.Body.Close()
+		if rerr != nil {
+			// Truncated/failed body read — transient, retryable.
+			if r.retryUpstream(req.Context(), attempt, "read upstream response error") {
+				continue
+			}
+			r.infrastructureFailures.Add(1)
+			http.Error(w, "read upstream response", http.StatusBadGateway)
+			return
+		}
+		if len(responseBody) > maxResponseBody {
+			// Oversized reply is a deterministic protocol failure, not transient.
+			r.infrastructureFailures.Add(1)
+			http.Error(w, "upstream response too large", http.StatusBadGateway)
+			return
+		}
+		if isRetryableStatus(resp.StatusCode) {
+			// 408/429/5xx — transient upstream saturation/outage, retryable.
+			if r.retryUpstream(req.Context(), attempt, fmt.Sprintf("upstream status %d", resp.StatusCode)) {
+				continue
+			}
+			// Attempts exhausted (or deadline): the existing infra path, exactly
+			// once, forwarding the real upstream response as before.
+			r.infrastructureFailures.Add(1)
+			r.forward(w, resp, responseBody)
+			return
+		}
+		// Terminal outcomes (never retried): a deterministic client error
+		// (401/403 count as infra as before, other 4xx pass straight through),
+		// or a 2xx that is a real completion (success) or a malformed one (infra).
+		if isInfrastructureStatus(resp.StatusCode) {
+			r.infrastructureFailures.Add(1)
+		} else if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+			var completion struct {
+				Choices []json.RawMessage `json:"choices"`
+				Usage   *providerUsage    `json:"usage"`
+			}
+			if err := json.Unmarshal(responseBody, &completion); err != nil || len(completion.Choices) == 0 {
+				r.infrastructureFailures.Add(1)
 			} else {
-				r.usageUnavailable.Add(1)
+				r.successes.Add(1)
+				if validProviderUsage(completion.Usage) {
+					r.usageAvailable.Add(1)
+					r.promptTokens.Add(uint64(completion.Usage.PromptTokens))
+					r.completionTokens.Add(uint64(completion.Usage.CompletionTokens))
+				} else {
+					r.usageUnavailable.Add(1)
+				}
 			}
 		}
+		r.forward(w, resp, responseBody)
+		return
 	}
+}
+
+// forward relays the upstream status, Content-Type, and body to the sandbox.
+func (r *relay) forward(w http.ResponseWriter, resp *http.Response, body []byte) {
 	w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
 	w.WriteHeader(resp.StatusCode)
-	_, _ = w.Write(responseBody)
+	_, _ = w.Write(body)
+}
+
+// retryUpstream reports whether the caller should re-attempt the upstream call.
+// It returns false — meaning "take the terminal path now" — when attempts are
+// exhausted or the request context ends during backoff. Backoff is gated on the
+// context so retries never outlive the sandbox deadline. Nothing here touches the
+// counters; the caller records the single authoritative outcome. Logs are
+// low-level and never include the body, key, or Authorization header.
+func (r *relay) retryUpstream(ctx context.Context, attempt int, reason string) bool {
+	if attempt >= r.retry.maxAttempts {
+		if r.retry.maxAttempts > 1 {
+			log.Printf("model-relay: upstream retries exhausted after %d attempts (%s)", attempt, reason)
+		}
+		return false
+	}
+	d := r.retry.backoff(attempt)
+	log.Printf("model-relay: retrying upstream attempt %d/%d in %s (%s)", attempt+1, r.retry.maxAttempts, d, reason)
+	sleep := r.sleep
+	if sleep == nil {
+		sleep = ctxSleep
+	}
+	if err := sleep(ctx, d); err != nil {
+		log.Printf("model-relay: upstream retry aborted, context ended (%s)", reason)
+		return false
+	}
+	return true
 }
 
 type providerUsage struct {
@@ -306,6 +442,19 @@ func validProviderUsage(usage *providerUsage) bool {
 func isInfrastructureStatus(status int) bool {
 	switch status {
 	case http.StatusUnauthorized, http.StatusForbidden, http.StatusRequestTimeout, http.StatusTooManyRequests:
+		return true
+	default:
+		return status >= http.StatusInternalServerError
+	}
+}
+
+// isRetryableStatus is the transient subset of the infrastructure statuses:
+// server-side timeouts (408), rate limits (429), and any 5xx are worth another
+// attempt. 401/403 are deterministic (bad key / forbidden) and stay terminal —
+// they still count as infrastructure exactly once via isInfrastructureStatus.
+func isRetryableStatus(status int) bool {
+	switch status {
+	case http.StatusRequestTimeout, http.StatusTooManyRequests:
 		return true
 	default:
 		return status >= http.StatusInternalServerError
@@ -336,6 +485,24 @@ func (r *relay) health(w http.ResponseWriter, _ *http.Request) {
 func envOr(name, def string) string {
 	if v := strings.TrimSpace(os.Getenv(name)); v != "" {
 		return v
+	}
+	return def
+}
+
+func envInt(name string, def int) int {
+	if v := strings.TrimSpace(os.Getenv(name)); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return def
+}
+
+func envFloat(name string, def float64) float64 {
+	if v := strings.TrimSpace(os.Getenv(name)); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
+		}
 	}
 	return def
 }
