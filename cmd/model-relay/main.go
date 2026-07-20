@@ -39,6 +39,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/ditto-assistant/dittobench-api/internal/llm"
@@ -114,13 +115,30 @@ const lockedThinking = false
 // maxBody bounds a relayed request body; chat requests are prompts, not blobs.
 const maxBody = 4 << 20
 
+// maxResponseBody bounds the upstream completion before it is inspected and
+// forwarded. The locked model is non-streaming and benchmark replies are small;
+// a response above this limit is an upstream protocol failure, not a usable
+// completion.
+const maxResponseBody = 16 << 20
+
 type relay struct {
-	upstream string
-	apiKey   string
-	model    string
-	thinking bool
-	pinBody  func(body map[string]any)
-	client   *http.Client
+	upstream               string
+	apiKey                 string
+	model                  string
+	thinking               bool
+	pinBody                func(body map[string]any)
+	client                 *http.Client
+	requests               atomic.Uint64
+	successes              atomic.Uint64
+	infrastructureFailures atomic.Uint64
+}
+
+type relayHealth struct {
+	AccountingVersion      int    `json:"accounting_version"`
+	Status                 string `json:"status"`
+	Requests               uint64 `json:"requests"`
+	Successes              uint64 `json:"successes"`
+	InfrastructureFailures uint64 `json:"infrastructure_failures"`
 }
 
 func main() {
@@ -145,10 +163,7 @@ func main() {
 	// and OPENAI_BASE_URL-style clients work unchanged.
 	mux.HandleFunc("POST /v1/chat/completions", r.handle)
 	mux.HandleFunc("POST /chat/completions", r.handle)
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
-	})
+	mux.HandleFunc("GET /health", r.health)
 	addr := ":" + envOr("PORT", "11434")
 	log.Printf("model-relay on %s -> %s (model pinned to %s)", addr, r.upstream, r.model)
 	log.Fatal(http.ListenAndServe(addr, mux))
@@ -184,6 +199,7 @@ func (r *relay) handle(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "marshal body", http.StatusInternalServerError)
 		return
 	}
+	r.requests.Add(1)
 
 	up, err := http.NewRequestWithContext(req.Context(), http.MethodPost, r.upstream, bytes.NewReader(out))
 	if err != nil {
@@ -195,13 +211,57 @@ func (r *relay) handle(w http.ResponseWriter, req *http.Request) {
 
 	resp, err := r.client.Do(up)
 	if err != nil {
+		r.infrastructureFailures.Add(1)
 		http.Error(w, "upstream unreachable", http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
+	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody+1))
+	if err != nil {
+		r.infrastructureFailures.Add(1)
+		http.Error(w, "read upstream response", http.StatusBadGateway)
+		return
+	}
+	if len(responseBody) > maxResponseBody {
+		r.infrastructureFailures.Add(1)
+		http.Error(w, "upstream response too large", http.StatusBadGateway)
+		return
+	}
+	if isInfrastructureStatus(resp.StatusCode) {
+		r.infrastructureFailures.Add(1)
+	} else if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+		var completion struct {
+			Choices []json.RawMessage `json:"choices"`
+		}
+		if err := json.Unmarshal(responseBody, &completion); err != nil || len(completion.Choices) == 0 {
+			r.infrastructureFailures.Add(1)
+		} else {
+			r.successes.Add(1)
+		}
+	}
 	w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
 	w.WriteHeader(resp.StatusCode)
-	_, _ = io.Copy(w, resp.Body)
+	_, _ = w.Write(responseBody)
+}
+
+func isInfrastructureStatus(status int) bool {
+	switch status {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusRequestTimeout, http.StatusTooManyRequests:
+		return true
+	default:
+		return status >= http.StatusInternalServerError
+	}
+}
+
+func (r *relay) health(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(relayHealth{
+		AccountingVersion:      1,
+		Status:                 "ok",
+		Requests:               r.requests.Load(),
+		Successes:              r.successes.Load(),
+		InfrastructureFailures: r.infrastructureFailures.Load(),
+	})
 }
 
 func envOr(name, def string) string {
