@@ -8,23 +8,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"strings"
 
 	"github.com/ditto-assistant/dittobench-api/internal/llm"
 	"github.com/ditto-assistant/dittobench-datagen/protocol"
 )
 
 const (
-	FormulaVersion          = "v5-prompt-dominant-asymmetric-power-v1"
-	PromptTokenWeight       = 1.0
-	CompletionTokenWeight   = 0.25
-	RewardExponent          = 0.25
-	PenaltyExponent         = 0.50
-	MinMultiplier           = 0.75
-	MinimumComposite        = 0.80
-	MinimumToolMean         = 0.70
-	MinimumMemoryMean       = 0.70
-	MinimumResponseCoverage = 0.95
+	FormulaVersion   = "v5-relay-token-waste-p90-v1"
+	BudgetPercentile = 0.90
+	MaximumPenalty   = 0.10
+	MinMultiplier    = 1 - MaximumPenalty
 )
 
 type Baseline struct {
@@ -52,6 +45,7 @@ type Manifest struct {
 	SchemaVersion      int                  `json:"schema_version"`
 	FormulaVersion     string               `json:"formula_version"`
 	BenchVersion       int                  `json:"bench_version"`
+	ScoringEnabled     bool                 `json:"scoring_enabled"`
 	DatasetKnownVector string               `json:"dataset_known_vector"`
 	StarterKitRevision string               `json:"starter_kit_revision"`
 	Calibration        []CalibrationDataset `json:"calibration_datasets"`
@@ -68,7 +62,7 @@ func mustManifest(body []byte) Manifest {
 	if err := json.Unmarshal(body, &manifest); err != nil {
 		panic(fmt.Sprintf("invalid embedded token baseline manifest: %v", err))
 	}
-	if manifest.SchemaVersion != 1 || manifest.FormulaVersion != FormulaVersion || manifest.BenchVersion != protocol.BenchVersionV5 {
+	if manifest.SchemaVersion != 2 || manifest.FormulaVersion != FormulaVersion || manifest.BenchVersion != protocol.BenchVersionV5 {
 		panic("embedded token baseline manifest has incompatible contract metadata")
 	}
 	return manifest
@@ -85,6 +79,9 @@ func ManifestSnapshot() Manifest {
 // size on both certified provider profiles. Until then v5 remains hidden from
 // capability negotiation and any direct v5 report fails neutral.
 func ProductionReady() bool {
+	if !productionManifest.ScoringEnabled {
+		return false
+	}
 	required := []struct {
 		provider string
 		revision string
@@ -113,6 +110,9 @@ func ProductionReady() bool {
 }
 
 func Lookup(runSize string, usage protocol.TokenUsage) (Baseline, bool) {
+	if !productionManifest.ScoringEnabled {
+		return Baseline{}, false
+	}
 	for _, b := range productionManifest.Baselines {
 		if b.BenchVersion == protocol.BenchVersionV5 && b.RunSize == runSize &&
 			b.Provider == usage.Provider && b.ProfileRevision == usage.ProfileRevision &&
@@ -124,108 +124,60 @@ func Lookup(runSize string, usage protocol.TokenUsage) (Baseline, bool) {
 }
 
 func validBaseline(b Baseline) bool {
-	return b.ID != "" && b.Samples >= 3 && b.Aggregation == "median" &&
+	return b.ID != "" && b.Samples >= 20 && b.Aggregation == "nearest_rank_p90" &&
 		b.PromptTokens > 0 && b.CompletionTokens > 0 &&
 		b.TotalTokens == b.PromptTokens+b.CompletionTokens && b.StarterKitRevision != ""
 }
 
-// ResponseCoverage is the share of benchmark cases that produced a visible
-// user-facing answer. Miner-reported token fields are intentionally ignored.
-func ResponseCoverage(transcripts []protocol.RunResponse) float64 {
-	if len(transcripts) == 0 {
-		return 0
-	}
-	visible := 0
-	for _, response := range transcripts {
-		if strings.TrimSpace(response.FinalText) != "" || strings.TrimSpace(response.Answer) != "" {
-			visible++
-		}
-	}
-	return float64(visible) / float64(len(transcripts))
-}
-
 // Apply returns the complete audit record and mutates no report. Callers assign
 // AdjustedComposite to ScoreReport.Composite only for bench v5.
-func Apply(raw protocol.ScoreReport, usage protocol.TokenUsage, baseline *Baseline, responseCoverage float64) protocol.TokenEfficiency {
+func Apply(raw protocol.ScoreReport, usage protocol.TokenUsage, baseline *Baseline) protocol.TokenEfficiency {
 	result := protocol.TokenEfficiency{
 		FormulaVersion:           FormulaVersion,
+		BudgetPercentile:         BudgetPercentile,
 		ObservedPromptTokens:     usage.PromptTokens,
 		ObservedCompletionTokens: usage.CompletionTokens,
 		ObservedTotalTokens:      usage.TotalTokens,
-		ObservedWeightedTokens:   WeightedTokens(usage.PromptTokens, usage.CompletionTokens),
-		PromptTokenWeight:        PromptTokenWeight,
-		CompletionTokenWeight:    CompletionTokenWeight,
-		RewardExponent:           RewardExponent,
-		PenaltyExponent:          PenaltyExponent,
+		MaximumPenalty:           MaximumPenalty,
 		MinimumMultiplier:        MinMultiplier,
 		Multiplier:               1,
 		RawComposite:             raw.Composite,
 		AdjustedComposite:        raw.Composite,
-		MinimumComposite:         MinimumComposite,
-		MinimumToolMean:          MinimumToolMean,
-		MinimumMemoryMean:        MinimumMemoryMean,
-		MinimumResponseCoverage:  MinimumResponseCoverage,
-		ResponseCoverage:         responseCoverage,
+		DecisionReason:           "within_budget",
 	}
 
-	switch {
-	case raw.Composite < MinimumComposite:
-		result.EligibilityReason = "raw_composite_below_floor"
-	case raw.ToolMean < MinimumToolMean:
-		result.EligibilityReason = "tool_mean_below_floor"
-	case raw.MemoryMean < MinimumMemoryMean:
-		result.EligibilityReason = "memory_mean_below_floor"
-	case responseCoverage < MinimumResponseCoverage:
-		result.EligibilityReason = "response_coverage_below_floor"
-	default:
-		result.QualityEligible = true
-		result.EligibilityReason = "eligible"
-	}
 	if !ValidUsage(usage) {
-		if result.QualityEligible {
-			result.EligibilityReason = "token_telemetry_unavailable"
-		}
+		result.DecisionReason = "token_telemetry_unavailable"
 		return result
 	}
 	if baseline == nil || !validBaseline(*baseline) {
-		if result.QualityEligible {
-			result.EligibilityReason = "baseline_unavailable"
-		}
+		result.DecisionReason = "baseline_unavailable"
 		return result
 	}
 	result.BaselineID = baseline.ID
 	result.BaselinePromptTokens = baseline.PromptTokens
 	result.BaselineCompletionTokens = baseline.CompletionTokens
 	result.BaselineTotalTokens = baseline.TotalTokens
-	result.BaselineWeightedTokens = WeightedTokens(baseline.PromptTokens, baseline.CompletionTokens)
-
-	ratio := result.BaselineWeightedTokens / result.ObservedWeightedTokens
-	if ratio >= 1 {
-		if !result.QualityEligible {
-			// Efficiency cannot rescue low-quality or incomplete answers.
-			return result
-		}
-		// Below baseline, keep rewarding genuine prompt-efficiency improvements.
-		// The fourth root is deliberately unbounded but grows slowly.
-		result.Multiplier = math.Pow(ratio, RewardExponent)
-	} else {
-		// Above baseline, retain a bounded penalty for every report, including
-		// low-quality ones, so context stuffing never escapes its cost.
-		result.Multiplier = math.Max(MinMultiplier, math.Pow(ratio, PenaltyExponent))
-	}
-	if math.IsNaN(result.Multiplier) || math.IsInf(result.Multiplier, 0) {
-		result.Multiplier = 1
-		result.EligibilityReason = "token_transform_unavailable"
+	if usage.TotalTokens <= baseline.TotalTokens {
 		return result
 	}
+
+	ratio := float64(usage.TotalTokens) / float64(baseline.TotalTokens)
+	result.ExcessRatio = ratio - 1
+	// A one-sided rational curve is neutral through the generous p90 budget,
+	// then approaches (but never crosses) the 0.90 floor as waste grows.
+	result.Multiplier = 1 - MaximumPenalty*(result.ExcessRatio/(1+result.ExcessRatio))
+	if math.IsNaN(result.Multiplier) || math.IsInf(result.Multiplier, 0) {
+		result.Multiplier = 1
+		result.ExcessRatio = 0
+		result.DecisionReason = "token_transform_unavailable"
+		return result
+	}
+	result.Multiplier = math.Max(MinMultiplier, result.Multiplier)
+	result.PenaltyApplied = true
+	result.DecisionReason = "above_budget"
 	result.AdjustedComposite = round6(raw.Composite * result.Multiplier)
 	return result
-}
-
-// WeightedTokens is the prompt-dominant v5 cost. Completion tokens retain a
-// small cost without making normal helpful prose the main optimization target.
-func WeightedTokens(prompt, completion uint64) float64 {
-	return PromptTokenWeight*float64(prompt) + CompletionTokenWeight*float64(completion)
 }
 
 // ValidUsage applies the same completeness and arithmetic checks to scoring

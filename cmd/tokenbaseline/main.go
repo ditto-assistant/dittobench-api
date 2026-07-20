@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"math"
 	"os"
 	"sort"
 
@@ -64,8 +65,8 @@ func main() {
 
 	manifest.Baselines = manifest.Baselines[:0]
 	for key, reports := range groups {
-		if len(reports) != 5 {
-			fatalf("%s/%s/%s: need exactly 5 pinned calibration runs, got %d", key.Provider, key.ProfileRevision, key.RunSize, len(reports))
+		if len(reports) != 20 {
+			fatalf("%s/%s/%s: need exactly 20 pinned calibration runs, got %d", key.Provider, key.ProfileRevision, key.RunSize, len(reports))
 		}
 		seen := map[int64]bool{}
 		for _, report := range reports {
@@ -77,10 +78,8 @@ func main() {
 		sort.Slice(reports, func(i, j int) bool {
 			a := reports[i].Details.TokenUsage
 			b := reports[j].Details.TokenUsage
-			aw := efficiency.WeightedTokens(a.PromptTokens, a.CompletionTokens)
-			bw := efficiency.WeightedTokens(b.PromptTokens, b.CompletionTokens)
-			if aw != bw {
-				return aw < bw
+			if a.TotalTokens != b.TotalTokens {
+				return a.TotalTokens < b.TotalTokens
 			}
 			if a.PromptTokens != b.PromptTokens {
 				return a.PromptTokens < b.PromptTokens
@@ -90,12 +89,13 @@ func main() {
 			}
 			return reports[i].Seed < reports[j].Seed
 		})
-		median := reports[len(reports)/2].Details.TokenUsage
+		p90Index := int(math.Ceil(efficiency.BudgetPercentile*float64(len(reports)))) - 1
+		budget := reports[p90Index].Details.TokenUsage
 		baseline := efficiency.Baseline{
 			BenchVersion: protocol.BenchVersionV5, RunSize: key.RunSize,
 			Provider: key.Provider, ProfileRevision: key.ProfileRevision, Model: key.Model,
-			PromptTokens: median.PromptTokens, CompletionTokens: median.CompletionTokens,
-			TotalTokens: median.TotalTokens, Samples: len(reports), Aggregation: "median",
+			PromptTokens: budget.PromptTokens, CompletionTokens: budget.CompletionTokens,
+			TotalTokens: budget.TotalTokens, Samples: len(reports), Aggregation: "nearest_rank_p90",
 			StarterKitRevision: manifest.StarterKitRevision,
 		}
 		baseline.ID = baselineID(baseline)
@@ -145,7 +145,7 @@ func baselineID(b efficiency.Baseline) string {
 	canonical := fmt.Sprintf("%s:%s:%s:%s:%s:%d:%d:%d:%s", efficiency.FormulaVersion, b.RunSize, b.Provider,
 		b.ProfileRevision, b.Model, b.PromptTokens, b.CompletionTokens, b.TotalTokens, b.StarterKitRevision)
 	sum := sha256.Sum256([]byte(canonical))
-	return "v5-starter-median-" + hex.EncodeToString(sum[:8])
+	return "v5-starter-p90-" + hex.EncodeToString(sum[:8])
 }
 
 func fatalf(format string, args ...any) {

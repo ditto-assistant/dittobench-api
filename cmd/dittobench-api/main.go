@@ -1336,16 +1336,11 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	if req.BenchVersion == protocol.BenchVersionV5 {
 		rawComposite := report.Composite
 		rawStderr := report.CompositeStderr
-		responses := make([]protocol.RunResponse, 0, len(transcripts))
-		for _, transcript := range transcripts {
-			responses = append(responses, transcript.Response)
-		}
-		coverage := efficiency.ResponseCoverage(responses)
 		var baseline *efficiency.Baseline
 		if found, ok := efficiency.Lookup(req.RunSize, tokenUsage); ok {
 			baseline = &found
 		}
-		decision := efficiency.Apply(report, tokenUsage, baseline, coverage)
+		decision := efficiency.Apply(report, tokenUsage, baseline)
 		decision.RawCompositeStderr = rawStderr
 		decision.AdjustedCompositeStderr = math.Round(rawStderr*decision.Multiplier*1e6) / 1e6
 		report.RawComposite = rawComposite
