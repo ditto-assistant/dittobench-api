@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"errors"
+	"testing"
+
+	"github.com/ditto-assistant/dittobench-datagen/protocol"
+)
 
 func TestValidateScreenedImage(t *testing.T) {
 	valid := submitRequest{
@@ -63,6 +68,36 @@ func TestValidateBenchmarkImageContract(t *testing.T) {
 	}
 	if msg := validateBenchmarkImageContract(submitRequest{BenchVersion: 2, TarballURL: "https://example.com/source.tgz"}); msg != "" {
 		t.Fatalf("benchmark v2 source build rejected: %s", msg)
+	}
+	// v4 is the current production contract: it must be gated exactly like v3, not
+	// exempted by a single-version check. A v4 lease with no image previously fell
+	// through to a validator-side docker build (the "Building harness" regression).
+	if msg := validateBenchmarkImageContract(submitRequest{BenchVersion: protocol.BenchVersionV4, TarballURL: "https://example.com/source.tgz"}); msg == "" {
+		t.Fatal("benchmark v4 allowed an untrusted source build")
+	}
+	if msg := validateBenchmarkImageContract(submitRequest{BenchVersion: protocol.BenchVersionV4, ScreenedImageURL: "https://example.com/image.tar"}); msg != "" {
+		t.Fatalf("benchmark v4 screened image rejected: %s", msg)
+	}
+}
+
+func TestSandboxStartInfraFailure(t *testing.T) {
+	// A missing sandbox egress network is the validator's own fault, not the
+	// agent's: it must be retryable validator_infrastructure so the worker backs
+	// off rather than blaming the miner and re-leasing in a tight loop.
+	netErr := errors.New("container start failed: docker run failed: ... failed to set up container networking: network ditto-sandbox not found")
+	failure := sandboxStartInfraFailure(netErr)
+	if failure == nil {
+		t.Fatal("missing sandbox network was not classified as infrastructure")
+	}
+	if failure.Kind != "validator_infrastructure" || !failure.Retryable || failure.Code != "sandbox_network_unavailable" {
+		t.Fatalf("unexpected infra classification: %+v", failure)
+	}
+	// An ordinary harness crash stays a submission failure (nil classifier).
+	if got := sandboxStartInfraFailure(errors.New("exit status 1: panic in harness")); got != nil {
+		t.Fatalf("harness crash misclassified as infrastructure: %+v", got)
+	}
+	if got := sandboxStartInfraFailure(nil); got != nil {
+		t.Fatalf("nil error produced a failure: %+v", got)
 	}
 }
 
