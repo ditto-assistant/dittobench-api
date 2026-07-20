@@ -240,7 +240,7 @@ func (s *server) handleCapabilities(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, capabilitiesResponse{
 		SoftwareVersion:        s.softwareVersion,
 		SourceRevision:         s.sourceRevision,
-		SupportedBenchVersions: []int{protocol.BenchVersionV2, protocol.BenchVersionV3, protocol.BenchVersionV4},
+		SupportedBenchVersions: []int{protocol.BenchVersionV2, protocol.BenchVersionV3, protocol.BenchVersionV4, protocol.BenchVersionV5},
 	})
 }
 
@@ -1296,6 +1296,9 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		lg := memSuite.LexicalGap
 		report.Details.LexicalGap = &lg
 	}
+	// v5 conversational-sanity metric (first-class on the report; mirrored into the
+	// details blob so it survives the platform wire alongside the other factors).
+	report.Details.ConversationalSanity = report.ConversationalSanity
 	report.Details.MetamorphicConsistency = scorer.MetamorphicConsistency(perCase)
 	if tr, pairs := scorer.TransformRobustness(perCase); tr != nil {
 		report.Details.TransformRobustness = tr

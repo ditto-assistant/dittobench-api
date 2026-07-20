@@ -16,6 +16,7 @@ package scorer
 import (
 	"fmt"
 	"math"
+	"os"
 	"sort"
 	"strings"
 
@@ -624,6 +625,10 @@ const boundedGateFloor = 0.75
 // Two tiers. The bounded style factors multiply and are then floored at
 // boundedGateFloor. The canary integrity factor is applied afterwards and is not
 // floored, so a genuine cross-user leak still hard-caps the composite.
+//
+// The v5 conversational-sanity factor is a THIRD tier, layered on in
+// AggregateForVersion for v5 only (CompositeGateForVersion), so v3/v4 bytes and
+// already-recorded scores stay exactly as they were.
 func CompositeGate(perCase []protocol.CaseScore) float64 {
 	bounded := ToolEfficiencyFactor(perCase) *
 		MetamorphicConsistencyFactor(perCase) *
@@ -632,6 +637,167 @@ func CompositeGate(perCase []protocol.CaseScore) float64 {
 		bounded = boundedGateFloor
 	}
 	return round6(bounded * CanaryIntegrityFactor(perCase))
+}
+
+// convSanityFloor is the deepest the conversational-sanity factor can drop the
+// composite. It bites HARDER than the bounded efficiency floors (0.85 tool
+// over-call, 0.90 memory over-call) and than the bounded-product floor (0.75),
+// because a leaked or irrelevant reply is a correctness failure, not a
+// style-of-work waste. Set at 0.5 so a run that wholly fails conversational
+// sanity cannot reach champion composite regardless of memory accuracy (a champion
+// mean ~0.9 caps at ~0.45), while an honest harness -- which passes conversational
+// sanity -- takes no penalty at all (factor 1.0). Applied as its OWN tier outside
+// boundedGateFloor, like the canary disqualifier.
+const convSanityFloor = 0.5
+
+// conversationalSlices are the three v5 categories the first-class
+// conversational-sanity metric is a CONJUNCTION over: greeting non-leak,
+// declarative acknowledgement, and behavior-change application. The metric is the
+// weakest link across the slices that ran, so a canned reply that clears the
+// greeting slice (a fixed "Got it!" passes the non-leak floor) cannot bank it and
+// dilute its failures on the other two (v5 plan 4.1 interlock).
+var conversationalSlices = []string{
+	gen.QTChitchat,
+	gen.QTDeclarativeAck,
+	gen.QTDeclarativeBehavior,
+}
+
+// sliceMean returns the mean correctness over the memory cases of one category,
+// or nil when none ran.
+func sliceMean(perCase []protocol.CaseScore, category string) *float64 {
+	var sum float64
+	var n int
+	for _, cs := range perCase {
+		if cs.Kind == protocol.KindMemory && cs.Category == category {
+			if cs.Correct {
+				sum++
+			}
+			n++
+		}
+	}
+	if n == 0 {
+		return nil
+	}
+	v := sum / float64(n)
+	return &v
+}
+
+// ConversationalSanity is the first-class v5 conversational grounding metric: the
+// weakest-link (minimum) pass rate across the conversationalSlices that ran. It is
+// a conjunction so a low score on any one slice cannot hide inside the others (or
+// inside the memory mean). Returns nil when no conversational case ran, so pre-v5
+// contracts and runs that drew none are unaffected. A pure function of
+// (dataset, transcript): any third party recomputes it.
+func ConversationalSanity(perCase []protocol.CaseScore) *float64 {
+	min := 1.0
+	any := false
+	for _, cat := range conversationalSlices {
+		if m := sliceMean(perCase, cat); m != nil {
+			any = true
+			if *m < min {
+				min = *m
+			}
+		}
+	}
+	if !any {
+		return nil
+	}
+	v := round6(min)
+	return &v
+}
+
+// ConversationalSanityFactor is the v5 composite multiplier from the
+// conversational-sanity metric: a bounded, saturating penalty that is 1.0 when the
+// metric is perfect (an honest harness) and drops to convSanityFloor when it is
+// zero (a router that leaks or fails to ground every conversational turn).
+// Returns 1.0 (no effect) when no conversational case ran. Pure function of
+// perCase.
+func ConversationalSanityFactor(perCase []protocol.CaseScore) float64 {
+	rate := ConversationalSanity(perCase)
+	if rate == nil {
+		return 1.0
+	}
+	return round6(convSanityFloor + (1-convSanityFloor)*(*rate))
+}
+
+// Transform-audit enforcement (v5 plan 4.5). The reproduce-under-transform audit
+// (persona/transform.go) has shipped OBSERVATIONAL since v3: TransformRobustness
+// and the directional AuditPairs counts are published in RunDetails but never fold
+// into the composite. This wires the gate so it CAN bite, keyed on the directional
+// brittleness signal (base-only minus transform-only), which the 2026-07-18
+// calibration showed separates a surface-keyed harness (directional) from a noisy
+// honest one (symmetric).
+const (
+	// transformAuditMaxPenalty is the deepest the audit factor can drop the
+	// composite. A bounded style penalty, same magnitude family as the other gates.
+	transformAuditMaxPenalty = 0.15
+	// transformAuditMinPairs is the fewest audit pairs a run needs before the gate
+	// acts, so a one- or two-pair run cannot swing the composite on noise.
+	transformAuditMinPairs = 4
+	// transformAuditSaturate is the directional excess (base-only minus
+	// transform-only) at or above which the penalty saturates.
+	transformAuditSaturate = 3
+)
+
+// transformAuditEnforced reports whether the reproduce-under-transform audit is
+// wired to GATE the composite, via the DITTO_TRANSFORM_AUDIT_ENFORCE environment
+// variable. Default false: the gate is BUILT (TransformAuditFactor is a tested pure
+// function) but ships observational, with no composite effect, until the
+// champion-population false-positive posture is calibrated against a
+// champion-competence local solver (v5 plan 4.5 / open risk). Reproducibility note:
+// in the default (published) configuration the factor is 1.0, so the composite
+// stays a pure function of (dataset, transcript); enabling enforcement is a
+// deliberate, platform-wide, documented contract change applied uniformly across
+// the k=3 validators, not a per-run secret.
+func transformAuditEnforced() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("DITTO_TRANSFORM_AUDIT_ENFORCE"))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+// TransformAuditFactor is the composite multiplier from the reproduce-under-
+// transform audit's DIRECTIONAL brittleness. It is 1.0 (no effect) unless
+// enforcement is enabled AND the run shows enough audit pairs AND positive
+// directional brittleness (more base-only than transform-only splits) -- the
+// surface-keyed-lookup signature. A noisy honest model, whose discordant pairs are
+// symmetric, has directional excess ~0 and is not penalized. Pure function of
+// (perCase, enforced), so passing enforced explicitly keeps it testable and keeps
+// the default-configuration composite reproducible.
+func TransformAuditFactor(perCase []protocol.CaseScore, enforced bool) float64 {
+	if !enforced {
+		return 1.0
+	}
+	ap := AuditPairs(perCase)
+	if ap.Total() < transformAuditMinPairs {
+		return 1.0
+	}
+	dir := ap.BaseOnly - ap.TransformOnly
+	if dir <= 0 {
+		return 1.0
+	}
+	frac := float64(dir) / float64(transformAuditSaturate)
+	if frac > 1 {
+		frac = 1
+	}
+	return round6(1 - frac*transformAuditMaxPenalty)
+}
+
+// CompositeGateForVersion is CompositeGate plus the version-gated v5 tiers: the
+// conversational-sanity factor (4.1) and the transform-audit enforcement factor
+// (4.5). Both are applied OUTSIDE boundedGateFloor, like the canary disqualifier,
+// so a conversational-sanity failure can pull the composite below the bounded
+// floor. For pre-v5 versions this is exactly CompositeGate, so v3/v4 scores are
+// byte-identical.
+func CompositeGateForVersion(perCase []protocol.CaseScore, benchVersion int) float64 {
+	gate := CompositeGate(perCase)
+	if benchVersion >= protocol.BenchVersionV5 {
+		gate = round6(gate *
+			ConversationalSanityFactor(perCase) *
+			TransformAuditFactor(perCase, transformAuditEnforced()))
+	}
+	return gate
 }
 
 // MemoryOverCallFactor is the memory over-call multiplier (v3 B4). A pure-memory
@@ -887,10 +1053,12 @@ func AggregateForVersion(runID string, perCase []protocol.CaseScore, benchVersio
 		composite = memMean
 	}
 	// Apply the composite gate. Computed ONCE here and reused for the standard
-	// error below, so the two can never drift apart.
+	// error below, so the two can never drift apart. v5 layers the
+	// conversational-sanity and transform-audit tiers on top of the v3 gate
+	// (CompositeGateForVersion); pre-v5 versions get exactly the v3 gate.
 	gate := 1.0
 	if benchVersion >= protocol.BenchVersionV3 {
-		gate = CompositeGate(perCase)
+		gate = CompositeGateForVersion(perCase, benchVersion)
 	}
 	composite = round6(composite * gate)
 
@@ -931,7 +1099,7 @@ func AggregateForVersion(runID string, perCase []protocol.CaseScore, benchVersio
 	// applied to the composite above.
 	compositeStderr *= gate
 
-	return protocol.ScoreReport{
+	report := protocol.ScoreReport{
 		RunID:           runID,
 		GeneratedAt:     protocol.DatasetEpochRFC3339,
 		Composite:       composite,
@@ -943,6 +1111,13 @@ func AggregateForVersion(runID string, perCase []protocol.CaseScore, benchVersio
 		PerCase:         perCase,
 		PerCategory:     perCat,
 	}
+	// Publish the v5 conversational-sanity metric as a first-class field so a low
+	// score cannot hide inside the memory mean. nil (omitted) for pre-v5 runs and
+	// runs that drew no conversational case.
+	if benchVersion >= protocol.BenchVersionV5 {
+		report.ConversationalSanity = ConversationalSanity(perCase)
+	}
+	return report
 }
 
 func scoreCase(c protocol.ToolCase, resp protocol.RunResponse, ok bool, scope Scope) protocol.CaseScore {
