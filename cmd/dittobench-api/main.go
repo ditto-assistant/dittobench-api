@@ -439,10 +439,42 @@ func validateScreenedImageAccess(req submitRequest, allowScreenedImages bool) st
 }
 
 func validateBenchmarkImageContract(req submitRequest) string {
-	if req.BenchVersion == 3 && req.ScreenedImageURL == "" {
-		return "benchmark version 3 requires a screener-built image; source builds are disabled"
+	// Every post-legacy benchmark (v3 and up) is screened-image only: the miner's
+	// crate is built once by the trusted screener, never on a validator. Gating
+	// on a single version (== 3) silently exempted v4 — the current production
+	// contract — so a v4 lease with no image fell through to a validator-side
+	// docker build. Express the ban for the whole era so the next bump inherits
+	// it automatically.
+	if req.BenchVersion >= protocol.BenchVersionV3 && req.ScreenedImageURL == "" {
+		return fmt.Sprintf(
+			"benchmark version %d requires a screener-built image; source builds are disabled",
+			req.BenchVersion,
+		)
 	}
 	return ""
+}
+
+// sandboxStartInfraFailure classifies a container-start error that is the
+// validator's OWN executor fault — most importantly a missing ditto-sandbox
+// egress network — rather than anything about the miner submission. The scorer
+// must surface these as retryable validator_infrastructure so the validator
+// ends its sweep and backs off, instead of blaming the agent and re-leasing it
+// in a tight resubmit loop (which floods this endpoint with 429s). The match is
+// deliberately narrow: an ordinary harness crash stays a submission failure. The
+// text it reads is Docker's own daemon error, which carries no miner source.
+func sandboxStartInfraFailure(err error) *store.Failure {
+	if err == nil {
+		return nil
+	}
+	msg := strings.ToLower(err.Error())
+	if !strings.Contains(msg, "network") || !strings.Contains(msg, "not found") {
+		return nil
+	}
+	return &store.Failure{
+		Kind:      "validator_infrastructure",
+		Code:      "sandbox_network_unavailable",
+		Retryable: true,
+	}
 }
 
 // submitResponse is returned by the direct (synchronous) path.
@@ -762,7 +794,7 @@ func (s *server) runSandboxJob(ctx context.Context, runID string, req submitRequ
 
 	handle, err := s.sandbox.Run(ctx, image, sandboxRuntimeEnv(req.Env))
 	if err != nil {
-		s.store.Fail(runID, "container start failed: "+err.Error())
+		s.store.FailWith(runID, "container start failed: "+err.Error(), sandboxStartInfraFailure(err))
 		return
 	}
 	defer s.finishSandboxRun(runID, handle)
@@ -988,7 +1020,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		env := harnessSandboxEnv(req.Env)
 		handle, runErr = s.sandbox.Run(ctx, image, env)
 		if runErr != nil {
-			s.store.Fail(runID, "container start failed: "+runErr.Error())
+			s.store.FailWith(runID, "container start failed: "+runErr.Error(), sandboxStartInfraFailure(runErr))
 			return
 		}
 		defer s.finishSandboxRun(runID, handle)
