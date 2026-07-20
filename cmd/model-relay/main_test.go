@@ -2,12 +2,63 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestRelayHealthTracksAuthoritativeUpstreamOutcomes(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		status       int
+		body         string
+		wantSuccess  uint64
+		wantFailures uint64
+	}{
+		{name: "completion", status: http.StatusOK, body: `{"choices":[{"message":{"content":"ok"}}]}`, wantSuccess: 1},
+		{name: "provider unavailable", status: http.StatusServiceUnavailable, body: `unavailable`, wantFailures: 1},
+		{name: "rate limited", status: http.StatusTooManyRequests, body: `limited`, wantFailures: 1},
+		{name: "bad credentials", status: http.StatusUnauthorized, body: `unauthorized`, wantFailures: 1},
+		{name: "malformed success", status: http.StatusOK, body: `{"choices":[]}`, wantFailures: 1},
+		{name: "harness request error", status: http.StatusBadRequest, body: `bad request`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer upstream.Close()
+			r := &relay{upstream: upstream.URL, apiKey: "k", model: "m", client: &http.Client{Timeout: 5 * time.Second}}
+			mux := http.NewServeMux()
+			mux.HandleFunc("POST /v1/chat/completions", r.handle)
+			mux.HandleFunc("GET /health", r.health)
+			srv := httptest.NewServer(mux)
+			defer srv.Close()
+
+			resp, err := http.Post(srv.URL+"/v1/chat/completions", "application/json", strings.NewReader(`{"messages":[]}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _ = io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			healthResp, err := http.Get(srv.URL + "/health")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer healthResp.Body.Close()
+			var got relayHealth
+			if err := json.NewDecoder(healthResp.Body).Decode(&got); err != nil {
+				t.Fatal(err)
+			}
+			if got.AccountingVersion != 1 || got.Status != "ok" || got.Requests != 1 || got.Successes != tc.wantSuccess || got.InfrastructureFailures != tc.wantFailures {
+				t.Fatalf("health = %#v", got)
+			}
+		})
+	}
+}
 
 // TestRelayPinsModelAndKey: whatever model, stream setting, or Authorization
 // header the sandbox sends, the upstream sees the locked model, stream:false,

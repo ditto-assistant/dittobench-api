@@ -126,8 +126,12 @@ type server struct {
 	sourceRevision      string
 	limiter             *ratelimit.Limiter
 	runSlots            chan struct{} // bounds concurrent run_size jobs
-	cancelMu            sync.Mutex
-	runCancels          map[string]context.CancelFunc
+	// relayRunMu isolates scored runs that share this server's model relay.
+	// The relay exposes process-wide monotonic failure counters, so overlapping
+	// scored runs could otherwise attribute one run's provider failure to another.
+	relayRunMu sync.Mutex
+	cancelMu   sync.Mutex
+	runCancels map[string]context.CancelFunc
 }
 
 func main() {
@@ -1027,6 +1031,10 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	defer stopToolSrv()
 
 	scope := runScope(req)
+	if scope == scorer.ScopeScored {
+		unlockRelayRun := s.lockScoredRelayRun()
+		defer unlockRelayRun()
+	}
 
 	if toolEndpoint == "" {
 		if scope == scorer.ScopeScored {
@@ -1053,6 +1061,20 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	// (rescheduled) instead of completing a zeroed report.
 	if toolEndpoint != "" {
 		if !s.enforcePreflight(ctx, runID, scope, harnessURL, toolEndpoint, toolSrv, seed, tools) {
+			return
+		}
+	}
+	// The tool preflight above is intentionally mechanical and does not touch the
+	// locked model. Probe that independent validator dependency before spending
+	// the dataset, then snapshot its monotonic health counters. The end snapshot
+	// prevents a mid-run provider outage from being persisted as an indefensible
+	// low score even when a harness masks that outage behind HTTP 200 + an empty
+	// response.
+	var relayStart relayHealthSnapshot
+	if scope == scorer.ScopeScored {
+		var ok bool
+		relayStart, ok = s.relayRunStart(ctx, runID)
+		if !ok {
 			return
 		}
 	}
@@ -1192,6 +1214,15 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		}
 		perCase = append(perCase, waveResults...)
 		transcripts = append(transcripts, waveTranscripts...)
+	}
+
+	// The relay owns authoritative provider-delivery evidence. Check it before
+	// scoring or persistence: any upstream infrastructure failure during this
+	// run invalidates the whole attempt and lets the validator retry later. This
+	// intentionally does not inspect response content or score magnitude, so a
+	// legitimately weak harness still receives its legitimate low score.
+	if scope == scorer.ScopeScored && !s.relayRunHealthy(ctx, runID, relayStart) {
+		return
 	}
 
 	// 6. scoring — aggregate + finish.
