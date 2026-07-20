@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "formula_version": "v5-sqrt-ratio-floor-v1",
+  "bench_version": 5,
+  "dataset_known_vector": "dea58aceeedd9585f32a782ad08b729ef933415ddc8f446d2a78b5f8d2f950f8",
+  "starter_kit_revision": "60aab4e5e2839ddb0fe8c80492bd7b76ba2668fd",
+  "calibration_datasets": [
+    {"run_size":"small","seed":101,"dataset_sha256":"22fa91cd13a6f0be78035231f5bc1e674c43b6a870062a28122e6d31d8603359"},
+    {"run_size":"small","seed":202,"dataset_sha256":"f58c5fd235b3b361c5ad41f7ff381481c841e8f6b49adc360ce559abd40789b2"},
+    {"run_size":"small","seed":303,"dataset_sha256":"e5c2500a292f30d03cda2b16c220e7e85f39c65ceadda6b1e3f707fa8a607569"},
+    {"run_size":"small","seed":404,"dataset_sha256":"dc46024f660abc81d1da9b5cb2215cc21111f20bc96f4fdd0b184dcd925792d7"},
+    {"run_size":"small","seed":505,"dataset_sha256":"6ba7bd31ad561341ac0d6642c1af65615950ed1daa4302226a2817277b89f50b"},
+    {"run_size":"medium","seed":101,"dataset_sha256":"25dedbca8e750fa6980365552e2e6bf742e9b8e41a76180f304412589b69dc23"},
+    {"run_size":"medium","seed":202,"dataset_sha256":"3554b3ed08a6a93a25eb16290f412f69adcd0745c63815063143733d7dacc29f"},
+    {"run_size":"medium","seed":303,"dataset_sha256":"2ada29332d12c278076338d49292e35a314c9252248f693c830a285269d61820"},
+    {"run_size":"medium","seed":404,"dataset_sha256":"3ec4296899ac5fdac7b5c6da125c5d9a306bf7fa3c1bbab9f5a00ca0f5c117c9"},
+    {"run_size":"medium","seed":505,"dataset_sha256":"72b261cf683c94b11f8af67c71bee2bc15de08d3e3cc552fd97bb302156ea227"},
+    {"run_size":"full","seed":101,"dataset_sha256":"7e4241b819173fb65192cf0cd15e08dfbfd685adda666f8cbc7bcf08a3c607c4"},
+    {"run_size":"full","seed":202,"dataset_sha256":"a15ceb4d7bd0b6883ce6236a56e894497201c5bd83165837341446004a5e50c8"},
+    {"run_size":"full","seed":303,"dataset_sha256":"d18697965c9e19f5c1167054b85b33ffc9344a06a5c292d18008308a9fe553cb"},
+    {"run_size":"full","seed":404,"dataset_sha256":"54fb66bccf7ef0e515aeb0ed60ded74434a455cfd81f11a8475773b1049b077e"},
+    {"run_size":"full","seed":505,"dataset_sha256":"a4f327728bb408a0f56ab8db566df25655a135affef3daf11d776857d763f48a"}
+  ],
+  "baselines": []
+}

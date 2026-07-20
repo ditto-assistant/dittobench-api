@@ -13,6 +13,7 @@ import (
 
 	"github.com/ditto-assistant/dittobench-api/internal/llm"
 	"github.com/ditto-assistant/dittobench-api/internal/store"
+	"github.com/ditto-assistant/dittobench-datagen/protocol"
 )
 
 const relayProbeTimeout = 30 * time.Second
@@ -23,6 +24,16 @@ type relayHealthSnapshot struct {
 	Requests               uint64 `json:"requests"`
 	Successes              uint64 `json:"successes"`
 	InfrastructureFailures uint64 `json:"infrastructure_failures"`
+	Provider               string `json:"provider"`
+	ProfileRevision        string `json:"profile_revision"`
+	Model                  string `json:"model"`
+	UsageAvailable         uint64 `json:"usage_available"`
+	UsageUnavailable       uint64 `json:"usage_unavailable"`
+	PromptTokens           uint64 `json:"prompt_tokens"`
+	PromptBytes            uint64 `json:"prompt_bytes"`
+	CompletionTokens       uint64 `json:"completion_tokens"`
+	ProviderLatencyMs      uint64 `json:"provider_latency_ms"`
+	TTFTStatus             string `json:"ttft_status"`
 }
 
 // lockScoredRelayRun serializes the portion of scored jobs that can call the
@@ -134,10 +145,20 @@ func readRelayHealth(ctx context.Context, gateway string) (relayHealthSnapshot, 
 	if snapshot.Status != "ok" {
 		return relayHealthSnapshot{}, fmt.Errorf("relay health is not ok")
 	}
-	if snapshot.AccountingVersion != 1 {
+	if snapshot.AccountingVersion != 1 && snapshot.AccountingVersion != 2 {
 		return relayHealthSnapshot{}, fmt.Errorf("relay health lacks run accounting")
 	}
 	return snapshot, nil
+}
+
+func requireTokenAccounting(snapshot relayHealthSnapshot) error {
+	if snapshot.AccountingVersion != 2 {
+		return fmt.Errorf("relay health lacks trusted token accounting")
+	}
+	if snapshot.Provider == "" || snapshot.ProfileRevision == "" || snapshot.Model == "" {
+		return fmt.Errorf("relay health lacks immutable provider identity")
+	}
+	return nil
 }
 
 func relayDegradedSince(start, end relayHealthSnapshot) error {
@@ -150,7 +171,45 @@ func relayDegradedSince(start, end relayHealthSnapshot) error {
 	return nil
 }
 
-func (s *server) relayRunStart(ctx context.Context, runID string) (relayHealthSnapshot, bool) {
+func relayUsageSince(start, end relayHealthSnapshot) (protocol.TokenUsage, error) {
+	usage := protocol.TokenUsage{
+		AccountingVersion: end.AccountingVersion,
+		Status:            "unavailable",
+		Source:            "model_proxy_provider_response",
+		Provider:          end.Provider,
+		ProfileRevision:   end.ProfileRevision,
+		Model:             end.Model,
+		TTFTStatus:        end.TTFTStatus,
+	}
+	if start.AccountingVersion != end.AccountingVersion {
+		return usage, fmt.Errorf("relay accounting version changed during benchmark")
+	}
+	if start.Provider != end.Provider || start.ProfileRevision != end.ProfileRevision || start.Model != end.Model {
+		return usage, fmt.Errorf("relay provider profile changed during benchmark")
+	}
+	if end.Requests < start.Requests || end.Successes < start.Successes ||
+		end.UsageAvailable < start.UsageAvailable || end.UsageUnavailable < start.UsageUnavailable ||
+		end.PromptTokens < start.PromptTokens || end.PromptBytes < start.PromptBytes ||
+		end.CompletionTokens < start.CompletionTokens ||
+		end.ProviderLatencyMs < start.ProviderLatencyMs {
+		return usage, fmt.Errorf("relay restarted during benchmark")
+	}
+	usage.Requests = end.Requests - start.Requests
+	usage.Successes = end.Successes - start.Successes
+	usage.UsageAvailable = end.UsageAvailable - start.UsageAvailable
+	usage.UsageUnavailable = end.UsageUnavailable - start.UsageUnavailable
+	usage.PromptTokens = end.PromptTokens - start.PromptTokens
+	usage.PromptBytes = end.PromptBytes - start.PromptBytes
+	usage.CompletionTokens = end.CompletionTokens - start.CompletionTokens
+	usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
+	usage.ProviderLatencyMs = end.ProviderLatencyMs - start.ProviderLatencyMs
+	if usage.Successes == usage.UsageAvailable && usage.UsageUnavailable == 0 {
+		usage.Status = "complete"
+	}
+	return usage, nil
+}
+
+func (s *server) relayRunStart(ctx context.Context, runID string, benchVersion int) (relayHealthSnapshot, bool) {
 	gateway := envOr("HARNESS_GATEWAY_URL", "http://host.docker.internal:11434")
 	if err := probeLockedModelRelay(ctx, gateway); err != nil {
 		s.failRelayUnavailable(runID, err)
@@ -161,10 +220,16 @@ func (s *server) relayRunStart(ctx context.Context, runID string) (relayHealthSn
 		s.failRelayUnavailable(runID, err)
 		return relayHealthSnapshot{}, false
 	}
+	if benchVersion >= protocol.BenchVersionV5 {
+		if err := requireTokenAccounting(snapshot); err != nil {
+			s.failRelayUnavailable(runID, err)
+			return relayHealthSnapshot{}, false
+		}
+	}
 	return snapshot, true
 }
 
-func (s *server) relayRunHealthy(ctx context.Context, runID string, start relayHealthSnapshot) bool {
+func (s *server) relayRunResult(ctx context.Context, runID string, start relayHealthSnapshot) (protocol.TokenUsage, bool) {
 	gateway := envOr("HARNESS_GATEWAY_URL", "http://host.docker.internal:11434")
 	end, err := readRelayHealth(ctx, gateway)
 	if err == nil {
@@ -172,9 +237,14 @@ func (s *server) relayRunHealthy(ctx context.Context, runID string, start relayH
 	}
 	if err != nil {
 		s.failRelayUnavailable(runID, err)
-		return false
+		return protocol.TokenUsage{}, false
 	}
-	return true
+	usage, usageErr := relayUsageSince(start, end)
+	if usageErr != nil {
+		s.failRelayUnavailable(runID, usageErr)
+		return protocol.TokenUsage{}, false
+	}
+	return usage, true
 }
 
 func (s *server) failRelayUnavailable(runID string, err error) {

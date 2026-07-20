@@ -365,6 +365,8 @@ caller-supplied harness URLs, so it guards against abuse:
   is graded.
 - `docs/model-lock.md`: the locked harness model and the gateway
   (`cmd/model-relay` fronting Chutes).
+- `docs/token-efficiency-v5.md`: trusted proxy metering, the bounded v5 score
+  transform, quality floors, and the reproducible starter-kit baseline process.
 
 ## License
 
