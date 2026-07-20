@@ -14,48 +14,60 @@ The v2-v4 score contracts are unchanged. V5 is not advertised by
 `/v1/capabilities` until the embedded manifest contains a reviewed baseline for
 small, medium, and full on both certified provider profiles.
 
-## Frozen transform
+## Versioned transform
 
-For a positive observed total and a matching baseline:
+Prompt tokens carry four times the score weight of completion tokens:
 
 ```text
-ratio      = baseline_total_tokens / observed_total_tokens
-multiplier = clamp(sqrt(ratio), 0.75, 1.25)
-adjusted   = round_6(raw_composite * multiplier)
+weighted_tokens = prompt_tokens + 0.25 * completion_tokens
+ratio           = baseline_weighted_tokens / observed_weighted_tokens
+
+if ratio >= 1:
+    multiplier = ratio ^ 0.25
+else:
+    multiplier = max(0.75, ratio ^ 0.50)
+
+adjusted = round_6(raw_composite * multiplier)
 ```
 
-The transform is continuous and monotonic: any usage above baseline is a
-penalty, any usage below baseline is a reward, equality is neutral, and extreme
-values are bounded. Since raw quality can reach 1 and the reward ceiling is
-1.25, the adjusted score may exceed 1 and tops out at 1.25.
+The transform is continuous and monotonic. Above-baseline usage receives the
+existing square-root penalty with a `0.75` floor. Below-baseline usage receives
+a slowly growing fourth-root reward with no score ceiling, so a genuinely novel
+agent can keep improving past an arbitrary token threshold. Provider accounting
+and the fixed benchmark size still impose a positive observed-token minimum.
 
-For a raw score of `0.9` and a `1,000`-token baseline:
+For a raw score of `0.9` and a `1,000` weighted-token baseline:
 
 | Observed | Multiplier | Adjusted |
 | ---: | ---: | ---: |
-| 640 | 1.25 | 1.125 |
+| 640 | 1.118034… | 1.006231 |
 | 1,000 | 1.0 | 0.9 |
 | 1,600 | 0.790569… | 0.711512 |
 | 100,000 | 0.75 (floor) | 0.675 |
+| 250 | 1.414214… | 1.272792 |
+| 10 | 3.162278… | 2.846050 |
 
 The record preserves raw quality, prompt/completion/total tokens, baseline id
-and counts, multiplier, adjusted score, and raw/adjusted standard error as
-separate fields. Context stuffing therefore loses through provider-observed
-input tokens. Normal helpful output is represented in the stock starter-kit
-baseline rather than charged a second time by a separate output-length term.
+and counts, both weighted costs, token weights, curve exponents, multiplier,
+adjusted score, and raw/adjusted standard error as separate fields. Context
+stuffing therefore loses primarily through provider-observed prompt tokens.
+Completion tokens retain one-quarter weight so pathological verbosity is not
+free, but concise helpful prose is not the main route to an efficiency reward.
 
 ## Quality floor and fail-neutral behavior
 
 An efficiency reward is available only when all of these hold:
 
-- raw composite at least `0.50`;
-- tool mean and memory mean each at least `0.25`;
-- at least `90%` of cases produced visible answer text.
+- raw composite at least `0.80`;
+- tool mean and memory mean each at least `0.70`;
+- at least `95%` of cases produced visible answer text.
 
 These are eligibility floors, not new quality points. Empty, mostly empty, or
 low-correctness terse answers keep multiplier `1.0`; low token use cannot rescue
-them. The broader v5 friendliness/chat-quality evaluator can tighten this gate
-without putting style tokens directly into the efficiency formula.
+them. These deliberately high reward gates must be recalibrated with the v5
+friendliness/chat-quality distributions before activation and can be tightened
+without putting style tokens directly into the efficiency formula. The floors
+block rewards only: above-baseline usage still receives its stuffing penalty.
 
 Missing, malformed, zero, inconsistent, or extreme provider usage also keeps a
 neutral multiplier and is reported as unavailable. It does not turn a valid
@@ -83,8 +95,8 @@ pins:
 
 This prevents comparing a miner on one provider/model revision to starter-kit
 usage measured on another. Each baseline is the complete prompt/completion
-breakdown from the median-total-token run over the five pinned seeds. Five is
-odd, so no interpolation or rounding choice enters the contract.
+breakdown from the median-weighted-token run over the five pinned seeds. Five
+is odd, so no interpolation or rounding choice enters the contract.
 
 To calibrate or refresh:
 

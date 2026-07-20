@@ -49,8 +49,9 @@ func main() {
 			fatalf("%s: missing trusted details.token_usage", path)
 		}
 		usage := report.Details.TokenUsage
-		if report.Details.BenchVersion != protocol.BenchVersionV5 || usage.Status != "complete" ||
-			usage.Source != "model_proxy_provider_response" || usage.Successes == 0 || usage.TotalTokens == 0 {
+		if report.Details.BenchVersion != protocol.BenchVersionV5 ||
+			usage.Source != "model_proxy_provider_response" || !efficiency.ValidUsage(*usage) ||
+			usage.Provider == "" || usage.ProfileRevision == "" || usage.Model == "" {
 			fatalf("%s: report is not a complete v5 proxy-metered run", path)
 		}
 		key := datasetKey(report.Details.RunSize, report.Seed, report.Details.DatasetSHA256)
@@ -74,7 +75,20 @@ func main() {
 			seen[report.Seed] = true
 		}
 		sort.Slice(reports, func(i, j int) bool {
-			return reports[i].Details.TokenUsage.TotalTokens < reports[j].Details.TokenUsage.TotalTokens
+			a := reports[i].Details.TokenUsage
+			b := reports[j].Details.TokenUsage
+			aw := efficiency.WeightedTokens(a.PromptTokens, a.CompletionTokens)
+			bw := efficiency.WeightedTokens(b.PromptTokens, b.CompletionTokens)
+			if aw != bw {
+				return aw < bw
+			}
+			if a.PromptTokens != b.PromptTokens {
+				return a.PromptTokens < b.PromptTokens
+			}
+			if a.CompletionTokens != b.CompletionTokens {
+				return a.CompletionTokens < b.CompletionTokens
+			}
+			return reports[i].Seed < reports[j].Seed
 		})
 		median := reports[len(reports)/2].Details.TokenUsage
 		baseline := efficiency.Baseline{
@@ -128,7 +142,7 @@ func datasetKey(runSize string, seed int64, datasetSHA string) string {
 }
 
 func baselineID(b efficiency.Baseline) string {
-	canonical := fmt.Sprintf("v5:%s:%s:%s:%s:%d:%d:%d:%s", b.RunSize, b.Provider,
+	canonical := fmt.Sprintf("%s:%s:%s:%s:%s:%d:%d:%d:%s", efficiency.FormulaVersion, b.RunSize, b.Provider,
 		b.ProfileRevision, b.Model, b.PromptTokens, b.CompletionTokens, b.TotalTokens, b.StarterKitRevision)
 	sum := sha256.Sum256([]byte(canonical))
 	return "v5-starter-median-" + hex.EncodeToString(sum[:8])

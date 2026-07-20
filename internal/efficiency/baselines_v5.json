@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "formula_version": "v5-sqrt-ratio-floor-v1",
+  "formula_version": "v5-prompt-dominant-asymmetric-power-v1",
   "bench_version": 5,
   "dataset_known_vector": "dea58aceeedd9585f32a782ad08b729ef933415ddc8f446d2a78b5f8d2f950f8",
   "starter_kit_revision": "60aab4e5e2839ddb0fe8c80492bd7b76ba2668fd",

@@ -15,13 +15,16 @@ import (
 )
 
 const (
-	FormulaVersion          = "v5-sqrt-ratio-floor-v1"
+	FormulaVersion          = "v5-prompt-dominant-asymmetric-power-v1"
+	PromptTokenWeight       = 1.0
+	CompletionTokenWeight   = 0.25
+	RewardExponent          = 0.25
+	PenaltyExponent         = 0.50
 	MinMultiplier           = 0.75
-	MaxMultiplier           = 1.25
-	MinimumComposite        = 0.50
-	MinimumToolMean         = 0.25
-	MinimumMemoryMean       = 0.25
-	MinimumResponseCoverage = 0.90
+	MinimumComposite        = 0.80
+	MinimumToolMean         = 0.70
+	MinimumMemoryMean       = 0.70
+	MinimumResponseCoverage = 0.95
 )
 
 type Baseline struct {
@@ -145,16 +148,24 @@ func ResponseCoverage(transcripts []protocol.RunResponse) float64 {
 // AdjustedComposite to ScoreReport.Composite only for bench v5.
 func Apply(raw protocol.ScoreReport, usage protocol.TokenUsage, baseline *Baseline, responseCoverage float64) protocol.TokenEfficiency {
 	result := protocol.TokenEfficiency{
-		FormulaVersion:          FormulaVersion,
-		ObservedTotalTokens:     usage.TotalTokens,
-		Multiplier:              1,
-		RawComposite:            raw.Composite,
-		AdjustedComposite:       raw.Composite,
-		MinimumComposite:        MinimumComposite,
-		MinimumToolMean:         MinimumToolMean,
-		MinimumMemoryMean:       MinimumMemoryMean,
-		MinimumResponseCoverage: MinimumResponseCoverage,
-		ResponseCoverage:        responseCoverage,
+		FormulaVersion:           FormulaVersion,
+		ObservedPromptTokens:     usage.PromptTokens,
+		ObservedCompletionTokens: usage.CompletionTokens,
+		ObservedTotalTokens:      usage.TotalTokens,
+		ObservedWeightedTokens:   WeightedTokens(usage.PromptTokens, usage.CompletionTokens),
+		PromptTokenWeight:        PromptTokenWeight,
+		CompletionTokenWeight:    CompletionTokenWeight,
+		RewardExponent:           RewardExponent,
+		PenaltyExponent:          PenaltyExponent,
+		MinimumMultiplier:        MinMultiplier,
+		Multiplier:               1,
+		RawComposite:             raw.Composite,
+		AdjustedComposite:        raw.Composite,
+		MinimumComposite:         MinimumComposite,
+		MinimumToolMean:          MinimumToolMean,
+		MinimumMemoryMean:        MinimumMemoryMean,
+		MinimumResponseCoverage:  MinimumResponseCoverage,
+		ResponseCoverage:         responseCoverage,
 	}
 
 	switch {
@@ -170,32 +181,60 @@ func Apply(raw protocol.ScoreReport, usage protocol.TokenUsage, baseline *Baseli
 		result.QualityEligible = true
 		result.EligibilityReason = "eligible"
 	}
-	if !result.QualityEligible {
-		return result
-	}
-	if !validUsage(usage) {
-		result.EligibilityReason = "token_telemetry_unavailable"
+	if !ValidUsage(usage) {
+		if result.QualityEligible {
+			result.EligibilityReason = "token_telemetry_unavailable"
+		}
 		return result
 	}
 	if baseline == nil || !validBaseline(*baseline) {
-		result.EligibilityReason = "baseline_unavailable"
+		if result.QualityEligible {
+			result.EligibilityReason = "baseline_unavailable"
+		}
 		return result
 	}
 	result.BaselineID = baseline.ID
 	result.BaselinePromptTokens = baseline.PromptTokens
 	result.BaselineCompletionTokens = baseline.CompletionTokens
 	result.BaselineTotalTokens = baseline.TotalTokens
+	result.BaselineWeightedTokens = WeightedTokens(baseline.PromptTokens, baseline.CompletionTokens)
 
-	multiplier := math.Sqrt(float64(baseline.TotalTokens) / float64(usage.TotalTokens))
-	result.Multiplier = math.Max(MinMultiplier, math.Min(MaxMultiplier, multiplier))
+	ratio := result.BaselineWeightedTokens / result.ObservedWeightedTokens
+	if ratio >= 1 {
+		if !result.QualityEligible {
+			// Efficiency cannot rescue low-quality or incomplete answers.
+			return result
+		}
+		// Below baseline, keep rewarding genuine prompt-efficiency improvements.
+		// The fourth root is deliberately unbounded but grows slowly.
+		result.Multiplier = math.Pow(ratio, RewardExponent)
+	} else {
+		// Above baseline, retain a bounded penalty for every report, including
+		// low-quality ones, so context stuffing never escapes its cost.
+		result.Multiplier = math.Max(MinMultiplier, math.Pow(ratio, PenaltyExponent))
+	}
+	if math.IsNaN(result.Multiplier) || math.IsInf(result.Multiplier, 0) {
+		result.Multiplier = 1
+		result.EligibilityReason = "token_transform_unavailable"
+		return result
+	}
 	result.AdjustedComposite = round6(raw.Composite * result.Multiplier)
 	return result
 }
 
-func validUsage(usage protocol.TokenUsage) bool {
+// WeightedTokens is the prompt-dominant v5 cost. Completion tokens retain a
+// small cost without making normal helpful prose the main optimization target.
+func WeightedTokens(prompt, completion uint64) float64 {
+	return PromptTokenWeight*float64(prompt) + CompletionTokenWeight*float64(completion)
+}
+
+// ValidUsage applies the same completeness and arithmetic checks to scoring
+// and starter-kit calibration inputs.
+func ValidUsage(usage protocol.TokenUsage) bool {
 	if usage.Status != "complete" || usage.Successes == 0 ||
 		usage.UsageAvailable != usage.Successes || usage.UsageUnavailable != 0 ||
-		usage.TotalTokens == 0 || usage.PromptTokens > ^uint64(0)-usage.CompletionTokens {
+		usage.TotalTokens == 0 || usage.PromptTokens == 0 ||
+		usage.PromptTokens > ^uint64(0)-usage.CompletionTokens {
 		return false
 	}
 	return usage.TotalTokens == usage.PromptTokens+usage.CompletionTokens
