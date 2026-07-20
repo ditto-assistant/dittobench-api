@@ -25,6 +25,17 @@ type relayHealthSnapshot struct {
 	InfrastructureFailures uint64 `json:"infrastructure_failures"`
 }
 
+// lockScoredRelayRun serializes the portion of scored jobs that can call the
+// single model relay owned by this API instance. The relay's health accounting
+// is intentionally aggregate, so isolation must begin before the harness
+// preflight can make a model request and remain in force through the final
+// counter snapshot. The returned closure makes early-return paths release the
+// lease reliably.
+func (s *server) lockScoredRelayRun() func() {
+	s.relayRunMu.Lock()
+	return s.relayRunMu.Unlock
+}
+
 // probeLockedModelRelay makes one deliberately tiny completion through the
 // same operator-owned gateway injected into every scored harness. The harness
 // /health and tool-endpoint preflight do not exercise this dependency, so both

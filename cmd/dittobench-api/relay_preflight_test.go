@@ -8,12 +8,43 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ditto-assistant/dittobench-api/internal/runner"
 	"github.com/ditto-assistant/dittobench-api/internal/store"
 	"github.com/ditto-assistant/dittobench-datagen/catalog"
 	"github.com/ditto-assistant/dittobench-datagen/protocol"
 )
+
+func TestLockScoredRelayRunSerializesSharedRelayAccounting(t *testing.T) {
+	t.Parallel()
+
+	s := &server{}
+	unlockFirst := s.lockScoredRelayRun()
+
+	started := make(chan struct{})
+	acquired := make(chan struct{})
+	go func() {
+		close(started)
+		unlockSecond := s.lockScoredRelayRun()
+		close(acquired)
+		unlockSecond()
+	}()
+	<-started
+
+	select {
+	case <-acquired:
+		t.Fatal("a second scored run acquired the shared relay lease concurrently")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	unlockFirst()
+	select {
+	case <-acquired:
+	case <-time.After(time.Second):
+		t.Fatal("a waiting scored run did not acquire the relay lease after release")
+	}
+}
 
 func TestProbeLockedModelRelay(t *testing.T) {
 	t.Run("healthy tiny completion", func(t *testing.T) {

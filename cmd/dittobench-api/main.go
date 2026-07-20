@@ -126,8 +126,12 @@ type server struct {
 	sourceRevision      string
 	limiter             *ratelimit.Limiter
 	runSlots            chan struct{} // bounds concurrent run_size jobs
-	cancelMu            sync.Mutex
-	runCancels          map[string]context.CancelFunc
+	// relayRunMu isolates scored runs that share this server's model relay.
+	// The relay exposes process-wide monotonic failure counters, so overlapping
+	// scored runs could otherwise attribute one run's provider failure to another.
+	relayRunMu sync.Mutex
+	cancelMu   sync.Mutex
+	runCancels map[string]context.CancelFunc
 }
 
 func main() {
@@ -1027,6 +1031,10 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	defer stopToolSrv()
 
 	scope := runScope(req)
+	if scope == scorer.ScopeScored {
+		unlockRelayRun := s.lockScoredRelayRun()
+		defer unlockRelayRun()
+	}
 
 	if toolEndpoint == "" {
 		if scope == scorer.ScopeScored {
