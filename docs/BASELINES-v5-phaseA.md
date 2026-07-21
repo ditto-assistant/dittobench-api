@@ -38,6 +38,47 @@ go run ./cmd/v5calibrate --seeds 24 --run-size full --json     # machine-readabl
 
 Pinned in CI by `cmd/v5calibrate/main_test.go` (`TestV5ShipGateMultiSeed`).
 
+## On-model precheck — Qwen3-32B (the locked reference model)
+
+Run via `cmd/v5onmodel` against real generated v5 datasets, graded by the
+deterministic public grader, using the validator OpenRouter key. Qwen3-32B
+(`qwen/qwen3-32b`) as a full-context honest reader (the winnability upper bound;
+production uses retrieval, so a real harness scores at or below this).
+
+| seed | profile | model_mean | parser_mean | gap |
+|---|---|---|---|---|
+| 424242    | v5 (50 cases) | 0.770 | 0.480 | **+0.290** |
+| 20260720  | v5 (50 cases) | 0.680 | 0.480 | **+0.200** |
+| 20260720  | v5 full (70 cases, post-fix) | 0.771 | 0.586 | **+0.186** |
+
+Findings:
+- **Winnable, non-degenerate.** The honest reference lands at 0.68–0.77 — inside the
+  plan's 0.3–0.8 winnability band, not ~0.
+- **Positive honest-minus-parser gap** on every run, and the conversational classes
+  show the intended LARGE gap: `conversational-chitchat`, `conversational-declarative`,
+  `declarative-write`, `declarative-write-read`, `declarative-behavior` all at
+  model=1.00 / parser=0.00 (**+1.00**). The model answers "hi" correctly without
+  leaking, echoes a plain declarative, and applies a passively-captured preference.
+- **Grader-false-negative audit caught a real issue and it was fixed.** Before the
+  fix, `declarative-behavior`/`declarative-write-read` scored 0.0–0.5 because the
+  honest model naturally says "book through X, avoiding Y as you asked" and the
+  same-chain rejected value Y (the user's own stated non-preference) zeroed it as a
+  distractor. Fixed by using the OTHER chain's preferred value as the cross-chain
+  anti-shotgun distractor (consistent with the grader's superseded-value rule); the
+  post-fix run scores both classes 1.00.
+- Categories where the parser beats a temp-0 full-context reader (`point-in-time`,
+  `injection-resistance`, `temporal-reasoning`, `knowledge-update`) are the
+  reasoning-hard / adversarial ones — real model behavior (Qwen complied with
+  injections; gave the current value on a point-in-time question), not grader bugs.
+  `conversational-abstention` (Qwen confabulated the neighbor, n=1/run) is a
+  watch-item candidate for observational-only until its winnability is confirmed at N.
+
+This CLOSES the on-model winnability gate (v5 plan 4.10/4.11 on-model half). Repro:
+
+```
+OPENROUTER_API_KEY=<validator key> go run ./cmd/v5onmodel --seed 424242 --run-size full
+```
+
 ## CALIBRATION TRUST WARNING
 
 These per-type competence numbers are **synthetic archetype profiles**, not measured

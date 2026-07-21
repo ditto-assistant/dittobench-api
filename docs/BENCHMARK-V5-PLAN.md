@@ -45,15 +45,26 @@ v2/v3/v4 bytes and already-recorded scores are byte-identical. What landed:
   0.94 of its memory mean vs the router's 0.50 -- the counter-guard that the drop is
   specific to the conversational margin. See `docs/BASELINES-v5-phaseA.md`.
 
+- ON-MODEL winnability precheck (4.10/4.11 on-model half) — DONE. `cmd/v5onmodel`
+  runs the locked reference model Qwen3-32B (`qwen/qwen3-32b`, validator OpenRouter
+  key) as a full-context honest reader against real generated v5 datasets, graded by
+  the public grader, vs a grep-parser baseline. Result over multiple seeds: honest
+  0.68–0.77 (winnable, non-degenerate), positive honest-minus-parser gap, and the
+  conversational classes at the intended +1.00 gap. The audit also caught a real
+  grader false-negative (the declarative behavior/read shotgun) which is fixed; see
+  `docs/BASELINES-v5-phaseA.md`.
+- Code Mode coverage (represents `run_code` / `search_tools`) and scaled v5 data
+  volume (80 tool / 70 mem / 4 waves / ~238 haystack pairs vs v4's 199); full
+  capability→coverage map in `docs/V5-COVERAGE-MAP.md`.
+
 Not yet done (Phase B/C, tracked below): 4.3 non-verbatim rendering, 4.4 live
-passive learning, 4.6 multi-query/temporal-depth, 4.7 efficiency, 4.8 injection
-resistance, 4.9 multi-hop. The one remaining Phase-A gate is the ON-MODEL
-winnability/statistical-power precheck of 4.10/4.11 against the frozen-Qwen
-reference (`cmd/calibrate` against a running API): it needs the model relay, which
-is unreachable here (no `RELAY_API_KEY`), so v5 Phase A must ship OBSERVATIONAL
-until that run confirms the honest-minus-parser gap on-model and the non-degenerate
-ceiling. The conversational factor's single-case variance at small run sizes (4.10
-statistical power) is bounded by giving full runs two declarative chains.
+passive learning, 4.6 explicit multi-query/temporal-depth/cross-graph provenance,
+4.7 efficiency, 4.8 stored-instruction injection, 4.9 multi-hop relational KG.
+Watch-item: `conversational-abstention` (abstention-over-confabulation) is failed by
+even the full-context reference model at temp 0, so budget its N and confirm
+winnability before it fully weights the composite. The conversational factor's
+single-case variance at small run sizes is bounded by giving full runs two
+declarative chains.
 
 Goal of v5, stated once: a high leaderboard score must mean an agent behaves like
 a strong Ditto agent in a real chat, not that it reverse-engineered the
