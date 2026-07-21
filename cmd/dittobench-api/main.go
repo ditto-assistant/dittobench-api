@@ -947,7 +947,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		s.store.Fail(runID, "unsupported bench_version during generation")
 		return
 	}
-	toolCases, toolPara := gen.GenerateTools(rng, seed, prof.Tools)
+	toolCases, toolPara := gen.GenerateToolsForVersion(rng, seed, prof.Tools, req.BenchVersion)
 	// v2 memory engine (bench_version 2): a fresh procedural persona universe
 	// per seed replaces the static LongMemEval fixture. Generation is fully
 	// non-LLM and a pure function of the master `seed`; selection shares the run
