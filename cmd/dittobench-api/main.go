@@ -175,6 +175,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.handleHealth)
+	mux.HandleFunc("GET /v1/relay-preflight", s.handleRelayPreflight)
 	mux.HandleFunc("GET /v1/capabilities", s.handleCapabilities)
 	mux.HandleFunc("GET /v1/dataset", s.handleDataset)
 	mux.HandleFunc("GET /v1/sample", s.handleSample)
@@ -946,9 +947,6 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		s.store.Fail(runID, "unsupported bench_version during generation")
 		return
 	}
-	// Use the same versioned tool generator as gen.GenerateDataset. Calling the
-	// legacy wrapper here silently selects the frozen v2 tool contract and makes
-	// the scorer regenerate different bytes than the platform's v5 dataset pin.
 	toolCases, toolPara := gen.GenerateToolsForVersion(rng, seed, prof.Tools, req.BenchVersion)
 	// v2 memory engine (bench_version 2): a fresh procedural persona universe
 	// per seed replaces the static LongMemEval fixture. Generation is fully
