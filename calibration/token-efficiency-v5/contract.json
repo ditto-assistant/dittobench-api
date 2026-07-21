@@ -2,7 +2,7 @@
   "schema_version": 1,
   "bench_version": 5,
   "formula_version": "v5-relay-token-waste-p90-v1",
-  "scorer_revision": "b6ac82275a76a3aaec1d82dcbef8eba5f0fbd580",
+  "scorer_revision": "026a3d4ceefa56a5fcbe1a28b3cb2929b41a352f",
   "starter_kit_revision": "106076a40e4214cda821dfd0bee5c9c6785d425c",
   "source": {
     "path": "source/dittobench-submission.tgz",
