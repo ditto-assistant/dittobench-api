@@ -74,7 +74,7 @@ func TestVersionedScoreRequiresSupportedBenchVersion(t *testing.T) {
 	}{
 		{name: "omitted", body: `{` + base + `}`, want: "bench_version is required"},
 		{name: "old v1", body: `{"bench_version":1,` + base + `}`, want: "unsupported bench_version"},
-		{name: "future", body: `{"bench_version":6,` + base + `}`, want: "unsupported bench_version"},
+		{name: "future", body: `{"bench_version":7,` + base + `}`, want: "unsupported bench_version"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rr := httptest.NewRecorder()

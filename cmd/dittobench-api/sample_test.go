@@ -128,7 +128,7 @@ func TestSampleRejectsBadInput(t *testing.T) {
 		{"bad run_size", "?run_size=huge", "run_size must be one of"},
 		{"index too high", "?sample=99", "sample must be between"},
 		{"negative index", "?sample=-1", "sample must be between"},
-		{"unsupported bench version", "?bench_version=6", "unsupported bench_version"},
+		{"unsupported bench version", "?bench_version=7", "unsupported bench_version"},
 		{"non-integer bench version", "?bench_version=latest", "bench_version must be an integer"},
 	}
 	for _, c := range cases {
