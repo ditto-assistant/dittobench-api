@@ -8,6 +8,8 @@ github.com/ditto-assistant/dittobench-datagen v0.10.1-0.20260721183534-032b94516
 github.com/ditto-assistant/dittobench-datagen v0.10.1-0.20260721183534-032b945162ab/go.mod h1:b5oKfDqwoHFDt8eaJ/J6SXIM07jxVdENUl+D3sm/Z+g=
 github.com/ditto-assistant/dittobench-datagen v0.11.0 h1:6YhgAtYdRkg12LflUpuguBsTXipESKIQt2eYK5KJbuM=
 github.com/ditto-assistant/dittobench-datagen v0.11.0/go.mod h1:b5oKfDqwoHFDt8eaJ/J6SXIM07jxVdENUl+D3sm/Z+g=
+github.com/ditto-assistant/dittobench-datagen v0.11.1 h1:xn5Jhw1P9BINVXCw2KUTiKmLPpXZRxfEsQvP4UryXus=
+github.com/ditto-assistant/dittobench-datagen v0.11.1/go.mod h1:b5oKfDqwoHFDt8eaJ/J6SXIM07jxVdENUl+D3sm/Z+g=
 github.com/google/uuid v1.6.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=
 github.com/google/uuid v1.6.0/go.mod h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
