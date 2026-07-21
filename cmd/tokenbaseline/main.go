@@ -34,6 +34,7 @@ type groupKey struct {
 
 func main() {
 	refreshDatasets := flag.Bool("refresh-datasets", false, "regenerate the pinned v5 calibration dataset hashes and known vector")
+	enableScoring := flag.Bool("enable-scoring", false, "emit an enabled phase-B candidate after all six reviewed groups validate")
 	flag.Parse()
 	if *refreshDatasets {
 		if flag.NArg() != 0 {
@@ -123,6 +124,12 @@ func main() {
 		}
 		return a.RunSize < b.RunSize
 	})
+	if *enableScoring {
+		manifest.ScoringEnabled = true
+		if !efficiency.ReadyForProduction(manifest) {
+			fatalf("refusing phase-B activation: candidate does not contain all six production baseline groups")
+		}
+	}
 	printManifest(manifest)
 }
 

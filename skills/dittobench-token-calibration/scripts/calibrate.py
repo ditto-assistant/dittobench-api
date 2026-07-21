@@ -391,6 +391,7 @@ def run_calibration(args, root: Path, spec: dict, manifest: dict) -> int:
 
     relay_binary, api_binary = build_binaries(root, spec["scorer_revision"])
     logs = root / "logs" / label
+    (root / "artifacts").mkdir(parents=True, exist_ok=True)
     services = Services()
     run_id = None
     status = None
@@ -593,6 +594,7 @@ def parser() -> argparse.ArgumentParser:
     batch.add_argument("--timeout-minutes", type=int, default=45)
     batch.add_argument("--max-attempts", type=int, default=3)
     batch.add_argument("--workers", type=int, default=8, help="isolated concurrent relay/API lanes")
+    batch.add_argument("--port-base", type=int, default=0, help="reserve a distinct port range for a concurrent batch")
     baseline = sub.add_parser("baseline", help="emit the audited p90 manifest after all 120 runs")
     baseline.add_argument("--output", type=Path)
     summary = sub.add_parser("summary", help="summarize all six token and quality distributions")
@@ -647,7 +649,7 @@ def main() -> int:
                         dry_run=False,
                         credential_env=args.credential_env,
                         timeout_minutes=args.timeout_minutes,
-                        port_offset=(index + 1) * 200,
+                        port_offset=args.port_base + (index + 1) * 200,
                     )
                     try:
                         run_calibration(run_args, root, spec, manifest)

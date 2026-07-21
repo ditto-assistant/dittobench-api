@@ -79,7 +79,14 @@ func ManifestSnapshot() Manifest {
 // size on both certified provider profiles. Until then v5 remains hidden from
 // capability negotiation and any direct v5 report fails neutral.
 func ProductionReady() bool {
-	if !productionManifest.ScoringEnabled {
+	return ReadyForProduction(productionManifest)
+}
+
+// ReadyForProduction validates a candidate manifest using the same gate as the
+// embedded production manifest. Calibration tooling uses this before it can
+// emit an explicitly enabled phase-B candidate.
+func ReadyForProduction(manifest Manifest) bool {
+	if !manifest.ScoringEnabled {
 		return false
 	}
 	required := []struct {
@@ -93,10 +100,10 @@ func ProductionReady() bool {
 	for _, contract := range required {
 		for _, runSize := range []string{"small", "medium", "full"} {
 			found := false
-			for _, b := range productionManifest.Baselines {
+			for _, b := range manifest.Baselines {
 				if b.BenchVersion == protocol.BenchVersionV5 && b.Provider == contract.provider &&
 					b.ProfileRevision == contract.revision && b.Model == contract.model && b.RunSize == runSize &&
-					b.StarterKitRevision == productionManifest.StarterKitRevision && validBaseline(b) {
+					b.StarterKitRevision == manifest.StarterKitRevision && validBaseline(b) {
 					found = true
 					break
 				}
