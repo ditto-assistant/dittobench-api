@@ -123,6 +123,56 @@ class CalibrationToolTest(unittest.TestCase):
             self.assertIn("-enable-scoring", run_output.call_args.args[0])
             self.assertTrue(json.loads(output.read_text())["scoring_enabled"])
 
+    def test_summary_exports_observations_without_per_case_content(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "summary.json"
+            found = {}
+            reports = {}
+            for provider in ("chutes", "openrouter"):
+                for run_size in calibrate.RUN_SIZES:
+                    for seed in range(1, 21):
+                        path = root / f"{provider}-{run_size}-{seed}.json"
+                        found[(provider, run_size, seed)] = path
+                        reports[path] = {
+                            "seed": seed,
+                            "raw_composite": 0.5,
+                            "tool_mean": 0.6,
+                            "memory_mean": 0.4,
+                            "per_case": [{"private": "must not be exported"}],
+                            "details": {
+                                "dataset_sha256": f"dataset-{run_size}-{seed}",
+                                "token_usage": {
+                                    "prompt_tokens": 100 + seed,
+                                    "completion_tokens": 10,
+                                    "total_tokens": 110 + seed,
+                                    "prompt_bytes": 400 + seed,
+                                    "provider_latency_ms": 1_000 + seed,
+                                    "requests": 2,
+                                    "successes": 2,
+                                    "usage_available": 2,
+                                    "usage_unavailable": 0,
+                                },
+                            },
+                        }
+            spec = {
+                "formula_version": "formula-v1",
+                "scorer_revision": "scorer-sha",
+                "starter_kit_revision": "starter-sha",
+                "providers": {
+                    "chutes": {"profile_revision": "chutes-v1", "model": "chutes-model"},
+                    "openrouter": {"profile_revision": "openrouter-v1", "model": "openrouter-model"},
+                },
+            }
+            with mock.patch.object(calibrate, "valid_reports", return_value=(found, [])), \
+                 mock.patch.object(calibrate, "load_json", side_effect=lambda path: reports[path]):
+                calibrate.generate_summary(root, spec, {}, output)
+            summary = json.loads(output.read_text())
+            self.assertEqual(summary["schema_version"], 2)
+            self.assertEqual(len(summary["groups"]), 6)
+            self.assertEqual(len(summary["groups"][0]["observations"]), 20)
+            self.assertNotIn("per_case", json.dumps(summary))
+
 
 if __name__ == "__main__":
     unittest.main()

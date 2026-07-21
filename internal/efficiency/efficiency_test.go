@@ -98,12 +98,12 @@ func TestMissingTelemetryAndBaselineFailNeutral(t *testing.T) {
 	}
 }
 
-func TestEmbeddedManifestIsDeliberatelyInactiveUntilMeasuredAndApproved(t *testing.T) {
-	if ProductionReady() {
-		t.Fatal("v5 must not be advertised before baselines and phase-B approval")
+func TestEmbeddedManifestIsMeasuredAndPhaseBApproved(t *testing.T) {
+	if !ProductionReady() {
+		t.Fatal("reviewed dual-provider v5 manifest must be production ready")
 	}
 	manifest := ManifestSnapshot()
-	if manifest.ScoringEnabled || manifest.StarterKitRevision == "" || len(manifest.Calibration) != 60 || len(manifest.Baselines) != 0 {
+	if !manifest.ScoringEnabled || manifest.StarterKitRevision == "" || len(manifest.Calibration) != 60 || len(manifest.Baselines) != 6 {
 		t.Fatalf("manifest = %#v", manifest)
 	}
 }

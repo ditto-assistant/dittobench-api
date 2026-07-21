@@ -94,6 +94,7 @@ For each run, report:
 - raw quality, prompt/completion/total tokens, request metering completeness, and elapsed time;
 - report and transcript paths;
 - completed/remaining counts by provider and run size;
-- that `scoring_enabled=false` and `baseline_unavailable` is expected until audited budgets are installed.
+- whether the reviewed manifest is gated or phase-B enabled, and the exact six
+  provider/run-size baseline ids when enabled.
 
 Do not claim a p90 from a single run. One completed case is process proof; each group needs exactly 20 pinned seeds.
