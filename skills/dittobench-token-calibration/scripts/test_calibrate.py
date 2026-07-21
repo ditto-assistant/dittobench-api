@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -58,6 +59,41 @@ class CalibrationToolTest(unittest.TestCase):
             path = Path(directory) / "provider.env"
             path.write_text("CHUTES_API_KEY='literal-$DO_NOT_EXPAND'\n")
             self.assertEqual(calibrate.dotenv(path)["CHUTES_API_KEY"], "literal-$DO_NOT_EXPAND")
+
+    def test_audit_excludes_canceled_requests_but_meters_every_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reports = root / "reports"
+            reports.mkdir()
+            report = {
+                "run_id": "run-1",
+                "seed": 101,
+                "details": {
+                    "bench_version": 5,
+                    "run_size": "small",
+                    "dataset_sha256": "dataset-sha",
+                    "token_usage": {
+                        "source": "model_proxy_provider_response",
+                        "status": "complete",
+                        "provider": "openrouter",
+                        "profile_revision": "profile-v1",
+                        "model": "model-v1",
+                        "requests": 11,
+                        "successes": 10,
+                        "usage_available": 10,
+                        "usage_unavailable": 0,
+                        "prompt_tokens": 100,
+                        "completion_tokens": 10,
+                        "total_tokens": 110,
+                    },
+                },
+            }
+            (reports / "openrouter-small-seed-101-report.json").write_text(json.dumps(report))
+            spec = {"providers": {"openrouter": {"profile_revision": "profile-v1", "model": "model-v1"}}}
+            with mock.patch.object(calibrate, "expected_datasets", return_value={("small", 101): "dataset-sha"}):
+                found, problems = calibrate.valid_reports(root, spec, {})
+            self.assertFalse(problems)
+            self.assertIn(("openrouter", "small", 101), found)
 
 
 if __name__ == "__main__":

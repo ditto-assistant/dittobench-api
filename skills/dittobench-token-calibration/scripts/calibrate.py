@@ -146,8 +146,8 @@ def valid_reports(root: Path, spec: dict, manifest: dict) -> tuple[dict, list[st
                 "complete usage": usage.get("status") == "complete",
                 "provider profile": usage.get("profile_revision") == profile["profile_revision"],
                 "provider model": usage.get("model") == profile["model"],
-                "all requests metered": usage.get("requests", 0) > 0
-                and usage.get("usage_available") == usage.get("requests")
+                "all successful requests metered": usage.get("successes", 0) > 0
+                and usage.get("usage_available") == usage.get("successes")
                 and usage.get("usage_unavailable") == 0,
             }
             failures = [label for label, okay in checks.items() if not okay]
