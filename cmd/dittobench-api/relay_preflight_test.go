@@ -93,6 +93,65 @@ func TestProbeLockedModelRelay(t *testing.T) {
 	}
 }
 
+func TestHandleRelayPreflight(t *testing.T) {
+	t.Run("reachable relay returns ok identity", func(t *testing.T) {
+		relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/health" {
+				t.Fatalf("path = %q", r.URL.Path)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status":             "ok",
+				"accounting_version": 2,
+				"provider":           "openrouter",
+				"profile_revision":   "profile-v1",
+				"model":              "qwen/qwen3-32b",
+			})
+		}))
+		defer relay.Close()
+		t.Setenv("HARNESS_GATEWAY_URL", relay.URL)
+
+		rec := httptest.NewRecorder()
+		(&server{}).handleRelayPreflight(rec, httptest.NewRequest(http.MethodGet, "/v1/relay-preflight", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
+		}
+		var body map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		if body["status"] != "ok" || body["provider"] != "openrouter" || body["model"] != "qwen/qwen3-32b" {
+			t.Fatalf("unexpected body: %#v", body)
+		}
+	})
+
+	t.Run("unreachable relay fails closed as validator infrastructure", func(t *testing.T) {
+		// A gateway that refuses the connection stands in for host.docker.internal
+		// not resolving inside a mis-wired managed-stack netns — the exact failure
+		// the off-netns validator preflight cannot otherwise see.
+		t.Setenv("HARNESS_GATEWAY_URL", "http://127.0.0.1:1/")
+		rec := httptest.NewRecorder()
+		(&server{}).handleRelayPreflight(rec, httptest.NewRequest(http.MethodGet, "/v1/relay-preflight", nil))
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
+		}
+		var body struct {
+			Status  string `json:"status"`
+			Failure struct {
+				Kind      string `json:"kind"`
+				Code      string `json:"code"`
+				Retryable bool   `json:"retryable"`
+			} `json:"failure"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		if body.Status != "unavailable" || body.Failure.Kind != "validator_infrastructure" ||
+			body.Failure.Code != "model_relay_unavailable" || !body.Failure.Retryable {
+			t.Fatalf("unexpected failure envelope: %s", rec.Body.String())
+		}
+	})
+}
+
 func TestRelayFailureIsRetryableValidatorInfrastructure(t *testing.T) {
 	s := &server{store: store.New()}
 	s.store.Create("run", "run_size", store.StatusRunning, 1, 1)

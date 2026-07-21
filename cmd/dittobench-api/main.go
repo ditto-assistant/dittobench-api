@@ -175,6 +175,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.handleHealth)
+	mux.HandleFunc("GET /v1/relay-preflight", s.handleRelayPreflight)
 	mux.HandleFunc("GET /v1/capabilities", s.handleCapabilities)
 	mux.HandleFunc("GET /v1/dataset", s.handleDataset)
 	mux.HandleFunc("GET /v1/sample", s.handleSample)

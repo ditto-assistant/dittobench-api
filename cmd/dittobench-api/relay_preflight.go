@@ -247,6 +247,42 @@ func (s *server) relayRunResult(ctx context.Context, runID string, start relayHe
 	return usage, true
 }
 
+// handleRelayPreflight lets an off-netns caller verify the locked model relay is
+// reachable on the SAME path a scored run uses. The subnet validator reaches this
+// scorer at sandbox-docker:8000 but is NOT in sandbox-docker's network namespace,
+// so it cannot itself resolve host.docker.internal — its own embed preflight hits
+// a service name and therefore stays green even when the scorer's
+// host.docker.internal:11435 relay path is broken (e.g. a managed stack whose
+// compose predates the extra_hosts-on-sandbox-docker fix). This endpoint runs the
+// same relay-health read the scored path runs at run start, inside this container's
+// shared netns, so a mis-wired stack fails the validator's preflight and claims no
+// ticket instead of leasing tickets it will fast-fail. Cheap: a relay /health GET,
+// no provider completion — provider degradation is caught per-run, not here. The
+// failure envelope mirrors the scored path's classification (model_relay_unavailable)
+// so the caller maps it to a validator-infrastructure back-off.
+func (s *server) handleRelayPreflight(w http.ResponseWriter, r *http.Request) {
+	gateway := envOr("HARNESS_GATEWAY_URL", "http://host.docker.internal:11434")
+	snapshot, err := readRelayHealth(r.Context(), gateway)
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"status": "unavailable",
+			"failure": map[string]any{
+				"kind":      "validator_infrastructure",
+				"code":      "model_relay_unavailable",
+				"retryable": true,
+			},
+			"error": err.Error(),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":           "ok",
+		"provider":         snapshot.Provider,
+		"model":            snapshot.Model,
+		"profile_revision": snapshot.ProfileRevision,
+	})
+}
+
 func (s *server) failRelayUnavailable(runID string, err error) {
 	s.store.FailWith(runID, "locked model relay unavailable: "+err.Error(), &store.Failure{
 		Kind:      "validator_infrastructure",
