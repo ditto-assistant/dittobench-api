@@ -15,8 +15,11 @@ import (
 	"sort"
 
 	"github.com/ditto-assistant/dittobench-api/internal/efficiency"
+	"github.com/ditto-assistant/dittobench-datagen/gen"
 	"github.com/ditto-assistant/dittobench-datagen/protocol"
 )
+
+const datasetKnownVectorSeed int64 = 123456789
 
 type reportEnvelope struct {
 	Report *protocol.ScoreReport `json:"report"`
@@ -30,9 +33,21 @@ type groupKey struct {
 }
 
 func main() {
+	refreshDatasets := flag.Bool("refresh-datasets", false, "regenerate the pinned v5 calibration dataset hashes and known vector")
 	flag.Parse()
+	if *refreshDatasets {
+		if flag.NArg() != 0 {
+			fatalf("-refresh-datasets does not accept score reports")
+		}
+		manifest, err := refreshedDatasetManifest()
+		if err != nil {
+			fatalf("refresh datasets: %v", err)
+		}
+		printManifest(manifest)
+		return
+	}
 	if flag.NArg() == 0 {
-		fmt.Fprintln(os.Stderr, "usage: tokenbaseline report.json [report.json ...]")
+		fmt.Fprintln(os.Stderr, "usage: tokenbaseline [-refresh-datasets] report.json [report.json ...]")
 		os.Exit(2)
 	}
 	manifest := efficiency.ManifestSnapshot()
@@ -108,6 +123,44 @@ func main() {
 		}
 		return a.RunSize < b.RunSize
 	})
+	printManifest(manifest)
+}
+
+func refreshedDatasetManifest() (efficiency.Manifest, error) {
+	manifest := efficiency.ManifestSnapshot()
+	manifest.ScoringEnabled = false
+	manifest.Baselines = nil
+	knownProfile, ok := gen.ProfileForVersion("full", protocol.BenchVersionV5)
+	if !ok {
+		return manifest, fmt.Errorf("v5 full profile unavailable")
+	}
+	known, err := gen.GenerateDataset(datasetKnownVectorSeed, knownProfile, protocol.BenchVersionV5)
+	if err != nil {
+		return manifest, fmt.Errorf("generate known vector: %w", err)
+	}
+	manifest.DatasetKnownVector, _, err = known.SHA256Hex()
+	if err != nil {
+		return manifest, fmt.Errorf("hash known vector: %w", err)
+	}
+	for i, dataset := range manifest.Calibration {
+		profile, ok := gen.ProfileForVersion(dataset.RunSize, protocol.BenchVersionV5)
+		if !ok {
+			return manifest, fmt.Errorf("unknown run size %q", dataset.RunSize)
+		}
+		artifact, err := gen.GenerateDataset(dataset.Seed, profile, protocol.BenchVersionV5)
+		if err != nil {
+			return manifest, fmt.Errorf("generate %s seed %d: %w", dataset.RunSize, dataset.Seed, err)
+		}
+		hash, _, err := artifact.SHA256Hex()
+		if err != nil {
+			return manifest, fmt.Errorf("hash %s seed %d: %w", dataset.RunSize, dataset.Seed, err)
+		}
+		manifest.Calibration[i].DatasetSHA256 = hash
+	}
+	return manifest, nil
+}
+
+func printManifest(manifest efficiency.Manifest) {
 	out, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
 		fatalf("encode manifest: %v", err)

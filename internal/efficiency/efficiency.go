@@ -75,9 +75,10 @@ func ManifestSnapshot() Manifest {
 	return copy
 }
 
-// ProductionReady is true only after reviewed baselines exist for every run
-// size on both certified provider profiles. Until then v5 remains hidden from
-// capability negotiation and any direct v5 report fails neutral.
+// ProductionReady is true only after reviewed OpenRouter baselines exist for
+// every run size. Until then v5 remains hidden from capability negotiation and
+// any direct v5 report fails neutral. Chutes remains a certified relay profile,
+// but is not part of the approved v5 production calibration contract.
 func ProductionReady() bool {
 	if !productionManifest.ScoringEnabled {
 		return false
@@ -86,10 +87,7 @@ func ProductionReady() bool {
 		provider string
 		revision string
 		model    string
-	}{
-		{"chutes", llm.ChutesRelayProfileRevision, llm.LockedUpstreamModel},
-		{"openrouter", llm.OpenRouterRelayProfileRevision, llm.LockedHarnessModel},
-	}
+	}{{"openrouter", llm.OpenRouterRelayProfileRevision, llm.LockedHarnessModel}}
 	for _, contract := range required {
 		for _, runSize := range []string{"small", "medium", "full"} {
 			found := false
