@@ -345,8 +345,7 @@ func (r *relay) handle(w http.ResponseWriter, req *http.Request) {
 			// was genuinely too slow surfaces as context.DeadlineExceeded, which
 			// is a real (retryable) infrastructure failure and flows through the
 			// normal path below.
-			if errors.Is(err, context.Canceled) &&
-				errors.Is(req.Context().Err(), context.Canceled) {
+			if callerCanceled(req, err) {
 				log.Print("model-relay: caller cancelled upstream call; not counted as an infrastructure failure")
 				return
 			}
@@ -361,6 +360,14 @@ func (r *relay) handle(w http.ResponseWriter, req *http.Request) {
 		responseBody, rerr := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody+1))
 		resp.Body.Close()
 		if rerr != nil {
+			// The caller can also disappear after headers arrive but while the
+			// response body is being read. Treat that exactly like a transport-time
+			// caller cancellation: no provider outcome or usage was received, and
+			// the abandoned call must not taint an otherwise complete run.
+			if callerCanceled(req, rerr) {
+				log.Print("model-relay: caller cancelled response body read; not counted as an infrastructure failure")
+				return
+			}
 			// Truncated/failed body read — transient, retryable.
 			if r.retryUpstream(req.Context(), attempt, "read upstream response error") {
 				continue
@@ -412,6 +419,10 @@ func (r *relay) handle(w http.ResponseWriter, req *http.Request) {
 		r.forward(w, resp, responseBody)
 		return
 	}
+}
+
+func callerCanceled(req *http.Request, err error) bool {
+	return errors.Is(err, context.Canceled) && errors.Is(req.Context().Err(), context.Canceled)
 }
 
 // forward relays the upstream status, Content-Type, and body to the sandbox.

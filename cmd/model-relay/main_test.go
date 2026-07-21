@@ -17,6 +17,19 @@ import (
 // sleeper is always stubbed no real time elapses.
 var testRetry = retryConfig{maxAttempts: 6, base: time.Millisecond, cap: 4 * time.Millisecond, factor: 2}
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return fn(req) }
+
+type cancelingBody struct{ cancel context.CancelFunc }
+
+func (b cancelingBody) Read([]byte) (int, error) {
+	b.cancel()
+	return 0, context.Canceled
+}
+
+func (cancelingBody) Close() error { return nil }
+
 // noSleep is a stubbed relay.sleep that never blocks.
 func noSleep(context.Context, time.Duration) error { return nil }
 
@@ -271,6 +284,31 @@ func TestRelayCallerCancellationVsDeadline(t *testing.T) {
 				t.Fatalf("upstream hits = %d, want %d", n, tc.wantHits)
 			}
 		})
+	}
+}
+
+func TestRelayCallerCancellationDuringBodyReadDoesNotTaintRun(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       cancelingBody{cancel: cancel},
+		}, nil
+	})}
+	r := &relay{upstream: "http://provider.invalid", apiKey: "k", model: "m", client: client, retry: testRetry}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"messages":[]}`)).WithContext(ctx)
+	req.Header.Set("Content-Type", "application/json")
+	r.handle(httptest.NewRecorder(), req)
+
+	if got := r.infrastructureFailures.Load(); got != 0 {
+		t.Fatalf("caller-cancelled body read tainted run with %d failure(s)", got)
+	}
+	if got := r.successes.Load(); got != 0 {
+		t.Fatalf("incomplete response counted as %d success(es)", got)
+	}
+	if got := r.usageAvailable.Load(); got != 0 {
+		t.Fatalf("incomplete response contributed %d usage record(s)", got)
 	}
 }
 
