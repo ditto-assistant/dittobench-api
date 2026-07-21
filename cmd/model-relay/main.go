@@ -44,6 +44,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -291,6 +292,21 @@ func (r *relay) handle(w http.ResponseWriter, req *http.Request) {
 
 		resp, err := r.client.Do(up)
 		if err != nil {
+			// The caller (sandbox/harness) abandoned this call — an early exit
+			// or run teardown cancelled the request context. That is the
+			// harness's own decision, NOT a provider failure: there is nobody
+			// left to answer and nothing to retry, so return without touching
+			// infrastructure_failures. Counting it would let a benign
+			// cancellation trip the fail-closed relay-health check and kill an
+			// otherwise-healthy run. A context that expired because the upstream
+			// was genuinely too slow surfaces as context.DeadlineExceeded, which
+			// is a real (retryable) infrastructure failure and flows through the
+			// normal path below.
+			if errors.Is(err, context.Canceled) &&
+				errors.Is(req.Context().Err(), context.Canceled) {
+				log.Print("model-relay: caller cancelled upstream call; not counted as an infrastructure failure")
+				return
+			}
 			// Transport/connection failure — transient, retryable.
 			if r.retryUpstream(req.Context(), attempt, fmt.Sprintf("transport error: %v", err)) {
 				continue
