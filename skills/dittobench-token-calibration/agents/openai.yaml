@@ -1,0 +1,4 @@
+interface:
+  display_name: "DittoBench Token Calibration"
+  short_description: "Run reproducible v5 relay-token baselines"
+  default_prompt: "Use $dittobench-token-calibration to validate progress and run exactly one next pinned reference calibration case."
