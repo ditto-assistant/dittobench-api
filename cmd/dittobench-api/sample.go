@@ -42,11 +42,6 @@ func (s *server) handleSample(w http.ResponseWriter, r *http.Request) {
 	if runSize == "" {
 		runSize = "small"
 	}
-	prof, ok := gen.ProfileFor(runSize)
-	if !ok {
-		writeError(w, http.StatusBadRequest, "run_size must be one of small|medium|full")
-		return
-	}
 	index := parseIntDefault(r.URL.Query().Get("sample"), 0)
 	if index < 0 || index > maxSampleIndex {
 		writeError(w, http.StatusBadRequest, "sample must be between 0 and 9")
@@ -56,7 +51,7 @@ func (s *server) handleSample(w http.ResponseWriter, r *http.Request) {
 	if rawVersion := r.URL.Query().Get("bench_version"); rawVersion != "" {
 		parsed, err := strconv.Atoi(rawVersion)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "bench_version must be an integer (supported: 2, 3, 4)")
+			writeError(w, http.StatusBadRequest, "bench_version must be an integer (supported: 2, 3, 4, 5)")
 			return
 		}
 		version = parsed
@@ -64,6 +59,12 @@ func (s *server) handleSample(w http.ResponseWriter, r *http.Request) {
 	version, msg := requestedBenchVersion(version, true)
 	if msg != "" {
 		writeError(w, http.StatusBadRequest, msg)
+		return
+	}
+	// v5 uses the scaled-up profile; earlier versions the historical sizes.
+	prof, ok := gen.ProfileForVersion(runSize, version)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "run_size must be one of small|medium|full")
 		return
 	}
 	art, err := gen.GenerateDataset(publicSampleSeed(index), prof, version)

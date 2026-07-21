@@ -252,7 +252,7 @@ type Result struct {
 // returns their calibrated distributions. Exported (via the package) so the test
 // asserts the ship-gate bar on the same computation the CLI prints.
 func Calibrate(seeds []int64, runSize string) ([]Result, error) {
-	prof, ok := gen.ProfileFor(runSize)
+	prof, ok := gen.ProfileForVersion(runSize, protocol.BenchVersionV5)
 	if !ok {
 		return nil, fmt.Errorf("unknown run_size %q", runSize)
 	}

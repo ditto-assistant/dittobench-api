@@ -819,7 +819,7 @@ func (s *server) submitRunSize(w http.ResponseWriter, r *http.Request, req submi
 		writeError(w, http.StatusBadRequest, "run_size requires git_url / tarball_url (build in Docker) or harness_url (point at an already-running harness, for local dev)")
 		return
 	}
-	prof, ok := gen.ProfileFor(req.RunSize)
+	prof, ok := gen.ProfileForVersion(req.RunSize, req.BenchVersion)
 	if !ok {
 		writeError(w, http.StatusBadRequest, "run_size must be one of: small, medium, full")
 		return
