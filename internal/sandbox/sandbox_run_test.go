@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -172,5 +173,34 @@ func TestRunArgs_EgressProxyInjectsEnv(t *testing.T) {
 	// The caller's env still rides along.
 	if !hasFlagPair(args, "-e", "OPENROUTER_API_KEY=sk-x") {
 		t.Errorf("caller env must be preserved, got %v", args)
+	}
+}
+
+func TestCleanupStaleRemovesOnlyOwnedExplicitResources(t *testing.T) {
+	d := NewLocalDocker()
+	var calls [][]string
+	d.dockerCommand = func(_ context.Context, args ...string) ([]byte, error) {
+		calls = append(calls, append([]string(nil), args...))
+		switch {
+		case reflect.DeepEqual(args, []string{"ps", "-aq", "--filter", "label=io.heyditto.dittobench.run"}):
+			return []byte("container-a\ncontainer-b\n"), nil
+		case reflect.DeepEqual(args, []string{"rm", "-f", "container-a", "container-b"}):
+			return nil, nil
+		case reflect.DeepEqual(args, []string{"network", "ls", "-q", "--filter", "label=io.heyditto.dittobench.run"}):
+			return []byte("network-a\nnetwork-b\n"), nil
+		case reflect.DeepEqual(args, []string{"network", "rm", "network-a"}),
+			reflect.DeepEqual(args, []string{"network", "rm", "network-b"}):
+			return nil, nil
+		default:
+			t.Fatalf("unexpected docker command: %v", args)
+			return nil, nil
+		}
+	}
+
+	if err := d.CleanupStale(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 5 {
+		t.Fatalf("expected five explicit docker calls, got %v", calls)
 	}
 }

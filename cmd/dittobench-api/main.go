@@ -128,6 +128,7 @@ type server struct {
 	sourceRevision      string
 	limiter             *ratelimit.Limiter
 	runSlots            chan struct{} // bounds concurrent run_size jobs
+	broker              *inferenceBroker
 	// relayRunMu isolates scored runs that share this server's model relay.
 	// The relay exposes process-wide monotonic failure counters, so overlapping
 	// scored runs could otherwise attribute one run's provider failure to another.
@@ -139,6 +140,9 @@ type server struct {
 func main() {
 	port := flag.Int("port", 8000, "HTTP listen port (ditto-subnet API convention)")
 	flag.Parse()
+	if maxConcurrentRuns > 8 {
+		log.Fatalf("DITTOBENCH_MAX_CONCURRENT_RUNS exceeds the supported safety bound of 8")
+	}
 
 	// Cloud Run (and most PaaS) inject the listen port via $PORT; honor it over
 	// the flag default so the same binary runs locally and hosted.
@@ -161,15 +165,23 @@ func main() {
 		log.Printf("DITTOBENCH_ALLOW_SCREENED_IMAGES set — trusted validator image path enabled")
 	}
 
+	sandboxRuntime := sandbox.NewLocalDocker()
+	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cleanupCancel()
+	if err := sandboxRuntime.CleanupStale(cleanupCtx); err != nil {
+		log.Fatalf("stale sandbox recovery failed: %v", err)
+	}
+
 	s := &server{
 		store:               store.New(),
-		sandbox:             sandbox.NewLocalDocker(),
+		sandbox:             sandboxRuntime,
 		allowPrivate:        allowPrivate,
 		allowScreenedImages: allowScreenedImages,
 		softwareVersion:     softwareVersion,
 		sourceRevision:      sourceRevision,
 		limiter:             ratelimit.New(submitsPerWindow, submitWindow),
 		runSlots:            make(chan struct{}, maxConcurrentRuns),
+		broker:              newInferenceBroker(),
 		runCancels:          make(map[string]context.CancelFunc),
 	}
 
@@ -186,6 +198,28 @@ func main() {
 	mux.HandleFunc("GET /v1/runs/{id}", s.handleGetRun)
 	mux.HandleFunc("GET /v1/runs/{id}/transcript", s.handleGetTranscript)
 	mux.HandleFunc("DELETE /v1/runs/{id}", s.handleCancelRun)
+	mux.HandleFunc("POST /v1/inference/session", s.broker.prepare)
+	mux.HandleFunc("POST /v1/inference/session/{id}/activate", s.broker.activate)
+	mux.HandleFunc("DELETE /v1/inference/session/{id}", s.broker.cancel)
+
+	// Untrusted harnesses reach a dedicated listener that exposes only the
+	// ticket-bound inference route. Keeping this off the control-plane mux means
+	// a harness cannot probe submit, cancel, run, or session-management APIs.
+	brokerMux := http.NewServeMux()
+	brokerMux.HandleFunc("GET /v1/inference/{id}/{rest...}", s.broker.handle)
+	brokerMux.HandleFunc("POST /v1/inference/{id}/{rest...}", s.broker.handle)
+	brokerMux.HandleFunc("POST /v1/tools/{id}/tool", s.broker.handleTool)
+	brokerPort := envIntDefault("DITTOBENCH_BROKER_PORT", 11436)
+	if brokerPort < 1024 || brokerPort > 65535 || brokerPort == *port {
+		log.Fatalf("invalid DITTOBENCH_BROKER_PORT: must be an unprivileged port distinct from the API port")
+	}
+	go func() {
+		brokerAddr := ":" + strconv.Itoa(brokerPort)
+		log.Printf("trusted inference broker listening on %s", brokerAddr)
+		if err := http.ListenAndServe(brokerAddr, brokerMux); err != nil {
+			log.Fatalf("inference broker error: %v", err)
+		}
+	}()
 
 	addr := ":" + strconv.Itoa(*port)
 	log.Printf("dittobench-api (off-chain practice validator) listening on %s", addr)
@@ -226,6 +260,7 @@ type capabilitiesResponse struct {
 	SoftwareVersion        string `json:"software_version"`
 	SourceRevision         string `json:"source_revision"`
 	SupportedBenchVersions []int  `json:"supported_bench_versions"`
+	FullRunCapacity        int    `json:"full_run_capacity"`
 }
 
 // handleCapabilities reports public release metadata to a co-located validator.
@@ -252,6 +287,7 @@ func (s *server) handleCapabilities(w http.ResponseWriter, _ *http.Request) {
 		SoftwareVersion:        s.softwareVersion,
 		SourceRevision:         s.sourceRevision,
 		SupportedBenchVersions: versions,
+		FullRunCapacity:        maxConcurrentRuns,
 	})
 }
 
@@ -382,6 +418,9 @@ type submitRequest struct {
 	// platform issues (seed, dataset_sha256) with the ticket, and this guarantees
 	// the validator scored precisely that dataset. Empty on the practice path.
 	ExpectedDatasetSHA256 string `json:"dataset_sha256,omitempty"`
+	// InferenceSessionID selects a trusted, memory-only platform capability
+	// prepared by the validator. It is an opaque broker routing id, not a bearer.
+	InferenceSessionID string `json:"inference_session_id,omitempty"`
 }
 
 // sourceFromReq builds the sandbox Source for a build submission. git_url and
@@ -1036,7 +1075,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	// defer is registered after this unlock defer, LIFO cleanup stops/cancels the
 	// old sandbox before the lease can pass to the next run. That prevents a late
 	// completion from being charged to another miner's counter window.
-	if scope == scorer.ScopeScored {
+	if scope == scorer.ScopeScored && req.InferenceSessionID == "" {
 		unlockRelayRun := s.lockScoredRelayRun()
 		defer unlockRelayRun()
 	}
@@ -1047,13 +1086,20 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	var handle *sandbox.Handle
 	var runErr error
 	if image != "" {
-		env := harnessSandboxEnv(req.Env)
+		env := harnessSandboxEnv(req.Env, req.InferenceSessionID)
 		handle, runErr = s.sandbox.Run(ctx, image, env)
 		if runErr != nil {
 			s.store.FailWith(runID, "container start failed: "+runErr.Error(), sandboxStartInfraFailure(runErr))
 			return
 		}
 		defer s.finishSandboxRun(runID, handle)
+		if req.InferenceSessionID != "" {
+			defer s.broker.remove(req.InferenceSessionID)
+			if !s.broker.bindSource(req.InferenceSessionID, handle.SourceIP) {
+				s.store.Fail(runID, "ticket inference session is unavailable")
+				return
+			}
+		}
 		harnessURL = handle.BaseURL
 		ctx = runner.TrustSandbox(ctx)
 	}
@@ -1085,7 +1131,11 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	for _, sc := range memSuite.Cases {
 		toolSrv.Register(sc.Case.ID, toolexec.BuildFixture(seed, protocol.ToolCase{ID: sc.Case.ID}))
 	}
-	toolEndpoint, stopToolSrv, err := s.startToolServer(toolSrv, image != "")
+	toolSourceIP := ""
+	if handle != nil {
+		toolSourceIP = handle.SourceIP
+	}
+	toolEndpoint, stopToolSrv, err := s.startToolServer(toolSrv, toolSourceIP)
 	if err != nil {
 		s.store.Fail(runID, "tool endpoint start failed: "+err.Error())
 		return
@@ -1129,7 +1179,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	var relayStart relayHealthSnapshot
 	if scope == scorer.ScopeScored {
 		var ok bool
-		relayStart, ok = s.relayRunStart(ctx, runID, req.BenchVersion)
+		relayStart, ok = s.relayRunStart(ctx, runID, req.BenchVersion, harnessGateway(req.InferenceSessionID))
 		if !ok {
 			return
 		}
@@ -1281,7 +1331,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	var relayExecution relayExecutionSummary
 	if scope == scorer.ScopeScored {
 		var ok bool
-		tokenUsage, relayExecution, ok = s.relayRunResult(ctx, runID, relayStart)
+		tokenUsage, relayExecution, ok = s.relayRunResult(ctx, runID, relayStart, harnessGateway(req.InferenceSessionID))
 		if !ok {
 			return
 		}
@@ -1474,13 +1524,22 @@ func withObservedTrajectory(resp protocol.RunResponse, observed []protocol.Obser
 }
 
 // startToolServer stands up the observed-execution mock tool endpoint on an
-// ephemeral host port, serving h at POST /tool. It returns the URL the harness
+// dedicated broker route (Docker) or an ephemeral host port (local practice),
+// serving h at POST /tool. It returns the URL the harness
 // should use (reachable from where the harness runs) and a stop func. The URL is
 // empty when the harness cannot reach our loopback port — a remote hosted
 // harness_url with the SSRF guard on — in which case observable tool cases are
 // scored capped (the harness simply won't call it). Listens on all interfaces so
 // a Docker-sandboxed container reaches it via host.docker.internal.
-func (s *server) startToolServer(h http.Handler, docker bool) (endpoint string, stop func(), err error) {
+func (s *server) startToolServer(h http.Handler, sandboxSourceIP string) (endpoint string, stop func(), err error) {
+	if sandboxSourceIP != "" {
+		id, unregister, registerErr := s.broker.registerTool(h, sandboxSourceIP)
+		if registerErr != nil {
+			return "", func() {}, registerErr
+		}
+		port := envIntDefault("DITTOBENCH_BROKER_PORT", 11436)
+		return fmt.Sprintf("http://host.docker.internal:%d/v1/tools/%s/tool", port, id), unregister, nil
+	}
 	// Bind IPv4 explicitly: a container reaching the host via host.docker.internal
 	// (Docker Desktop's host-gateway) connects over IPv4, and a Go dual-stack "[::]"
 	// listener is not reliably reachable that way on Docker Desktop/WSL2. tcp4 makes
@@ -1502,10 +1561,6 @@ func (s *server) startToolServer(h http.Handler, docker bool) (endpoint string, 
 	stop = func() { _ = srv.Close() }
 
 	switch {
-	case docker:
-		// Docker sandbox: the container reaches the host at host.docker.internal
-		// (mapped to host-gateway when the container is started, see sandbox.Run).
-		endpoint = fmt.Sprintf("http://host.docker.internal:%d/tool", port)
 	case s.allowPrivate:
 		// Local dev: the harness runs on the same host as the validator. A
 		// CONTAINERIZED local harness (e.g. a miner practicing their own image via
@@ -1692,9 +1747,11 @@ func (s *server) waitSandboxHealthy(
 	return fmt.Errorf("harness not healthy after %s: %w", timeout, last)
 }
 
-// lockedProvider is the frozen crate provider. The whole fleet reaches the
-// locked model through this one OpenAI-compatible path, so serving differences
-// do not make the k=3 validators' scores less comparable. Not env-tunable.
+// lockedProvider is the starter harness crate's historical name for its generic
+// OpenAI-compatible adapter. It is not a live Chutes dependency: the base URL
+// points only at the ticket broker (or the bounded legacy relay), and the
+// placeholder key is never sent to an external Chutes service. Renaming this
+// adapter would change the benchmark harness contract, so it remains frozen.
 const lockedProvider = "chutes"
 
 // lockedEnvKeys are the sandbox env vars the model lock owns. A caller-supplied
@@ -1737,15 +1794,14 @@ func sandboxRuntimeEnv(reqEnv map[string]string) map[string]string {
 // are applied AFTER the caller-supplied env and the caller's attempts to set any
 // lockedEnvKey are dropped, so req.Env can never override the lock.
 //
-// The provider is frozen (lockedProvider): the crate always reaches the locked
-// model through the OpenAI-compatible "chutes" path, so the fleet serves one
-// backend and scores stay comparable. Only the gateway URLs are env-configurable
-// (HARNESS_GATEWAY_URL for chat, HARNESS_EMBED_URL for embeddings), pointing at
-// whatever serves the locked model on the host: cmd/model-relay fronting Chutes
-// for a GPU-less validator, or a local OpenAI-compatible server. The model id is
-// frozen too (llm.HarnessModel).
-func harnessSandboxEnv(reqEnv map[string]string) map[string]string {
+// The adapter is frozen (lockedProvider), while the gateway is the ticket-bound
+// platform broker. A legacy gateway URL exists only for the bounded rollback
+// window. The model id remains frozen (llm.HarnessModel).
+func harnessSandboxEnv(reqEnv map[string]string, inferenceSessionID ...string) map[string]string {
 	gateway := envOr("HARNESS_GATEWAY_URL", "http://host.docker.internal:11434")
+	if len(inferenceSessionID) > 0 && inferenceSessionID[0] != "" {
+		gateway = harnessGateway(inferenceSessionID[0])
+	}
 	env := map[string]string{}
 	for k, v := range sandboxRuntimeEnv(reqEnv) {
 		if lockedEnvKeys[k] {
@@ -1754,10 +1810,10 @@ func harnessSandboxEnv(reqEnv map[string]string) map[string]string {
 		env[k] = v
 	}
 	// The lock, applied last so it wins over caller env. Chat routes to the
-	// gateway through the crate's chutes provider (CHUTES_BASE_URL); embeddings
+	// gateway through the crate's compatibility adapter (CHUTES_BASE_URL); embeddings
 	// hit the local Ollama (OLLAMA_BASE_URL), which is the same host by default.
-	// The real upstream key lives only in the relay, so the sandbox-side key is a
-	// placeholder.
+	// The platform upstream key lives only on the platform, so the sandbox-side
+	// value is a non-secret compatibility placeholder.
 	env["DITTOBENCH_PROVIDER"] = lockedProvider
 	env["DITTOBENCH_MODEL"] = llm.HarnessModel()
 	env["OLLAMA_BASE_URL"] = envOr("HARNESS_EMBED_URL", gateway)
@@ -1769,6 +1825,14 @@ func harnessSandboxEnv(reqEnv map[string]string) map[string]string {
 	// the validator's unprivileged UID.
 	env["DITTOBENCH_DB"] = "/tmp/dittobench.db"
 	return env
+}
+
+func harnessGateway(inferenceSessionID string) string {
+	if inferenceSessionID != "" {
+		brokerPort := envIntDefault("DITTOBENCH_BROKER_PORT", 11436)
+		return "http://host.docker.internal:" + strconv.Itoa(brokerPort) + "/v1/inference/" + inferenceSessionID
+	}
+	return envOr("HARNESS_GATEWAY_URL", "http://host.docker.internal:11434")
 }
 
 // clientIP returns the caller's IP for rate-limiting, honoring the first hop of

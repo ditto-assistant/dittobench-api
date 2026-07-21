@@ -241,8 +241,7 @@ func relayUsageSince(start, end relayHealthSnapshot) (protocol.TokenUsage, error
 	return usage, nil
 }
 
-func (s *server) relayRunStart(ctx context.Context, runID string, benchVersion int) (relayHealthSnapshot, bool) {
-	gateway := envOr("HARNESS_GATEWAY_URL", "http://host.docker.internal:11434")
+func (s *server) relayRunStart(ctx context.Context, runID string, benchVersion int, gateway string) (relayHealthSnapshot, bool) {
 	if err := probeLockedModelRelay(ctx, gateway); err != nil {
 		s.failRelayUnavailable(runID, err)
 		return relayHealthSnapshot{}, false
@@ -261,8 +260,7 @@ func (s *server) relayRunStart(ctx context.Context, runID string, benchVersion i
 	return snapshot, true
 }
 
-func (s *server) relayRunResult(ctx context.Context, runID string, start relayHealthSnapshot) (protocol.TokenUsage, relayExecutionSummary, bool) {
-	gateway := envOr("HARNESS_GATEWAY_URL", "http://host.docker.internal:11434")
+func (s *server) relayRunResult(ctx context.Context, runID string, start relayHealthSnapshot, gateway string) (protocol.TokenUsage, relayExecutionSummary, bool) {
 	end, err := readRelayHealth(ctx, gateway)
 	if err == nil {
 		err = relayDegradedSince(start, end)

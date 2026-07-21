@@ -26,8 +26,10 @@ package sandbox
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"strconv"
@@ -86,6 +88,10 @@ type Handle struct {
 	// after removing the container so long-lived validators do not accumulate
 	// multi-gigabyte submission images.
 	ImageRef string
+	// NetworkName is the request-private bridge created for this container.
+	// Stop removes it after removing the sole untrusted member.
+	NetworkName string
+	SourceIP    string
 }
 
 // RuntimeDiagnostics is bounded, source-free evidence captured before teardown.
@@ -294,7 +300,11 @@ func (d *LocalDocker) Build(ctx context.Context, src Source) (string, string, *p
 	}
 
 	// 3. Build the local context for legacy/evaluating records without an image.
-	image := "dittobench-sub:" + safeTag(src)
+	buildIdentity, err := isolatedIdentity()
+	if err != nil {
+		return "", "", nil, err
+	}
+	image := "dittobench-sub:" + safeTag(src) + "-" + buildIdentity
 	args := []string{"build", "-t", image}
 	if d.GitHubTokenFile != "" {
 		args = append(args, "--secret", "id=gh_token,src="+d.GitHubTokenFile)
@@ -368,9 +378,42 @@ func (d *LocalDocker) dockerOutput(ctx context.Context, args ...string) ([]byte,
 	return exec.CommandContext(ctx, "docker", args...).CombinedOutput()
 }
 
+// CleanupStale removes only resources carrying this scorer's ownership label.
+// A process restart loses all in-memory run and broker state, so retaining an
+// old untrusted container could only create cross-run interference. Explicit
+// ids from Docker are used instead of names, globs, or broad prune operations.
+func (d *LocalDocker) CleanupStale(ctx context.Context) error {
+	const ownership = "label=io.heyditto.dittobench.run"
+	containers, err := d.dockerOutput(ctx, "ps", "-aq", "--filter", ownership)
+	if err != nil {
+		return fmt.Errorf("list stale scorer containers: %w", err)
+	}
+	ids := strings.Fields(string(containers))
+	if len(ids) > 0 {
+		args := append([]string{"rm", "-f"}, ids...)
+		if out, removeErr := d.dockerOutput(ctx, args...); removeErr != nil {
+			return fmt.Errorf("remove stale scorer containers: %s: %w", strings.TrimSpace(string(out)), removeErr)
+		}
+	}
+	networks, err := d.dockerOutput(ctx, "network", "ls", "-q", "--filter", ownership)
+	if err != nil {
+		return fmt.Errorf("list stale scorer networks: %w", err)
+	}
+	for _, id := range strings.Fields(string(networks)) {
+		if out, removeErr := d.dockerOutput(ctx, "network", "rm", id); removeErr != nil {
+			return fmt.Errorf("remove stale scorer network: %s: %w", strings.TrimSpace(string(out)), removeErr)
+		}
+	}
+	return nil
+}
+
 // runArgs builds the `docker run` argument vector. Extracted from Run so the
 // isolation/egress flags can be unit-tested without a live docker daemon.
 func (d *LocalDocker) runArgs(image string, env map[string]string) []string {
+	return d.runArgsForNetwork(image, env, d.EgressNetwork, "")
+}
+
+func (d *LocalDocker) runArgsForNetwork(image string, env map[string]string, network string, identity string) []string {
 	args := []string{
 		// Do not use --rm: Docker would erase an OOM-killed container before the
 		// scorer can inspect State.OOMKilled/ExitCode. Every successful Run path
@@ -386,6 +429,13 @@ func (d *LocalDocker) runArgs(image string, env map[string]string) []string {
 		"--ulimit", "nofile=1024:1024",
 		"--security-opt", "no-new-privileges",
 	}
+	if identity != "" {
+		args = append(args,
+			"--name", "dittobench-"+identity,
+			"--hostname", "harness",
+			"--label", "io.heyditto.dittobench.run="+identity,
+		)
+	}
 	if d.Harden {
 		// An untrusted userland HTTP harness needs no Linux capabilities.
 		args = append(args, "--cap-drop", "ALL")
@@ -396,11 +446,11 @@ func (d *LocalDocker) runArgs(image string, env map[string]string) []string {
 	if d.AppArmorProfile != "" {
 		args = append(args, "--security-opt", "apparmor="+d.AppArmorProfile)
 	}
-	if d.EgressNetwork != "" {
+	if network != "" {
 		// The egress-restricted sandbox network (allowlisting proxy + host
 		// firewall) instead of the default full-egress bridge. See the Sandbox
 		// egress section in docs/model-lock.md.
-		args = append(args, "--network", d.EgressNetwork)
+		args = append(args, "--network", network)
 	}
 	// Let the harness reach host services (e.g. the Ollama embeddings server) at
 	// the documented host.docker.internal name. On Linux Docker this needs an
@@ -423,6 +473,32 @@ func (d *LocalDocker) runArgs(image string, env map[string]string) []string {
 		)
 	}
 	return append(args, image)
+}
+
+func isolatedIdentity() (string, error) {
+	var value [8]byte
+	if _, err := rand.Read(value[:]); err != nil {
+		return "", fmt.Errorf("sandbox identity: %w", err)
+	}
+	return fmt.Sprintf("%x", value[:]), nil
+}
+
+func (d *LocalDocker) createIsolatedNetwork(ctx context.Context, identity string) (string, error) {
+	name := "ditto-job-" + identity
+	bridge := "dtj" + identity[:10]
+	out, err := d.dockerOutput(
+		ctx,
+		"network", "create",
+		"--driver", "bridge",
+		"--opt", "com.docker.network.bridge.name="+bridge,
+		"--opt", "com.docker.network.bridge.enable_icc=false",
+		"--label", "io.heyditto.dittobench.run="+identity,
+		name,
+	)
+	if err != nil {
+		return "", fmt.Errorf("create isolated network: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	return name, nil
 }
 
 type dockerState struct {
@@ -525,8 +601,25 @@ func (d *LocalDocker) Run(ctx context.Context, image string, env map[string]stri
 	runCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	out, err := exec.CommandContext(runCtx, "docker", d.runArgs(image, env)...).CombinedOutput()
+	identity, err := isolatedIdentity()
 	if err != nil {
+		return nil, err
+	}
+	network := ""
+	if d.EgressNetwork != "" {
+		network, err = d.createIsolatedNetwork(runCtx, identity)
+		if err != nil {
+			return nil, err
+		}
+	}
+	cleanupNetwork := func() {
+		if network != "" {
+			_, _ = d.dockerOutput(context.Background(), "network", "rm", network)
+		}
+	}
+	out, err := exec.CommandContext(runCtx, "docker", d.runArgsForNetwork(image, env, network, identity)...).CombinedOutput()
+	if err != nil {
+		cleanupNetwork()
 		d.Release(context.Background(), image)
 		return nil, fmt.Errorf("docker run failed: %s: %w", strings.TrimSpace(string(out)), err)
 	}
@@ -534,14 +627,33 @@ func (d *LocalDocker) Run(ctx context.Context, image string, env map[string]stri
 
 	hostPort, err := d.mappedPort(runCtx, containerID)
 	if err != nil {
-		d.Stop(context.Background(), &Handle{ContainerID: containerID, ImageRef: image})
+		d.Stop(context.Background(), &Handle{ContainerID: containerID, ImageRef: image, NetworkName: network})
+		return nil, err
+	}
+	sourceIP, err := d.containerIP(runCtx, containerID)
+	if err != nil {
+		d.Stop(context.Background(), &Handle{ContainerID: containerID, ImageRef: image, NetworkName: network})
 		return nil, err
 	}
 	return &Handle{
 		ContainerID: containerID,
 		BaseURL:     "http://127.0.0.1:" + hostPort,
 		ImageRef:    image,
+		NetworkName: network,
+		SourceIP:    sourceIP,
 	}, nil
+}
+
+func (d *LocalDocker) containerIP(ctx context.Context, containerID string) (string, error) {
+	out, err := d.dockerOutput(ctx, "inspect", "--format", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", containerID)
+	if err != nil {
+		return "", fmt.Errorf("docker inspect container address: %w", err)
+	}
+	value := strings.TrimSpace(string(out))
+	if net.ParseIP(value) == nil {
+		return "", fmt.Errorf("docker inspect returned invalid container address")
+	}
+	return value, nil
 }
 
 // mappedPort returns the host port docker assigned to the harness port.
@@ -570,6 +682,9 @@ func (d *LocalDocker) Stop(ctx context.Context, h *Handle) {
 	defer cancel()
 	if h.ContainerID != "" {
 		_ = exec.CommandContext(ctx, "docker", "rm", "-f", h.ContainerID).Run()
+	}
+	if h.NetworkName != "" && strings.HasPrefix(h.NetworkName, "ditto-job-") {
+		_, _ = d.dockerOutput(ctx, "network", "rm", h.NetworkName)
 	}
 	d.Release(ctx, h.ImageRef)
 }

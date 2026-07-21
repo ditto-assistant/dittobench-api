@@ -26,6 +26,9 @@ func TestCapabilitiesReportBoundReleaseIdentity(t *testing.T) {
 	if got.SoftwareVersion != "0.10.0" || got.SourceRevision != testSourceRevision {
 		t.Fatalf("wrong identity: %+v", got)
 	}
+	if got.FullRunCapacity != maxConcurrentRuns {
+		t.Fatalf("full-run capacity = %d, want %d", got.FullRunCapacity, maxConcurrentRuns)
+	}
 	// v2-v4 are always advertised; v5 is negotiated only once reviewed token
 	// baselines make efficiency.ProductionReady() true (the #54 release gate).
 	want := []int{2, 3, 4}
