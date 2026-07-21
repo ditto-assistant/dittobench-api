@@ -13,11 +13,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/ditto-assistant/dittobench-api/internal/netguard"
 )
 
 var maxScreenedImageBytes int64 = 8 << 30 // 8 GiB, additionally exact-size pinned
+var screenedImageLoadMu sync.Mutex
 
 const (
 	ociImageIndexMediaType    = "application/vnd.oci.image.index.v1+json"
@@ -81,6 +83,8 @@ func (d *LocalDocker) loadScreenedImage(ctx context.Context, src Source, workdir
 	if err != nil {
 		return "", "", fmt.Errorf("invalid screened image archive: %w", err)
 	}
+	screenedImageLoadMu.Lock()
+	defer screenedImageLoadMu.Unlock()
 	// Preserve an operator/pre-existing tag if this UUID-like screener ref was
 	// somehow already present. Every exit after docker load restores the prior
 	// tag (or removes the newly imported one), including partial load failures.
@@ -116,7 +120,11 @@ func (d *LocalDocker) loadScreenedImage(ctx context.Context, src Source, workdir
 	if loadedID != src.ScreenedImageID {
 		return "", tail(string(loadOut), 4000), fmt.Errorf("screened image id mismatch: expected %s got %s", src.ScreenedImageID, loadedID)
 	}
-	localRef := "dittobench-sub:" + safeTag(src)
+	identity, err := isolatedIdentity()
+	if err != nil {
+		return "", tail(string(loadOut), 4000), err
+	}
+	localRef := "dittobench-sub:" + safeTag(src) + "-" + identity
 	if out, err := exec.CommandContext(ctx, "docker", "image", "tag", src.ScreenedImageRef, localRef).CombinedOutput(); err != nil {
 		return "", tail(string(loadOut), 4000), fmt.Errorf("tag screened image: %s: %w", strings.TrimSpace(string(out)), err)
 	}

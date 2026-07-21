@@ -20,6 +20,7 @@
 // override: the pin is enforced in code, not left to a validator's env.
 //
 // Env (deployment only):
+//   - RELAY_DISABLED  "1" starts a no-provider compatibility stub
 //   - RELAY_PROVIDER  "openrouter" (default); "chutes" is soft-deprecated
 //   - RELAY_ENABLE_DEPRECATED_CHUTES  explicit "1" needed for the old profile
 //   - RELAY_API_KEY   upstream bearer key for the selected provider (required)
@@ -238,6 +239,13 @@ type relayHealth struct {
 }
 
 func main() {
+	addr := ":" + envOr("PORT", "11434")
+	if strings.TrimSpace(os.Getenv("RELAY_DISABLED")) == "1" {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/", disabledHandler)
+		serveRelay(addr, mux, "model-relay compatibility stub disabled")
+		return
+	}
 	providerName := envOr("RELAY_PROVIDER", "openrouter")
 	if providerName == "chutes" && strings.TrimSpace(os.Getenv("RELAY_ENABLE_DEPRECATED_CHUTES")) != "1" {
 		log.Fatal("the Chutes relay profile is disabled; use platform ticket inference")
@@ -272,8 +280,21 @@ func main() {
 	mux.HandleFunc("POST /v1/chat/completions", r.handle)
 	mux.HandleFunc("POST /chat/completions", r.handle)
 	mux.HandleFunc("GET /health", r.health)
-	addr := ":" + envOr("PORT", "11434")
 	log.Printf("model-relay on %s -> %s (model pinned to %s)", addr, r.upstream, r.model)
+	serveRelay(addr, mux, "")
+}
+
+func disabledHandler(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusGone)
+	_, _ = w.Write([]byte(`{"status":"disabled"}`))
+}
+
+func serveRelay(addr string, handler http.Handler, message string) {
+	if message != "" {
+		log.Printf("%s on %s", message, addr)
+	}
 	// Bind IPv4 explicitly. The relay is the gateway a sandboxed harness reaches via
 	// host.docker.internal (Docker Desktop's IPv4 host-gateway); a Go dual-stack
 	// "[::]" listener is not reachable that way on Docker Desktop/WSL2, so the
@@ -283,7 +304,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("listen %s: %v", addr, err)
 	}
-	log.Fatal(http.Serve(ln, mux))
+	log.Fatal(http.Serve(ln, handler))
 }
 
 func (r *relay) handle(w http.ResponseWriter, req *http.Request) {

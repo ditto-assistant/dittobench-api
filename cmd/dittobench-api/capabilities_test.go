@@ -29,6 +29,9 @@ func TestCapabilitiesReportBoundReleaseIdentity(t *testing.T) {
 	if got.FullRunCapacity != maxConcurrentRuns {
 		t.Fatalf("full-run capacity = %d, want %d", got.FullRunCapacity, maxConcurrentRuns)
 	}
+	if got.MemoryPhaseCapacity != maxConcurrentMemoryPhases {
+		t.Fatalf("memory-phase capacity = %d, want %d", got.MemoryPhaseCapacity, maxConcurrentMemoryPhases)
+	}
 	// v2-v4 are always advertised; v5 is negotiated only once reviewed token
 	// baselines make efficiency.ProductionReady() true (the #54 release gate).
 	want := []int{2, 3, 4}

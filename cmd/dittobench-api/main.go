@@ -68,6 +68,11 @@ var (
 	// headroom to spare.
 	maxConcurrentRuns = envIntDefault("DITTOBENCH_MAX_CONCURRENT_RUNS", 1)
 	caseConcurrency   = envIntDefault("DITTOBENCH_CASE_CONCURRENCY", 4)
+	// Local embeddings are a separate finite resource from hosted chat
+	// inference. Default to one memory phase so raising run capacity cannot turn
+	// concurrent seed waves into deterministic Ollama timeouts; capable hosts may
+	// raise this independently after qualification.
+	maxConcurrentMemoryPhases = envIntDefault("DITTOBENCH_MAX_CONCURRENT_MEMORY_PHASES", 1)
 )
 
 // envIntDefault reads a positive int from key, returning def when unset or invalid.
@@ -122,13 +127,15 @@ type server struct {
 	sandbox sandbox.Sandbox
 	// allowPrivate relaxes caller-supplied URL checks for local development.
 	// Validator-owned loopback sandboxes use a separate trusted client.
-	allowPrivate        bool
-	allowScreenedImages bool
-	softwareVersion     string
-	sourceRevision      string
-	limiter             *ratelimit.Limiter
-	runSlots            chan struct{} // bounds concurrent run_size jobs
-	broker              *inferenceBroker
+	allowPrivate           bool
+	allowScreenedImages    bool
+	requireTicketInference bool
+	softwareVersion        string
+	sourceRevision         string
+	limiter                *ratelimit.Limiter
+	runSlots               chan struct{} // bounds concurrent run_size jobs
+	memorySlots            chan struct{} // bounds embedding-heavy memory phases
+	broker                 *inferenceBroker
 	// relayRunMu isolates scored runs that share this server's model relay.
 	// The relay exposes process-wide monotonic failure counters, so overlapping
 	// scored runs could otherwise attribute one run's provider failure to another.
@@ -143,6 +150,9 @@ func main() {
 	if maxConcurrentRuns > 8 {
 		log.Fatalf("DITTOBENCH_MAX_CONCURRENT_RUNS exceeds the supported safety bound of 8")
 	}
+	if maxConcurrentMemoryPhases > maxConcurrentRuns {
+		maxConcurrentMemoryPhases = maxConcurrentRuns
+	}
 
 	// Cloud Run (and most PaaS) inject the listen port via $PORT; honor it over
 	// the flag default so the same binary runs locally and hosted.
@@ -155,6 +165,7 @@ func main() {
 	// SSRF guard is ON by default; opt out for local dev / sandbox containers.
 	allowPrivate := envBool("DITTOBENCH_ALLOW_PRIVATE_HARNESS")
 	allowScreenedImages := envBool("DITTOBENCH_ALLOW_SCREENED_IMAGES")
+	requireTicketInference := envBool("DITTOBENCH_REQUIRE_TICKET_INFERENCE")
 	softwareVersion := strings.TrimSpace(os.Getenv("DITTOBENCH_SOFTWARE_VERSION"))
 	sourceRevision := strings.TrimSpace(os.Getenv("DITTOBENCH_SOURCE_SHA"))
 	runner.Configure(allowPrivate)
@@ -169,20 +180,25 @@ func main() {
 	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cleanupCancel()
 	if err := sandboxRuntime.CleanupStale(cleanupCtx); err != nil {
-		log.Fatalf("stale sandbox recovery failed: %v", err)
+		if allowScreenedImages {
+			log.Fatalf("stale sandbox recovery failed: %v", err)
+		}
+		log.Printf("optional practice sandbox cleanup skipped: %v", err)
 	}
 
 	s := &server{
-		store:               store.New(),
-		sandbox:             sandboxRuntime,
-		allowPrivate:        allowPrivate,
-		allowScreenedImages: allowScreenedImages,
-		softwareVersion:     softwareVersion,
-		sourceRevision:      sourceRevision,
-		limiter:             ratelimit.New(submitsPerWindow, submitWindow),
-		runSlots:            make(chan struct{}, maxConcurrentRuns),
-		broker:              newInferenceBroker(),
-		runCancels:          make(map[string]context.CancelFunc),
+		store:                  store.New(),
+		sandbox:                sandboxRuntime,
+		allowPrivate:           allowPrivate,
+		allowScreenedImages:    allowScreenedImages,
+		requireTicketInference: requireTicketInference,
+		softwareVersion:        softwareVersion,
+		sourceRevision:         sourceRevision,
+		limiter:                ratelimit.New(submitsPerWindow, submitWindow),
+		runSlots:               make(chan struct{}, maxConcurrentRuns),
+		memorySlots:            make(chan struct{}, maxConcurrentMemoryPhases),
+		broker:                 newInferenceBroker(maxConcurrentRuns),
+		runCancels:             make(map[string]context.CancelFunc),
 	}
 
 	mux := http.NewServeMux()
@@ -206,8 +222,8 @@ func main() {
 	// ticket-bound inference route. Keeping this off the control-plane mux means
 	// a harness cannot probe submit, cancel, run, or session-management APIs.
 	brokerMux := http.NewServeMux()
-	brokerMux.HandleFunc("GET /v1/inference/{id}/{rest...}", s.broker.handle)
-	brokerMux.HandleFunc("POST /v1/inference/{id}/{rest...}", s.broker.handle)
+	brokerMux.HandleFunc("GET /v1/inference/{rest...}", s.broker.handle)
+	brokerMux.HandleFunc("POST /v1/inference/{rest...}", s.broker.handle)
 	brokerMux.HandleFunc("POST /v1/tools/{id}/tool", s.broker.handleTool)
 	brokerPort := envIntDefault("DITTOBENCH_BROKER_PORT", 11436)
 	if brokerPort < 1024 || brokerPort > 65535 || brokerPort == *port {
@@ -261,6 +277,7 @@ type capabilitiesResponse struct {
 	SourceRevision         string `json:"source_revision"`
 	SupportedBenchVersions []int  `json:"supported_bench_versions"`
 	FullRunCapacity        int    `json:"full_run_capacity"`
+	MemoryPhaseCapacity    int    `json:"memory_phase_capacity"`
 }
 
 // handleCapabilities reports public release metadata to a co-located validator.
@@ -288,6 +305,7 @@ func (s *server) handleCapabilities(w http.ResponseWriter, _ *http.Request) {
 		SourceRevision:         s.sourceRevision,
 		SupportedBenchVersions: versions,
 		FullRunCapacity:        maxConcurrentRuns,
+		MemoryPhaseCapacity:    maxConcurrentMemoryPhases,
 	})
 }
 
@@ -687,6 +705,14 @@ func (s *server) handleScoreRequest(w http.ResponseWriter, r *http.Request, requ
 		return
 	}
 	req.BenchVersion = version
+	if s.requireTicketInference && req.InferenceSessionID == "" {
+		writeError(
+			w,
+			http.StatusServiceUnavailable,
+			"ticket inference session is required for canonical scoring",
+		)
+		return
+	}
 	// Validator-specific preconditions (beyond what submitRunSize enforces).
 	if req.Seed == 0 {
 		writeError(w, http.StatusBadRequest, "seed is required (the platform-issued dataset seed) for canonical scoring")
@@ -1070,12 +1096,37 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		}
 	}
 
+	// Legacy scored runs still use a reviewed validator-owned compatibility relay. Put
+	// each sandbox behind its own trusted, source-bound local broker session so
+	// token/error accounting stays per-run while multiple v6 benches execute at
+	// once. The provider key remains only in model-relay. V7 arrives with a
+	// platform-issued session and never enters this compatibility path.
+	inferenceSessionID := req.InferenceSessionID
+	if scope == scorer.ScopeScored && inferenceSessionID == "" && image != "" &&
+		req.BenchVersion <= protocol.BenchVersionV6 {
+		gateway := envOr("HARNESS_GATEWAY_URL", "http://host.docker.internal:11434")
+		relay, err := readRelayHealth(ctx, gateway)
+		if err != nil {
+			s.failRelayUnavailable(runID, err)
+			return
+		}
+		legacySessionID, err := s.broker.prepareLegacy(
+			gateway,
+			relay,
+		)
+		if err != nil {
+			s.failRelayUnavailable(runID, err)
+			return
+		}
+		inferenceSessionID = legacySessionID
+		defer s.broker.remove(legacySessionID)
+	}
+
 	// The relay exposes process-wide monotonic counters. Serialize the entire
-	// scored sandbox lifetime, not just the case loop: because the sandbox cleanup
-	// defer is registered after this unlock defer, LIFO cleanup stops/cancels the
-	// old sandbox before the lease can pass to the next run. That prevents a late
-	// completion from being charged to another miner's counter window.
-	if scope == scorer.ScopeScored && req.InferenceSessionID == "" {
+	// scored lifetime only for the direct-harness development path, which cannot
+	// be source-bound to a private broker session. Production sandbox runs use
+	// the per-run broker above and therefore do not serialize on this mutex.
+	if scope == scorer.ScopeScored && inferenceSessionID == "" {
 		unlockRelayRun := s.lockScoredRelayRun()
 		defer unlockRelayRun()
 	}
@@ -1086,17 +1137,19 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	var handle *sandbox.Handle
 	var runErr error
 	if image != "" {
-		env := harnessSandboxEnv(req.Env, req.InferenceSessionID)
+		env := harnessSandboxEnv(req.Env, inferenceSessionID)
 		handle, runErr = s.sandbox.Run(ctx, image, env)
 		if runErr != nil {
 			s.store.FailWith(runID, "container start failed: "+runErr.Error(), sandboxStartInfraFailure(runErr))
 			return
 		}
 		defer s.finishSandboxRun(runID, handle)
-		if req.InferenceSessionID != "" {
-			defer s.broker.remove(req.InferenceSessionID)
-			if !s.broker.bindSource(req.InferenceSessionID, handle.SourceIP) {
-				s.store.Fail(runID, "ticket inference session is unavailable")
+		if inferenceSessionID != "" {
+			if req.InferenceSessionID != "" {
+				defer s.broker.remove(req.InferenceSessionID)
+			}
+			if !s.broker.bindSource(inferenceSessionID, handle.SourceIP) {
+				s.store.Fail(runID, "inference session is unavailable")
 				return
 			}
 		}
@@ -1179,7 +1232,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	var relayStart relayHealthSnapshot
 	if scope == scorer.ScopeScored {
 		var ok bool
-		relayStart, ok = s.relayRunStart(ctx, runID, req.BenchVersion, harnessGateway(req.InferenceSessionID))
+		relayStart, ok = s.relayRunStart(ctx, runID, req.BenchVersion, harnessGateway(inferenceSessionID), inferenceSessionID)
 		if !ok {
 			return
 		}
@@ -1238,6 +1291,19 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		}
 	}
 	transcripts := append(make([]transcriptCase, 0, total), toolTranscripts...)
+
+	// Seed and memory-query embedding requests share the validator's local
+	// Ollama. Admit this whole phase independently from hosted chat inference:
+	// two healthy Chutes runs can overlap their tool cases while a single-CPU
+	// embedding service remains protected from an unbounded seed burst.
+	if s.memorySlots != nil {
+		select {
+		case s.memorySlots <- struct{}{}:
+			defer func() { <-s.memorySlots }()
+		case <-ctx.Done():
+			return
+		}
+	}
 
 	// 5. memory cases — staged Tier-C ingestion: seed a wave,
 	//    then run the cases it unlocks (all their evidence is now seeded), then
@@ -1331,7 +1397,13 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	var relayExecution relayExecutionSummary
 	if scope == scorer.ScopeScored {
 		var ok bool
-		tokenUsage, relayExecution, ok = s.relayRunResult(ctx, runID, relayStart, harnessGateway(req.InferenceSessionID))
+		tokenUsage, relayExecution, ok = s.relayRunResult(
+			ctx,
+			runID,
+			relayStart,
+			harnessGateway(inferenceSessionID),
+			inferenceSessionID,
+		)
 		if !ok {
 			return
 		}
@@ -1830,7 +1902,7 @@ func harnessSandboxEnv(reqEnv map[string]string, inferenceSessionID ...string) m
 func harnessGateway(inferenceSessionID string) string {
 	if inferenceSessionID != "" {
 		brokerPort := envIntDefault("DITTOBENCH_BROKER_PORT", 11436)
-		return "http://host.docker.internal:" + strconv.Itoa(brokerPort) + "/v1/inference/" + inferenceSessionID
+		return "http://host.docker.internal:" + strconv.Itoa(brokerPort) + "/v1/inference"
 	}
 	return envOr("HARNESS_GATEWAY_URL", "http://host.docker.internal:11434")
 }

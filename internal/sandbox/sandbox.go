@@ -135,6 +135,9 @@ type LocalDocker struct {
 	CPULimit string
 	// BuildTimeout bounds a single `docker build` (Rust cold builds are slow).
 	BuildTimeout time.Duration
+	// StartTimeout bounds image unpack + container creation. Concurrent screened
+	// image starts can exceed Docker's usual fast path without being hung.
+	StartTimeout time.Duration
 	// GitHubTokenFile, if set, is mounted into the build as the BuildKit secret
 	// `gh_token` so the build can fetch the private ditto-harness dependency
 	// over HTTPS. No-op once that repo is public. Defaults from the
@@ -177,6 +180,7 @@ func NewLocalDocker() *LocalDocker {
 		TmpfsLimit:      "512m",
 		CPULimit:        "2",
 		BuildTimeout:    25 * time.Minute,
+		StartTimeout:    time.Duration(envIntDefault("DITTOBENCH_SANDBOX_START_TIMEOUT_SECONDS", 120)) * time.Second,
 		GitHubTokenFile: os.Getenv("GITHUB_TOKEN_FILE"),
 		AllowPrivate:    envBool("DITTOBENCH_ALLOW_PRIVATE_HARNESS"),
 		PidsLimit:       envIntDefault("DITTOBENCH_SANDBOX_PIDS_LIMIT", 512),
@@ -369,6 +373,13 @@ func (d *LocalDocker) tmpfsLimit() string {
 		return d.TmpfsLimit
 	}
 	return "512m"
+}
+
+func (d *LocalDocker) startTimeout() time.Duration {
+	if d.StartTimeout > 0 {
+		return d.StartTimeout
+	}
+	return 2 * time.Minute
 }
 
 func (d *LocalDocker) dockerOutput(ctx context.Context, args ...string) ([]byte, error) {
@@ -598,7 +609,7 @@ func parseRuntimeMetrics(diagnostics *RuntimeDiagnostics, output string) {
 // Run starts the image detached with resource caps and a random host port, then
 // resolves the mapped host port.
 func (d *LocalDocker) Run(ctx context.Context, image string, env map[string]string) (*Handle, error) {
-	runCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	runCtx, cancel := context.WithTimeout(ctx, d.startTimeout())
 	defer cancel()
 
 	identity, err := isolatedIdentity()
@@ -617,8 +628,13 @@ func (d *LocalDocker) Run(ctx context.Context, image string, env map[string]stri
 			_, _ = d.dockerOutput(context.Background(), "network", "rm", network)
 		}
 	}
-	out, err := exec.CommandContext(runCtx, "docker", d.runArgsForNetwork(image, env, network, identity)...).CombinedOutput()
+	containerName := "dittobench-" + identity
+	out, err := d.dockerOutput(runCtx, d.runArgsForNetwork(image, env, network, identity)...)
 	if err != nil {
+		// `docker run` can create the named container before a slow image unpack or
+		// runtime start exceeds the deadline. Remove that partial object by the
+		// exact random identity before releasing its network and image tag.
+		_, _ = d.dockerOutput(context.Background(), "rm", "-f", containerName)
 		cleanupNetwork()
 		d.Release(context.Background(), image)
 		return nil, fmt.Errorf("docker run failed: %s: %w", strings.TrimSpace(string(out)), err)

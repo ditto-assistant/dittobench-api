@@ -2,11 +2,49 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestRunFailureRemovesPartiallyCreatedNamedContainer(t *testing.T) {
+	d := NewLocalDocker()
+	var runName string
+	removed := false
+	d.dockerCommand = func(_ context.Context, args ...string) ([]byte, error) {
+		switch args[0] {
+		case "run":
+			for i := 0; i+1 < len(args); i++ {
+				if args[i] == "--name" {
+					runName = args[i+1]
+				}
+			}
+			return nil, errors.New("start deadline")
+		case "rm":
+			removed = len(args) == 3 && args[1] == "-f" && args[2] == runName
+			return nil, nil
+		default:
+			t.Fatalf("unexpected docker command: %v", args)
+			return nil, nil
+		}
+	}
+
+	if _, err := d.Run(context.Background(), "operator-image:latest", nil); err == nil {
+		t.Fatal("expected docker start failure")
+	}
+	if runName == "" || !removed {
+		t.Fatalf("partial container was not removed by exact generated name %q", runName)
+	}
+}
+
+func TestStartTimeoutDefaultsToTwoMinutes(t *testing.T) {
+	if got := (&LocalDocker{}).startTimeout(); got != 2*time.Minute {
+		t.Fatalf("zero-value start timeout = %s", got)
+	}
+}
 
 // hasFlagPair reports whether args contains the adjacent pair [flag, value].
 func hasFlagPair(args []string, flag, value string) bool {
