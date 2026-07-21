@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"math/rand"
 	"os"
 	"sort"
 	"strings"
@@ -158,16 +159,25 @@ type Report struct {
 	Note             string          `json:"note"`
 }
 
+// benchVersion is the bench contract benchcal generates against, set from the
+// --version flag. Default CurrentBenchVersion so a bare run measures the current
+// contract (v5, incl. the Code Mode tool categories and the scaled memory suite).
+var benchVersion = protocol.CurrentBenchVersion
+
 // runOnce generates the tool dataset for a seed, routes each case through the
 // deterministic reference policy, and returns the overall tool_mean plus the
 // per-category means for that seed.
 func runOnce(seed int64, n int) (float64, map[string]float64) {
-	ds := datagen.Generate(seed, n)
+	rotated, err := protocol.RotateSeedForVersion(seed, benchVersion)
+	if err != nil {
+		log.Fatalf("rotate seed: %v", err)
+	}
+	toolCases, _ := datagen.GenerateCasesWithFillersForVersion(rand.New(rand.NewSource(rotated)), seed, n, benchVersion)
 	tools := catalog.Catalog()
 	var sum float64
 	catSum := map[string]float64{}
 	catCount := map[string]int{}
-	for _, c := range ds.ToolCases {
+	for _, c := range toolCases {
 		resp := protocol.RunResponse{ToolCalls: refharness.Route(c.Prompt, tools), LatencyMs: 1}
 		cs := scorer.ScoreToolCase(c, resp, true)
 		sum += cs.ToolScore
@@ -179,8 +189,8 @@ func runOnce(seed int64, n int) (float64, map[string]float64) {
 		perCat[cat] = s / float64(catCount[cat])
 	}
 	mean := 0.0
-	if len(ds.ToolCases) > 0 {
-		mean = sum / float64(len(ds.ToolCases))
+	if len(toolCases) > 0 {
+		mean = sum / float64(len(toolCases))
 	}
 	return mean, perCat
 }
@@ -191,7 +201,7 @@ func runOnce(seed int64, n int) (float64, map[string]float64) {
 func memRunOnce(seed int64, nMem int, profile map[string]float64) float64 {
 	// Calibration measures the CURRENT benchmark, so pin the version explicitly;
 	// the un-suffixed wrapper now defaults to the frozen v2 contract.
-	suite, err := gen.GenerateMemorySuiteForVersion(gen.NewRNG(seed), seed, nMem, 1, 0, protocol.CurrentBenchVersion)
+	suite, err := gen.GenerateMemorySuiteForVersion(gen.NewRNG(seed), seed, nMem, 1, 0, benchVersion)
 	if err != nil {
 		log.Fatalf("generate memory suite: %v", err)
 	}
@@ -262,6 +272,7 @@ func main() {
 	runs := flag.Int("runs", 30, "number of seeds (1..runs)")
 	n := flag.Int("n", 90, "tool cases per run")
 	nMem := flag.Int("nmem", 50, "memory cases per run")
+	version := flag.Int("version", protocol.CurrentBenchVersion, "bench_version contract to measure")
 	out := flag.String("out", "", "write the JSON report to this path (default stdout)")
 	memProfile := flag.String("mem-profile", "",
 		"path to a JSON per-question-type competence profile RECORDED from a real "+
@@ -274,6 +285,11 @@ func main() {
 			"WARNING: the hermetic memory policy is zero-variance, so this gate only bounds "+
 			"tool-routing difficulty — it does NOT certify real champion-region stability.")
 	flag.Parse()
+
+	if !protocol.SupportedBenchVersion(*version) {
+		log.Fatalf("unsupported bench_version %d", *version)
+	}
+	benchVersion = *version
 
 	cfg := defaultConfig()
 	cfg.targetSigma = *targetSigma

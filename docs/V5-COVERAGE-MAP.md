@@ -69,13 +69,35 @@ declarative write). See `docs/BASELINES-v5-phaseA.md`. This confirms v5 winnabil
 ## Data volume / seed variety (audit + v5 scale-up)
 
 - v4 full: 60 tool / 50 mem / 3 waves / ~199 haystack pairs.
-- v5 full: 80 tool / 70 mem / 4 waves / 0.4 raw-pairs / 6 isolation / ~238 haystack
-  pairs, with a larger persona (`personaOptsFor` n>55 tier) so distractor density
-  rises (plan 4.3). v2/v3/v4 sizes are frozen (`ProfileForVersion`).
+- v5 full: **110 tool / 85 mem** / 4 waves / 0.4 raw-pairs / 6 isolation / ~238
+  haystack pairs, with a larger persona (`personaOptsFor` n>55 tier) so distractor
+  density rises (plan 4.3). v2/v3/v4 sizes are frozen (`ProfileForVersion`).
 - Seed variety: every submission draws a fresh crypto-random seed
   (`gen.FreshSeed`), folded per bench version (`RotateSeedForVersion`), so the
-  surface (persona, phrasings, tool entities, code-mode numbers) rotates per run
-  and per version; generation stays byte-reproducible from `(seed, bench_version)`.
+  surface rotates per run and per version; generation stays byte-reproducible from
+  `(seed, bench_version)`. v5 additionally **doubles the thin tool content pools**
+  (topics, URLs, image prompts, agent tasks, workflow goals, artifact kinds,
+  calendar titles — `poolV5`/`fillerForVersion`) and expands the conversational
+  greeting / declarative / abstention / preference-domain surfaces, cutting the
+  per-seed memorization surface without changing routing difficulty.
+
+### Seed-difficulty variance guardrail (measured, `cmd/benchcal --version 5`)
+
+The constraint on this pass was to add cases and variety WITHOUT widening
+between-seed difficulty variance. Result — it narrowed it, because more cases at
+the fixed stratified mix average out per-category noise:
+
+| config | tool_mean σ (60 seeds) | memory_mean σ |
+|---|---|---|
+| v4 mix, n=60 | 0.0429 | — |
+| v5 mix, n=60 | 0.0375 | — |
+| v5 full, OLD n=80 | 0.0372 | ~0.010 |
+| **v5 full, NEW n=110/85** | **0.0300** | **0.0101** |
+
+Adding the Code Mode categories did not raise variance (v5 mix < v4 mix at equal
+n), and the entity-pool expansion is difficulty-neutral (a different URL is the
+same routing difficulty). Memory σ stays ~0.01 (stratification). Artifact:
+`docs/benchcal-v5-toolsuite.json`. benchcal is now version-aware (`--version`).
 
 ## Remaining Phase B/C (tracked in BENCHMARK-V5-PLAN.md)
 

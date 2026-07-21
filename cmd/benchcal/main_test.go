@@ -4,7 +4,20 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/ditto-assistant/dittobench-datagen/protocol"
 )
+
+// pinVersion sets the package-level benchVersion for the duration of a test and
+// restores it after. The report-shape/discrimination assertions are calibrated
+// against the frozen v2 mix; pinning keeps them stable as CurrentBenchVersion
+// advances (the default) and its category set + per-category rates shift.
+func pinVersion(t *testing.T, v int) {
+	t.Helper()
+	prev := benchVersion
+	benchVersion = v
+	t.Cleanup(func() { benchVersion = prev })
+}
 
 func TestCalibrateNoiseFloorZero(t *testing.T) {
 	// A deterministic harness on a fixed seed must have zero repeat-seed spread —
@@ -16,6 +29,7 @@ func TestCalibrateNoiseFloorZero(t *testing.T) {
 }
 
 func TestCalibrateReportShape(t *testing.T) {
+	pinVersion(t, protocol.BenchVersionV2)
 	rep := calibrate(8, 90, 30)
 	if rep.Runs != 8 || rep.ToolMean.N != 8 {
 		t.Fatalf("unexpected run count: %+v", rep.ToolMean)
