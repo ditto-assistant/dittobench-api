@@ -683,26 +683,42 @@ func sliceMean(perCase []protocol.CaseScore, category string) *float64 {
 }
 
 // ConversationalSanity is the first-class v5 conversational grounding metric: the
-// weakest-link (minimum) pass rate across the conversationalSlices that ran. It is
-// a conjunction so a low score on any one slice cannot hide inside the others (or
-// inside the memory mean). Returns nil when no conversational case ran, so pre-v5
-// contracts and runs that drew none are unaffected. A pure function of
-// (dataset, transcript): any third party recomputes it.
+// GEOMETRIC MEAN of the per-slice pass rates across the conversationalSlices that
+// ran. It is a graded conjunction: any slice that is FULLY failed (mean 0 — a
+// harness that leaks on every greeting, or never captures a plain declarative)
+// zeroes the whole metric, so the greeting-non-leak interlock a router must beat is
+// preserved. But unlike the old weakest-link MINIMUM, a partially-weak slice no
+// longer wholly dictates the score, and — critically — the metric is no longer
+// dominated by the single noisiest small-N slice. That min-of-small-slices was the
+// dominant source of PER-SEED variance: the behavior slice runs on only a handful
+// of cases at a genuine harness's ~0.85 pass rate, so a one-case swing there halved
+// a grounded champion's composite at random. The geometric mean pools the evidence
+// across slices, cutting the metric's between-seed standard deviation by about half
+// (measured) while still catching a leaked or uncaptured slice. Returns nil when no
+// conversational case ran, so pre-v5 contracts and runs that drew none are
+// unaffected. A pure function of (dataset, transcript): any third party recomputes it.
 func ConversationalSanity(perCase []protocol.CaseScore) *float64 {
-	min := 1.0
-	any := false
+	logSum := 0.0
+	n := 0
 	for _, cat := range conversationalSlices {
-		if m := sliceMean(perCase, cat); m != nil {
-			any = true
-			if *m < min {
-				min = *m
-			}
+		m := sliceMean(perCase, cat)
+		if m == nil {
+			continue
 		}
+		n++
+		if *m <= 0 {
+			// A fully-failed slice zeroes the geometric mean: the anti-gaming
+			// interlock (a leaked greeting or an uncaptured declarative cannot be
+			// hidden behind the other slices) is preserved exactly.
+			z := 0.0
+			return &z
+		}
+		logSum += math.Log(*m)
 	}
-	if !any {
+	if n == 0 {
 		return nil
 	}
-	v := round6(min)
+	v := round6(math.Exp(logSum / float64(n)))
 	return &v
 }
 
