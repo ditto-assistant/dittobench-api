@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/ditto-assistant/dittobench-api/internal/efficiency"
 )
 
 const testSourceRevision = "0123456789abcdef0123456789abcdef01234567"
@@ -24,9 +26,19 @@ func TestCapabilitiesReportBoundReleaseIdentity(t *testing.T) {
 	if got.SoftwareVersion != "0.10.0" || got.SourceRevision != testSourceRevision {
 		t.Fatalf("wrong identity: %+v", got)
 	}
-	if len(got.SupportedBenchVersions) != 3 || got.SupportedBenchVersions[0] != 2 ||
-		got.SupportedBenchVersions[1] != 3 || got.SupportedBenchVersions[2] != 4 {
-		t.Fatalf("wrong supported versions: %v", got.SupportedBenchVersions)
+	// v2-v4 are always advertised; v5 is negotiated only once reviewed token
+	// baselines make efficiency.ProductionReady() true (the #54 release gate).
+	want := []int{2, 3, 4}
+	if efficiency.ProductionReady() {
+		want = append(want, 5)
+	}
+	if len(got.SupportedBenchVersions) != len(want) {
+		t.Fatalf("wrong supported versions: %v (want %v)", got.SupportedBenchVersions, want)
+	}
+	for i, v := range want {
+		if got.SupportedBenchVersions[i] != v {
+			t.Fatalf("wrong supported versions: %v (want %v)", got.SupportedBenchVersions, want)
+		}
 	}
 	if rr.Header().Get("Cache-Control") != "no-store" {
 		t.Fatal("capabilities response must not be cached")

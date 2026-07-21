@@ -1,6 +1,12 @@
-# Binaries
+# Binaries (root-level outputs of `go build ./cmd/...`)
+/benchcal
+/calibrate
 /dittobench-api
+/egress-proxy
+/model-relay
 /refharness
+/v5calibrate
+/v5onmodel
 *.exe
 *.out
 
