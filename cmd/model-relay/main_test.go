@@ -217,6 +217,60 @@ func TestRelayRetryRespectsContext(t *testing.T) {
 	}
 }
 
+// TestRelayCallerCancellationVsDeadline draws the line the fail-closed run health
+// depends on: a caller that ABANDONS the request (context.Canceled — the harness
+// early-exited or tore the run down) is not a provider failure, so the relay
+// returns without retrying and without tainting the run. A context that EXPIRED
+// because the upstream was genuinely too slow (context.DeadlineExceeded) is a
+// real infrastructure failure and is still counted.
+func TestRelayCallerCancellationVsDeadline(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		ctxErr       error
+		wantFailures uint64
+		wantHits     int32
+	}{
+		{name: "caller cancelled", ctxErr: context.Canceled, wantFailures: 0, wantHits: 0},
+		{name: "deadline exceeded", ctxErr: context.DeadlineExceeded, wantFailures: 1, wantHits: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var hits int32
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				atomic.AddInt32(&hits, 1)
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+			}))
+			defer upstream.Close()
+
+			var ctx context.Context
+			if tc.ctxErr == context.Canceled {
+				c, cancel := context.WithCancel(context.Background())
+				cancel()
+				ctx = c
+			} else {
+				c, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+				defer cancel()
+				ctx = c
+			}
+
+			r := &relay{upstream: upstream.URL, apiKey: "k", model: "m", client: &http.Client{}, retry: testRetry}
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"messages":[]}`)).WithContext(ctx)
+			req.Header.Set("Content-Type", "application/json")
+			r.handle(httptest.NewRecorder(), req)
+
+			if got := r.infrastructureFailures.Load(); got != tc.wantFailures {
+				t.Fatalf("infrastructure_failures = %d, want %d", got, tc.wantFailures)
+			}
+			if got := r.successes.Load(); got != 0 {
+				t.Fatalf("successes = %d, want 0", got)
+			}
+			if n := atomic.LoadInt32(&hits); n != tc.wantHits {
+				t.Fatalf("upstream hits = %d, want %d", n, tc.wantHits)
+			}
+		})
+	}
+}
+
 func TestRelayHealthTracksAuthoritativeUpstreamOutcomes(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
