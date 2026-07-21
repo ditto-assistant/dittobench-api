@@ -24,8 +24,9 @@ func TestCapabilitiesReportBoundReleaseIdentity(t *testing.T) {
 	if got.SoftwareVersion != "0.10.0" || got.SourceRevision != testSourceRevision {
 		t.Fatalf("wrong identity: %+v", got)
 	}
-	if len(got.SupportedBenchVersions) != 3 || got.SupportedBenchVersions[0] != 2 ||
-		got.SupportedBenchVersions[1] != 3 || got.SupportedBenchVersions[2] != 4 {
+	if len(got.SupportedBenchVersions) != 4 || got.SupportedBenchVersions[0] != 2 ||
+		got.SupportedBenchVersions[1] != 3 || got.SupportedBenchVersions[2] != 4 ||
+		got.SupportedBenchVersions[3] != 5 {
 		t.Fatalf("wrong supported versions: %v", got.SupportedBenchVersions)
 	}
 	if rr.Header().Get("Cache-Control") != "no-store" {

@@ -50,6 +50,7 @@ import (
 	"log"
 	"math"
 	"math/rand"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -268,7 +269,16 @@ func main() {
 	mux.HandleFunc("GET /health", r.health)
 	addr := ":" + envOr("PORT", "11434")
 	log.Printf("model-relay on %s -> %s (model pinned to %s)", addr, r.upstream, r.model)
-	log.Fatal(http.ListenAndServe(addr, mux))
+	// Bind IPv4 explicitly. The relay is the gateway a sandboxed harness reaches via
+	// host.docker.internal (Docker Desktop's IPv4 host-gateway); a Go dual-stack
+	// "[::]" listener is not reachable that way on Docker Desktop/WSL2, so the
+	// harness's chat calls fail before reaching the relay. Docker networking is
+	// IPv4, so tcp4 loses nothing.
+	ln, err := net.Listen("tcp4", "0.0.0.0"+addr)
+	if err != nil {
+		log.Fatalf("listen %s: %v", addr, err)
+	}
+	log.Fatal(http.Serve(ln, mux))
 }
 
 func (r *relay) handle(w http.ResponseWriter, req *http.Request) {
