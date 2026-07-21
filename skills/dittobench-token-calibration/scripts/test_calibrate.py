@@ -95,6 +95,34 @@ class CalibrationToolTest(unittest.TestCase):
             self.assertFalse(problems)
             self.assertIn(("openrouter", "small", 101), found)
 
+    def test_enabled_baseline_candidate_requires_explicit_flag(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "api").mkdir()
+            (root / "api" / "go.mod").touch()
+            output = root / "candidate.json"
+            found = {
+                (provider, run_size, seed): root / f"{provider}-{run_size}-{seed}.json"
+                for provider in ("chutes", "openrouter")
+                for run_size in calibrate.RUN_SIZES
+                for seed in range(20)
+            }
+            generated = json.dumps({
+                "scoring_enabled": True,
+                "baselines": [{"id": str(index)} for index in range(6)],
+            })
+            with mock.patch.object(calibrate, "valid_reports", return_value=(found, [])), \
+                 mock.patch.object(calibrate, "run_output", return_value=generated) as run_output:
+                calibrate.generate_baseline(
+                    root,
+                    {"providers": {"chutes": {}, "openrouter": {}}},
+                    {},
+                    output,
+                    enable_scoring=True,
+                )
+            self.assertIn("-enable-scoring", run_output.call_args.args[0])
+            self.assertTrue(json.loads(output.read_text())["scoring_enabled"])
+
 
 if __name__ == "__main__":
     unittest.main()

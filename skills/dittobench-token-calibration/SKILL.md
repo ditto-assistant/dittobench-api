@@ -1,6 +1,6 @@
 ---
 name: dittobench-token-calibration
-description: Run, resume, and audit the reproducible DittoBench v5 reference starter-harness token calibration. Use when measuring relay-observed starter-kit token use, checking progress across the 60 pinned OpenRouter run-size/seed contracts, running exactly one next calibration case, or generating the three-group p90 baseline manifest.
+description: Run, resume, and audit the reproducible DittoBench v5 reference starter-harness token calibration. Use when measuring relay-observed starter-kit token use, checking progress across the 120 pinned provider/run-size/seed contracts, running exactly one next calibration case, or generating the six-group p90 baseline manifest.
 ---
 
 # DittoBench Token Calibration
@@ -12,10 +12,12 @@ Use the bundled script rather than recreating scorer, relay, Docker, and artifac
 - Treat this as paid provider work. Run one case unless the user explicitly authorizes a batch.
 - Never print, copy, or persist provider credentials. The script reads them into the relay process environment.
 - Do not modify the pinned `api/` or `starter-kit/` checkouts. A changed HEAD fails validation.
-- Do not activate scoring or edit the production manifest. Calibration writes only reports and a generated candidate manifest.
-- Provider/profile/model identity is part of every baseline key. The approved
-  production contract currently contains OpenRouter only; the runner derives
-  providers from `contract.json` rather than accepting an unpinned profile.
+- Do not edit the production manifest automatically. Calibration writes reports
+  and a generated candidate manifest; phase-B activation requires the explicit
+  `baseline --enable-scoring` review action.
+- Provider/profile/model identity is part of every baseline key. The runner
+  derives both certified providers from `contract.json` rather than accepting
+  an unpinned profile.
 
 ## Quick workflow
 
@@ -57,13 +59,16 @@ From this repository, the calibration root defaults to `calibration/token-effici
 
 4. Re-run `status`. A valid report counts only when benchmark version, dataset digest, relay source, usage completeness, provider profile, and model all match the pinned contract.
 
-5. After all 60 OpenRouter runs, generate the review artifact:
+5. After all 120 runs, generate the review artifact:
 
    ```sh
    python3 skills/dittobench-token-calibration/scripts/calibrate.py baseline
    ```
 
-   This invokes the scorer's `cmd/tokenbaseline`, requires exactly 20 samples in each of three run-size groups, and writes `reports/baselines_v5.generated.json`. Review and version that candidate separately; do not copy it into production automatically.
+   This invokes the scorer's `cmd/tokenbaseline`, requires exactly 20 samples in
+   each of six provider/run-size groups, and writes
+   `reports/baselines_v5.generated.json`. It remains gated off by default. For
+   the separately reviewed phase-B candidate, pass `--enable-scoring`.
 
 6. Generate the reviewable token, latency, metering, and quality distributions:
 

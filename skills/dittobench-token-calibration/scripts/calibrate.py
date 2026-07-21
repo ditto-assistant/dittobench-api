@@ -482,14 +482,17 @@ def run_calibration(args, root: Path, spec: dict, manifest: dict) -> int:
         services.stop()
 
 
-def generate_baseline(root: Path, spec: dict, manifest: dict, output: Path) -> int:
+def generate_baseline(root: Path, spec: dict, manifest: dict, output: Path, enable_scoring: bool = False) -> int:
     found, problems = valid_reports(root, spec, manifest)
     if problems:
         raise CalibrationError("invalid reports: " + "; ".join(problems))
     expected = len(spec["providers"]) * len(RUN_SIZES) * 20
     if len(found) != expected:
         raise CalibrationError(f"baseline generation requires all {expected} reports; have {len(found)}, need {expected - len(found)} more")
-    command = ["go", "run", "./cmd/tokenbaseline"] + [str(path) for path in sorted(found.values())]
+    command = ["go", "run", "./cmd/tokenbaseline"]
+    if enable_scoring:
+        command.append("-enable-scoring")
+    command += [str(path) for path in sorted(found.values())]
     api_checkout = root / "api"
     if not (api_checkout / "go.mod").is_file():
         api_checkout = REPO_ROOT
@@ -498,6 +501,8 @@ def generate_baseline(root: Path, spec: dict, manifest: dict, output: Path) -> i
     expected_groups = len(spec["providers"]) * len(RUN_SIZES)
     if len(parsed.get("baselines", [])) != expected_groups:
         raise CalibrationError(f"baseline generator did not emit all {expected_groups} provider/run-size groups")
+    if bool(parsed.get("scoring_enabled")) != enable_scoring:
+        raise CalibrationError("baseline generator returned an unexpected scoring_enabled phase gate")
     write_json(output, parsed)
     print(f"Wrote audited {expected_groups}-group p90 baseline: {output}")
     return 0
@@ -527,7 +532,7 @@ def generate_summary(root: Path, spec: dict, manifest: dict, output: Path) -> in
     for (provider, run_size, _), path in found.items():
         groups[(provider, run_size)].append(load_json(path))
     result = {
-        "schema_version": 1,
+        "schema_version": 2,
         "bench_version": 5,
         "formula_version": spec["formula_version"],
         "scorer_revision": spec["scorer_revision"],
@@ -567,6 +572,31 @@ def generate_summary(root: Path, spec: dict, manifest: dict, output: Path) -> in
                         "usage_available": sum(usage["usage_available"] for usage in usages),
                         "usage_unavailable": sum(usage["usage_unavailable"] for usage in usages),
                     },
+                    # Commit every calibration observation needed to reproduce
+                    # the aggregates, without publishing per-case benchmark
+                    # prompts, answers, or transcripts from the raw reports.
+                    "observations": sorted(
+                        (
+                            {
+                                "seed": report["seed"],
+                                "dataset_sha256": report["details"]["dataset_sha256"],
+                                "prompt_tokens": usage["prompt_tokens"],
+                                "completion_tokens": usage["completion_tokens"],
+                                "total_tokens": usage["total_tokens"],
+                                "prompt_bytes": usage["prompt_bytes"],
+                                "provider_latency_ms": usage["provider_latency_ms"],
+                                "requests": usage["requests"],
+                                "successes": usage["successes"],
+                                "usage_available": usage["usage_available"],
+                                "usage_unavailable": usage["usage_unavailable"],
+                                "raw_composite": report["raw_composite"],
+                                "tool_mean": report["tool_mean"],
+                                "memory_mean": report["memory_mean"],
+                            }
+                            for report, usage in zip(reports, usages)
+                        ),
+                        key=lambda observation: observation["seed"],
+                    ),
                 }
             )
     write_json(output, result)
@@ -597,6 +627,7 @@ def parser() -> argparse.ArgumentParser:
     batch.add_argument("--port-base", type=int, default=0, help="reserve a distinct port range for a concurrent batch")
     baseline = sub.add_parser("baseline", help="emit the audited p90 manifest after all 120 runs")
     baseline.add_argument("--output", type=Path)
+    baseline.add_argument("--enable-scoring", action="store_true", help="emit the explicitly phase-B-enabled candidate")
     summary = sub.add_parser("summary", help="summarize all six token and quality distributions")
     summary.add_argument("--output", type=Path)
     return result
@@ -666,7 +697,7 @@ def main() -> int:
             return print_status(root, spec, manifest)
         if args.command == "baseline":
             output = args.output or root / "reports/baselines_v5.generated.json"
-            return generate_baseline(root, spec, manifest, output.expanduser().resolve())
+            return generate_baseline(root, spec, manifest, output.expanduser().resolve(), args.enable_scoring)
         output = args.output or root / "summary.json"
         return generate_summary(root, spec, manifest, output.expanduser().resolve())
     except (CalibrationError, KeyError, subprocess.CalledProcessError, json.JSONDecodeError) as exc:
