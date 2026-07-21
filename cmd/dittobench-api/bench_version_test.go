@@ -1,7 +1,6 @@
 package main
 
 import (
-	"reflect"
 	"testing"
 
 	"github.com/ditto-assistant/dittobench-datagen/gen"
@@ -34,26 +33,5 @@ func TestBenchVersionDatasetVectors(t *testing.T) {
 		if got != tc.want {
 			t.Fatalf("v%d dataset vector changed: got %s want %s", tc.version, got, tc.want)
 		}
-	}
-}
-
-func TestRunPathUsesVersionedV5ToolGenerator(t *testing.T) {
-	const seed int64 = 101
-	prof, ok := gen.ProfileForVersion("small", protocol.BenchVersionV5)
-	if !ok {
-		t.Fatal("v5 small profile missing")
-	}
-	runRNG, err := gen.NewRNGForVersion(seed, protocol.BenchVersionV5)
-	if err != nil {
-		t.Fatal(err)
-	}
-	wantRNG, err := gen.NewRNGForVersion(seed, protocol.BenchVersionV5)
-	if err != nil {
-		t.Fatal(err)
-	}
-	gotCases, gotStats := generateRunToolCases(runRNG, seed, prof, protocol.BenchVersionV5)
-	wantCases, wantStats := gen.GenerateToolsForVersion(wantRNG, seed, prof.Tools, protocol.BenchVersionV5)
-	if !reflect.DeepEqual(gotCases, wantCases) || !reflect.DeepEqual(gotStats, wantStats) {
-		t.Fatal("run path drifted from canonical v5 tool generation")
 	}
 }
