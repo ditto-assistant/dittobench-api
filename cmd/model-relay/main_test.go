@@ -241,13 +241,14 @@ func TestRelayRetryRespectsContext(t *testing.T) {
 // real infrastructure failure and is still counted.
 func TestRelayCallerCancellationVsDeadline(t *testing.T) {
 	for _, tc := range []struct {
-		name         string
-		ctxErr       error
-		wantFailures uint64
-		wantHits     int32
+		name          string
+		ctxErr        error
+		wantFailures  uint64
+		wantCancelled uint64
+		wantHits      int32
 	}{
-		{name: "caller cancelled", ctxErr: context.Canceled, wantFailures: 0, wantHits: 0},
-		{name: "deadline exceeded", ctxErr: context.DeadlineExceeded, wantFailures: 1, wantHits: 0},
+		{name: "caller cancelled", ctxErr: context.Canceled, wantFailures: 0, wantCancelled: 1, wantHits: 0},
+		{name: "deadline exceeded", ctxErr: context.DeadlineExceeded, wantFailures: 1, wantCancelled: 0, wantHits: 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var hits int32
@@ -280,6 +281,12 @@ func TestRelayCallerCancellationVsDeadline(t *testing.T) {
 			if got := r.successes.Load(); got != 0 {
 				t.Fatalf("successes = %d, want 0", got)
 			}
+			if got := r.callerCancellations.Load(); got != tc.wantCancelled {
+				t.Fatalf("caller_cancellations = %d, want %d", got, tc.wantCancelled)
+			}
+			if got := r.upstreamAttempts.Load(); got != 1 {
+				t.Fatalf("upstream_attempts = %d, want 1", got)
+			}
 			if n := atomic.LoadInt32(&hits); n != tc.wantHits {
 				t.Fatalf("upstream hits = %d, want %d", n, tc.wantHits)
 			}
@@ -309,6 +316,9 @@ func TestRelayCallerCancellationDuringBodyReadDoesNotTaintRun(t *testing.T) {
 	}
 	if got := r.usageAvailable.Load(); got != 0 {
 		t.Fatalf("incomplete response contributed %d usage record(s)", got)
+	}
+	if got := r.callerCancellations.Load(); got != 1 {
+		t.Fatalf("caller_cancellations = %d, want 1", got)
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ditto-assistant/dittobench-datagen/protocol"
 )
@@ -189,6 +190,59 @@ func TestRunCaseRetriesTransientThenSucceeds(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&calls); got != 3 {
 		t.Fatalf("expected 3 attempts (2 transient + 1 success), got %d", got)
+	}
+}
+
+func TestRunCaseTelemetryRecordsTrustedAttempts(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		json.NewEncoder(w).Encode(protocol.RunResponse{FinalText: "recovered"})
+	}))
+	defer srv.Close()
+
+	resp, execution, err := RunCaseWithTelemetry(sandboxContext(), srv.URL, "c1", "hi", nil, CaseOptions{})
+	if err != nil {
+		t.Fatalf("RunCaseWithTelemetry error: %v", err)
+	}
+	if resp.FinalText != "recovered" || execution.TerminalOutcome != "success" {
+		t.Fatalf("unexpected result: response=%+v execution=%+v", resp, execution)
+	}
+	if len(execution.Attempts) != 2 {
+		t.Fatalf("attempts = %d, want 2", len(execution.Attempts))
+	}
+	if execution.Attempts[0].Outcome != "rate_limited" || execution.Attempts[0].HTTPStatus != http.StatusTooManyRequests {
+		t.Fatalf("first attempt = %+v", execution.Attempts[0])
+	}
+	if execution.Attempts[1].Outcome != "success" || execution.Attempts[1].HTTPStatus != http.StatusOK {
+		t.Fatalf("second attempt = %+v", execution.Attempts[1])
+	}
+	if execution.TimedOut || execution.Cancelled || execution.TotalDurationMs < 0 {
+		t.Fatalf("unexpected execution flags: %+v", execution)
+	}
+}
+
+func TestRunCaseTelemetryClassifiesTimeout(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(100 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(sandboxContext(), 10*time.Millisecond)
+	defer cancel()
+	_, execution, err := RunCaseWithTelemetry(ctx, srv.URL, "c1", "hi", nil, CaseOptions{})
+	if err == nil {
+		t.Fatal("expected deadline error")
+	}
+	if !execution.TimedOut || execution.Cancelled || execution.TerminalOutcome != "timeout" {
+		t.Fatalf("timeout classification = %+v", execution)
+	}
+	if len(execution.Attempts) != 1 || execution.Attempts[0].Outcome != "timeout" {
+		t.Fatalf("attempt telemetry = %+v", execution.Attempts)
 	}
 }
 
