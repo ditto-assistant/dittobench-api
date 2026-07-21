@@ -42,6 +42,18 @@ From this repository, the calibration root defaults to `calibration/token-effici
 
    Add `--run-size medium` to advance only that group, or use `--run-size small --seed 202` for a specific pinned case. The script builds revision-keyed scorer binaries once, reuses the screened starter image, starts isolated relay/API/artifact services, polls to completion, audits trusted usage, writes evidence, and cleans up its processes.
 
+   After one audited end-to-end case, an explicitly authorized full calibration
+   is one resumable command:
+
+   ```sh
+   DITTOBENCH_CALIBRATION_ROOT=/path/to/prepared-root \
+     python3 skills/dittobench-token-calibration/scripts/calibrate.py \
+     batch --provider openrouter --remaining
+   ```
+
+   `batch` always resumes from valid reports, retries a failed case up to three
+   times, and stops rather than skipping a persistently failing contract.
+
 4. Re-run `status`. A valid report counts only when benchmark version, dataset digest, relay source, usage completeness, provider profile, and model all match the pinned contract.
 
 5. After all 60 OpenRouter runs, generate the review artifact:

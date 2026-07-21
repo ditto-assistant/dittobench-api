@@ -583,6 +583,12 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--dry-run", action="store_true", help="validate and print the selected request without provider calls")
     run.add_argument("--credential-env", type=Path, default=Path(os.environ.get("DITTOBENCH_CREDENTIAL_ENV", DEFAULT_CREDENTIAL_ENV)))
     run.add_argument("--timeout-minutes", type=int, default=45)
+    batch = sub.add_parser("batch", help="resume all missing pinned cases after explicit authorization")
+    batch.add_argument("--provider", required=True, help="provider key pinned in contract.json")
+    batch.add_argument("--remaining", action="store_true", help="confirm all remaining paid cases")
+    batch.add_argument("--credential-env", type=Path, default=Path(os.environ.get("DITTOBENCH_CREDENTIAL_ENV", DEFAULT_CREDENTIAL_ENV)))
+    batch.add_argument("--timeout-minutes", type=int, default=45)
+    batch.add_argument("--max-attempts", type=int, default=3)
     baseline = sub.add_parser("baseline", help="emit the audited p90 manifest after all 120 runs")
     baseline.add_argument("--output", type=Path)
     summary = sub.add_parser("summary", help="summarize all six token and quality distributions")
@@ -594,7 +600,8 @@ def main() -> int:
     args = parser().parse_args()
     root = args.root.expanduser().resolve()
     try:
-        spec, manifest = contract(root, require_runtime=args.command == "run" and not args.dry_run)
+        require_runtime = args.command == "batch" or (args.command == "run" and not args.dry_run)
+        spec, manifest = contract(root, require_runtime=require_runtime)
         if args.command == "status":
             return print_status(root, spec, manifest)
         if args.command == "run":
@@ -603,6 +610,41 @@ def main() -> int:
             if args.next and args.seed is not None:
                 raise CalibrationError("use either --next or --seed, not both")
             return run_calibration(args, root, spec, manifest)
+        if args.command == "batch":
+            if args.provider not in spec["providers"]:
+                raise CalibrationError(f"provider {args.provider!r} is not pinned in contract.json")
+            if not args.remaining:
+                raise CalibrationError("batch requires --remaining to confirm paid provider work")
+            if args.max_attempts < 1:
+                raise CalibrationError("--max-attempts must be positive")
+            completed, problems = valid_reports(root, spec, manifest)
+            if problems:
+                raise CalibrationError("fix invalid reports before batching: " + "; ".join(problems))
+            target = len(RUN_SIZES) * 20
+            while sum(1 for key in completed if key[0] == args.provider) < target:
+                last_error = None
+                for attempt in range(1, args.max_attempts + 1):
+                    run_args = argparse.Namespace(
+                        provider=args.provider,
+                        run_size=None,
+                        seed=None,
+                        dry_run=False,
+                        credential_env=args.credential_env,
+                        timeout_minutes=args.timeout_minutes,
+                    )
+                    try:
+                        run_calibration(run_args, root, spec, manifest)
+                        last_error = None
+                        break
+                    except CalibrationError as exc:
+                        last_error = exc
+                        print(f"attempt {attempt}/{args.max_attempts} failed: {exc}", file=sys.stderr)
+                if last_error is not None:
+                    raise CalibrationError(f"persistent calibration failure: {last_error}")
+                completed, problems = valid_reports(root, spec, manifest)
+                if problems:
+                    raise CalibrationError("new report failed audit: " + "; ".join(problems))
+            return print_status(root, spec, manifest)
         if args.command == "baseline":
             output = args.output or root / "reports/baselines_v5.generated.json"
             return generate_baseline(root, spec, manifest, output.expanduser().resolve())
