@@ -907,6 +907,10 @@ func runScope(req submitRequest) scorer.Scope {
 	return scorer.ScopePractice
 }
 
+func generateRunToolCases(rng *rand.Rand, seed int64, prof gen.Profile, benchVersion int) ([]protocol.ToolCase, protocol.ParaphraseStats) {
+	return gen.GenerateToolsForVersion(rng, seed, prof.Tools, benchVersion)
+}
+
 // runSizeJob is the full SN118 pipeline: building → generating → seeding →
 // running (appending partials) → scoring → done. Every stage is deterministic;
 // the only LLM in the loop is the locked model the harness itself talks to.
@@ -947,7 +951,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		s.store.Fail(runID, "unsupported bench_version during generation")
 		return
 	}
-	toolCases, toolPara := gen.GenerateTools(rng, seed, prof.Tools)
+	toolCases, toolPara := generateRunToolCases(rng, seed, prof, req.BenchVersion)
 	// v2 memory engine (bench_version 2): a fresh procedural persona universe
 	// per seed replaces the static LongMemEval fixture. Generation is fully
 	// non-LLM and a pure function of the master `seed`; selection shares the run
