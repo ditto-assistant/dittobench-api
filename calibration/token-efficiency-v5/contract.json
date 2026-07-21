@@ -2,11 +2,11 @@
   "schema_version": 1,
   "bench_version": 5,
   "formula_version": "v5-relay-token-waste-p90-v1",
-  "scorer_revision": "69cbaf45be680d1535f9c60fd1382ba193f98110",
-  "starter_kit_revision": "60aab4e5e2839ddb0fe8c80492bd7b76ba2668fd",
+  "scorer_revision": "b6ac82275a76a3aaec1d82dcbef8eba5f0fbd580",
+  "starter_kit_revision": "106076a40e4214cda821dfd0bee5c9c6785d425c",
   "source": {
     "path": "source/dittobench-submission.tgz",
-    "sha256": "2c902804cdae95741e75d14d31597cc128ff6fdd5875de9513f514d73b25fb3f"
+    "sha256": "71ae116dcf75f5c8c6c69fe8fcbaa4b1c78c2a83252a0bbef4b1e163a2f599a8"
   },
   "screened_image": {
     "path": "image/screened-image.tar",
@@ -16,6 +16,11 @@
     "image_ref": "ditto-screen/45f6342c-fc5d-41bd-93c3-38d4b79de4aa:latest"
   },
   "providers": {
+    "chutes": {
+      "credential_env": "CHUTES_API_KEY",
+      "profile_revision": "chutes-qwen3-32b-tee-no-think-v1",
+      "model": "Qwen/Qwen3-32B-TEE"
+    },
     "openrouter": {
       "credential_env": "OPENROUTER_API_KEY",
       "profile_revision": "openrouter-nebius-qwen3-32b-no-think-v1",

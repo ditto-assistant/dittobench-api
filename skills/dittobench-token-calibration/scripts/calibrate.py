@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import hashlib
 import json
 import os
@@ -329,14 +330,14 @@ def ensure_tools() -> None:
     run_output(["docker", "info", "--format", "{{.ServerVersion}}"])
 
 
-def request_body(root: Path, spec: dict, run_size: str, seed: int, dataset_sha: str, host: str) -> dict:
+def request_body(root: Path, spec: dict, run_size: str, seed: int, dataset_sha: str, host: str, artifact_port: int = 18080) -> dict:
     source = spec["source"]
     image = spec["screened_image"]
     return {
         "bench_version": 5,
-        "tarball_url": f"http://{host}:18080/{source['path']}",
+        "tarball_url": f"http://{host}:{artifact_port}/{source['path']}",
         "tarball_sha256": source["sha256"],
-        "screened_image_url": f"http://{host}:18080/{image['path']}",
+        "screened_image_url": f"http://{host}:{artifact_port}/{image['path']}",
         "screened_image_sha256": image["sha256"],
         "screened_image_id": image["image_id"],
         "screened_image_ref": image["image_ref"],
@@ -369,7 +370,9 @@ def ensure_ollama(services: Services, root: Path, host: str, logs: Path) -> None
 def run_calibration(args, root: Path, spec: dict, manifest: dict) -> int:
     run_size, seed, dataset_sha = choose_dataset(args.provider, args.run_size, args.seed, root, spec, manifest)
     host = lan_ip()
-    body = request_body(root, spec, run_size, seed, dataset_sha, host)
+    offset = getattr(args, "port_offset", 0)
+    relay_port, api_port, artifact_port = 11435 + offset, 18000 + offset, 18080 + offset
+    body = request_body(root, spec, run_size, seed, dataset_sha, host, artifact_port)
     label = f"{args.provider}-{run_size}-seed-{seed}"
     print(f"Selected {label}")
     if args.dry_run:
@@ -377,7 +380,7 @@ def run_calibration(args, root: Path, spec: dict, manifest: dict) -> int:
         return 0
 
     ensure_tools()
-    for port in (11435, 18000, 18080):
+    for port in (relay_port, api_port, artifact_port):
         if port_open(port):
             raise CalibrationError(f"required port {port} is already in use")
     profile = spec["providers"][args.provider]
@@ -396,18 +399,18 @@ def run_calibration(args, root: Path, spec: dict, manifest: dict) -> int:
         ensure_ollama(services, root, host, logs)
 
         relay_env = os.environ.copy()
-        relay_env.update({"RELAY_PROVIDER": args.provider, "RELAY_API_KEY": api_key, "PORT": "11435"})
+        relay_env.update({"RELAY_PROVIDER": args.provider, "RELAY_API_KEY": api_key, "PORT": str(relay_port)})
         services.start([str(relay_binary)], logs / "model-relay.log", env=relay_env)
-        health = wait_json(f"http://{host}:11435/health", timeout=30)
+        health = wait_json(f"http://{host}:{relay_port}/health", timeout=30)
         if health.get("provider") != args.provider or health.get("profile_revision") != profile["profile_revision"]:
             raise CalibrationError("relay started with the wrong certified profile")
 
         services.start(
-            [sys.executable, "-m", "http.server", "18080", "--bind", "0.0.0.0"],
+            [sys.executable, "-m", "http.server", str(artifact_port), "--bind", "0.0.0.0"],
             logs / "artifact-server.log",
             cwd=root,
         )
-        wait_json(f"http://{host}:18080/contract.json", timeout=10)
+        wait_json(f"http://{host}:{artifact_port}/contract.json", timeout=10)
 
         api_env = os.environ.copy()
         api_env.update(
@@ -416,22 +419,22 @@ def run_calibration(args, root: Path, spec: dict, manifest: dict) -> int:
                 "DITTOBENCH_ALLOW_SCREENED_IMAGES": "1",
                 "DITTOBENCH_ARTIFACT_DIR": str(root / "artifacts"),
                 "DITTOBENCH_SOURCE_SHA": spec["scorer_revision"],
-                "HARNESS_GATEWAY_URL": f"http://{host}:11435",
+                "HARNESS_GATEWAY_URL": f"http://{host}:{relay_port}",
                 "HARNESS_EMBED_URL": f"http://{host}:11434",
-                "PORT": "18000",
+                "PORT": str(api_port),
             }
         )
         services.start([str(api_binary)], logs / "dittobench-api.log", cwd=root / "api", env=api_env)
-        wait_json("http://127.0.0.1:18000/health", timeout=30)
+        wait_json(f"http://127.0.0.1:{api_port}/health", timeout=30)
 
         write_json(root / "reports" / f"{label}-request.json", body)
-        accepted = url_json("http://127.0.0.1:18000/v2/score", payload=body, timeout=30)
+        accepted = url_json(f"http://127.0.0.1:{api_port}/v2/score", payload=body, timeout=30)
         run_id = accepted["run_id"]
         print(f"Run {run_id} accepted; polling {run_size} benchmark…")
         deadline = time.monotonic() + args.timeout_minutes * 60
         last_stage = None
         while time.monotonic() < deadline:
-            job = url_json(f"http://127.0.0.1:18000/v1/runs/{run_id}", timeout=15)
+            job = url_json(f"http://127.0.0.1:{api_port}/v1/runs/{run_id}", timeout=15)
             status = job.get("status")
             stage = (job.get("progress") or {}).get("stage", status)
             if stage != last_stage:
@@ -449,9 +452,9 @@ def run_calibration(args, root: Path, spec: dict, manifest: dict) -> int:
         report = job["report"]
         write_json(root / "reports" / f"{label}-job.json", job)
         write_json(root / "reports" / f"{label}-report.json", report)
-        transcript = url_json(f"http://127.0.0.1:18000/v1/runs/{run_id}/transcript", timeout=30)
+        transcript = url_json(f"http://127.0.0.1:{api_port}/v1/runs/{run_id}/transcript", timeout=30)
         write_json(root / "reports" / f"{label}-transcript.json", transcript)
-        relay_health = url_json(f"http://127.0.0.1:11435/health", timeout=10)
+        relay_health = url_json(f"http://127.0.0.1:{relay_port}/health", timeout=10)
         write_json(root / "reports" / f"{label}-relay-health.json", relay_health)
 
         found, problems = valid_reports(root, spec, manifest)
@@ -469,7 +472,7 @@ def run_calibration(args, root: Path, spec: dict, manifest: dict) -> int:
     except KeyboardInterrupt:
         if run_id and status not in TERMINAL:
             try:
-                request = urllib.request.Request(f"http://127.0.0.1:18000/v1/runs/{run_id}", method="DELETE")
+                request = urllib.request.Request(f"http://127.0.0.1:{api_port}/v1/runs/{run_id}", method="DELETE")
                 urllib.request.urlopen(request, timeout=5).read()
             except Exception:
                 pass
@@ -584,11 +587,12 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--credential-env", type=Path, default=Path(os.environ.get("DITTOBENCH_CREDENTIAL_ENV", DEFAULT_CREDENTIAL_ENV)))
     run.add_argument("--timeout-minutes", type=int, default=45)
     batch = sub.add_parser("batch", help="resume all missing pinned cases after explicit authorization")
-    batch.add_argument("--provider", required=True, help="provider key pinned in contract.json")
+    batch.add_argument("--provider", required=True, help="provider key pinned in contract.json, or all")
     batch.add_argument("--remaining", action="store_true", help="confirm all remaining paid cases")
     batch.add_argument("--credential-env", type=Path, default=Path(os.environ.get("DITTOBENCH_CREDENTIAL_ENV", DEFAULT_CREDENTIAL_ENV)))
     batch.add_argument("--timeout-minutes", type=int, default=45)
     batch.add_argument("--max-attempts", type=int, default=3)
+    batch.add_argument("--workers", type=int, default=8, help="isolated concurrent relay/API lanes")
     baseline = sub.add_parser("baseline", help="emit the audited p90 manifest after all 120 runs")
     baseline.add_argument("--output", type=Path)
     summary = sub.add_parser("summary", help="summarize all six token and quality distributions")
@@ -611,39 +615,52 @@ def main() -> int:
                 raise CalibrationError("use either --next or --seed, not both")
             return run_calibration(args, root, spec, manifest)
         if args.command == "batch":
-            if args.provider not in spec["providers"]:
+            if args.provider != "all" and args.provider not in spec["providers"]:
                 raise CalibrationError(f"provider {args.provider!r} is not pinned in contract.json")
             if not args.remaining:
                 raise CalibrationError("batch requires --remaining to confirm paid provider work")
             if args.max_attempts < 1:
                 raise CalibrationError("--max-attempts must be positive")
+            if args.workers < 1 or args.workers > 12:
+                raise CalibrationError("--workers must be between 1 and 12")
             completed, problems = valid_reports(root, spec, manifest)
             if problems:
                 raise CalibrationError("fix invalid reports before batching: " + "; ".join(problems))
-            target = len(RUN_SIZES) * 20
-            while sum(1 for key in completed if key[0] == args.provider) < target:
+            providers = list(spec["providers"]) if args.provider == "all" else [args.provider]
+            jobs = []
+            datasets = expected_datasets(manifest)
+            for row in manifest["calibration_datasets"]:
+                for provider in providers:
+                    key = (provider, row["run_size"], int(row["seed"]))
+                    if key not in completed:
+                        jobs.append((provider, row["run_size"], int(row["seed"]), datasets[(row["run_size"], int(row["seed"]))]))
+            build_binaries(root, spec["scorer_revision"])
+
+            def run_one(index_job):
+                index, (provider, run_size, seed, _) = index_job
                 last_error = None
                 for attempt in range(1, args.max_attempts + 1):
                     run_args = argparse.Namespace(
-                        provider=args.provider,
-                        run_size=None,
-                        seed=None,
+                        provider=provider,
+                        run_size=run_size,
+                        seed=seed,
                         dry_run=False,
                         credential_env=args.credential_env,
                         timeout_minutes=args.timeout_minutes,
+                        port_offset=(index + 1) * 200,
                     )
                     try:
                         run_calibration(run_args, root, spec, manifest)
-                        last_error = None
-                        break
+                        return
                     except CalibrationError as exc:
                         last_error = exc
-                        print(f"attempt {attempt}/{args.max_attempts} failed: {exc}", file=sys.stderr)
-                if last_error is not None:
-                    raise CalibrationError(f"persistent calibration failure: {last_error}")
-                completed, problems = valid_reports(root, spec, manifest)
-                if problems:
-                    raise CalibrationError("new report failed audit: " + "; ".join(problems))
+                        print(f"{provider}/{run_size}/{seed} attempt {attempt}/{args.max_attempts} failed: {exc}", file=sys.stderr)
+                raise CalibrationError(f"persistent calibration failure for {provider}/{run_size}/{seed}: {last_error}")
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as executor:
+                futures = [executor.submit(run_one, item) for item in enumerate(jobs)]
+                for future in concurrent.futures.as_completed(futures):
+                    future.result()
             return print_status(root, spec, manifest)
         if args.command == "baseline":
             output = args.output or root / "reports/baselines_v5.generated.json"

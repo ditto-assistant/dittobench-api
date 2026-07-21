@@ -48,11 +48,12 @@ From this repository, the calibration root defaults to `calibration/token-effici
    ```sh
    DITTOBENCH_CALIBRATION_ROOT=/path/to/prepared-root \
      python3 skills/dittobench-token-calibration/scripts/calibrate.py \
-     batch --provider openrouter --remaining
+     batch --provider all --remaining --workers 8
    ```
 
-   `batch` always resumes from valid reports, retries a failed case up to three
-   times, and stops rather than skipping a persistently failing contract.
+   `batch` always resumes from valid reports, gives every worker an isolated
+   relay/API counter boundary, retries a failed case up to three times, and
+   stops rather than skipping a persistently failing contract.
 
 4. Re-run `status`. A valid report counts only when benchmark version, dataset digest, relay source, usage completeness, provider profile, and model all match the pinned contract.
 
