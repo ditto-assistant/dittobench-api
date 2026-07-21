@@ -51,6 +51,16 @@ func TestV5ShipGateMultiSeed(t *testing.T) {
 	if router.ConvSanityMean != 0 || parser.ConvSanityMean != 0 {
 		t.Errorf("exploiters must fail conversational sanity, got router=%.3f parser=%.3f", router.ConvSanityMean, parser.ConvSanityMean)
 	}
+	// Per-seed conversational-sanity variance must stay LOW: a grounded harness must
+	// not be randomly gated seed-to-seed. The geometric-mean metric over the scaled
+	// single-turn slices holds this well under the old weakest-link minimum's ~0.17-0.20
+	// (measured), so a regression to the brittle min or thin slices trips this.
+	if honest.ConvSanitySD > 0.13 {
+		t.Errorf("honest conversational-sanity per-seed sd too high (%.3f > 0.13): grounded harness is being randomly gated", honest.ConvSanitySD)
+	}
+	if h := byName["honest-strong"]; h.ConvSanitySD > 0.13 {
+		t.Errorf("honest-strong conversational-sanity per-seed sd too high (%.3f > 0.13)", h.ConvSanitySD)
+	}
 
 	// Counter-guard: same retrieval stack, but grounding conversation keeps the
 	// honest harness far above the router -- the drop is specific to the

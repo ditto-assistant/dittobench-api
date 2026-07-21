@@ -22,14 +22,17 @@ func mem(category string, correct bool) protocol.CaseScore {
 	}
 }
 
-// TestConversationalSanityMetric pins the weakest-link conjunction: a run that
-// aces the greeting slice but fails the declarative and behavior slices scores
-// low, so a canned reply cannot bank one slice and dilute the others.
+// TestConversationalSanityMetric pins the graded (geometric-mean) conjunction: a
+// FULLY-failed slice still zeroes the metric (a canned reply cannot bank the
+// greeting slice and hide a leaked/uncaptured declarative), but a partially-weak
+// slice is graded rather than allowed to wholly dictate the score the way the old
+// weakest-link minimum did — the change that halves the metric's per-seed variance.
 func TestConversationalSanityMetric(t *testing.T) {
 	if ConversationalSanity(nil) != nil {
 		t.Fatal("no conversational cases must yield nil metric")
 	}
 	// Canned bot: passes greeting non-leak, fails declarative echo and behavior.
+	// A fully-failed slice zeroes the geometric mean (anti-gaming interlock).
 	canned := []protocol.CaseScore{
 		mem(gen.QTChitchat, true), mem(gen.QTChitchat, true),
 		mem(gen.QTDeclarativeAck, false), mem(gen.QTDeclarativeAck, false),
@@ -38,7 +41,7 @@ func TestConversationalSanityMetric(t *testing.T) {
 	if m := ConversationalSanity(canned); m == nil || *m != 0 {
 		t.Fatalf("canned bot conjunction must be 0, got %v", m)
 	}
-	// Honest harness: all three slices pass.
+	// Honest harness: all three slices pass -> geometric mean 1.
 	honest := []protocol.CaseScore{
 		mem(gen.QTChitchat, true),
 		mem(gen.QTDeclarativeAck, true),
@@ -47,14 +50,15 @@ func TestConversationalSanityMetric(t *testing.T) {
 	if m := ConversationalSanity(honest); m == nil || *m != 1 {
 		t.Fatalf("honest conjunction must be 1, got %v", m)
 	}
-	// Partial: greeting 1.0, declarative 0.5, behavior 1.0 -> min 0.5.
+	// Partial: greeting 1.0, declarative 0.5, behavior 1.0 -> geometric mean
+	// (1.0 * 0.5 * 1.0)^(1/3) ~= 0.7937, graded rather than the old min of 0.5.
 	partial := []protocol.CaseScore{
 		mem(gen.QTChitchat, true),
 		mem(gen.QTDeclarativeAck, true), mem(gen.QTDeclarativeAck, false),
 		mem(gen.QTDeclarativeBehavior, true),
 	}
-	if m := ConversationalSanity(partial); m == nil || *m != 0.5 {
-		t.Fatalf("partial conjunction must be 0.5, got %v", m)
+	if m := ConversationalSanity(partial); m == nil || *m < 0.793 || *m > 0.794 {
+		t.Fatalf("partial geometric-mean conjunction must be ~0.7937, got %v", m)
 	}
 }
 

@@ -245,7 +245,11 @@ type Result struct {
 	CompositeMax    float64 `json:"composite_max"`
 	MemoryMean      float64 `json:"memory_mean"`
 	ConvSanityMean  float64 `json:"conversational_sanity_mean"`
-	FracBelow085    float64 `json:"frac_below_0_85"`
+	// ConvSanitySD is the population standard deviation of the conversational-sanity
+	// metric across seeds — the between-seed variance we are minimizing so a grounded
+	// harness is not randomly gated. Lower is better.
+	ConvSanitySD float64 `json:"conversational_sanity_sd"`
+	FracBelow085 float64 `json:"frac_below_0_85"`
 }
 
 // Calibrate runs every archetype against v5 datasets for the given seeds and
@@ -259,6 +263,7 @@ func Calibrate(seeds []int64, runSize string) ([]Result, error) {
 	results := make([]Result, 0, len(archetypes))
 	for _, a := range archetypes {
 		composites := make([]float64, 0, len(seeds))
+		convVals := make([]float64, 0, len(seeds))
 		var memSum, convSum float64
 		var convN int
 		var below int
@@ -277,6 +282,7 @@ func Calibrate(seeds []int64, runSize string) ([]Result, error) {
 			memSum += report.MemoryMean
 			if report.ConversationalSanity != nil {
 				convSum += *report.ConversationalSanity
+				convVals = append(convVals, *report.ConversationalSanity)
 				convN++
 			}
 			if report.Composite < 0.85 {
@@ -288,6 +294,15 @@ func Calibrate(seeds []int64, runSize string) ([]Result, error) {
 		if convN > 0 {
 			conv = convSum / float64(convN)
 		}
+		convSD := 0.0
+		if len(convVals) > 1 {
+			var s float64
+			for _, v := range convVals {
+				d := v - conv
+				s += d * d
+			}
+			convSD = math.Sqrt(s / float64(len(convVals)))
+		}
 		results = append(results, Result{
 			Archetype:       a.Name,
 			Description:     a.Description,
@@ -298,6 +313,7 @@ func Calibrate(seeds []int64, runSize string) ([]Result, error) {
 			CompositeMax:    round4(hi),
 			MemoryMean:      round4(memSum / float64(len(seeds))),
 			ConvSanityMean:  round4(conv),
+			ConvSanitySD:    round4(convSD),
 			FracBelow085:    round4(float64(below) / float64(len(seeds))),
 		})
 	}
@@ -367,10 +383,10 @@ func main() {
 		return
 	}
 	fmt.Printf("bench_version 5 hermetic archetype calibration — run_size=%s, %d seeds (SYNTHETIC profiles)\n\n", runSize, nSeeds)
-	fmt.Printf("%-18s  %-8s  %-8s  %-12s  %-8s  %-10s\n", "archetype", "comp", "±SE", "[min,max]", "conv", "<0.85")
+	fmt.Printf("%-18s  %-8s  %-8s  %-12s  %-8s  %-8s  %-10s\n", "archetype", "comp", "±SE", "[min,max]", "conv", "conv±sd", "<0.85")
 	for _, r := range results {
-		fmt.Printf("%-18s  %-8.3f  %-8.3f  [%.2f,%.2f]  %-8.3f  %-10.0f%%\n",
-			r.Archetype, r.CompositeMean, r.CompositeStdErr, r.CompositeMin, r.CompositeMax, r.ConvSanityMean, r.FracBelow085*100)
+		fmt.Printf("%-18s  %-8.3f  %-8.3f  [%.2f,%.2f]  %-8.3f  %-8.3f  %-10.0f%%\n",
+			r.Archetype, r.CompositeMean, r.CompositeStdErr, r.CompositeMin, r.CompositeMax, r.ConvSanityMean, r.ConvSanitySD, r.FracBelow085*100)
 	}
 	fmt.Println("\nNOTE: on-model winnability precheck vs the frozen-Qwen reference still requires the model relay (cmd/calibrate).")
 }
