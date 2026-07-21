@@ -4,6 +4,7 @@ import (
 	"math"
 	"testing"
 
+	"github.com/ditto-assistant/dittobench-api/internal/llm"
 	"github.com/ditto-assistant/dittobench-datagen/protocol"
 )
 
@@ -97,12 +98,38 @@ func TestMissingTelemetryAndBaselineFailNeutral(t *testing.T) {
 	}
 }
 
-func TestEmbeddedManifestIsDeliberatelyInactiveUntilMeasuredAndApproved(t *testing.T) {
-	if ProductionReady() {
-		t.Fatal("v5 must not be advertised before baselines and phase-B approval")
+func TestEmbeddedManifestIsMeasuredAndPhaseBApproved(t *testing.T) {
+	if !ProductionReady() {
+		t.Fatal("reviewed dual-provider v5 manifest must be production ready")
 	}
 	manifest := ManifestSnapshot()
-	if manifest.ScoringEnabled || manifest.StarterKitRevision == "" || len(manifest.Calibration) != 60 || len(manifest.Baselines) != 0 {
+	if !manifest.ScoringEnabled || manifest.StarterKitRevision == "" || len(manifest.Calibration) != 60 || len(manifest.Baselines) != 6 {
 		t.Fatalf("manifest = %#v", manifest)
+	}
+}
+
+func TestReadyForProductionRequiresExplicitDualProviderPhaseBManifest(t *testing.T) {
+	manifest := ManifestSnapshot()
+	manifest.ScoringEnabled = true
+	for _, provider := range []struct{ name, revision, model string }{
+		{"chutes", llm.ChutesRelayProfileRevision, llm.LockedUpstreamModel},
+		{"openrouter", llm.OpenRouterRelayProfileRevision, llm.LockedHarnessModel},
+	} {
+		for _, runSize := range []string{"small", "medium", "full"} {
+			manifest.Baselines = append(manifest.Baselines, Baseline{
+				ID: "reviewed-" + provider.name + "-" + runSize, BenchVersion: 5,
+				RunSize: runSize, Provider: provider.name, ProfileRevision: provider.revision,
+				Model: provider.model, PromptTokens: 900, CompletionTokens: 100,
+				TotalTokens: 1_000, Samples: 20, Aggregation: "nearest_rank_p90",
+				StarterKitRevision: manifest.StarterKitRevision,
+			})
+		}
+	}
+	if !ReadyForProduction(manifest) {
+		t.Fatal("complete explicitly enabled dual-provider manifest must be ready")
+	}
+	manifest.Baselines = manifest.Baselines[:5]
+	if ReadyForProduction(manifest) {
+		t.Fatal("missing provider/run-size group must fail closed")
 	}
 }

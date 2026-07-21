@@ -86,8 +86,20 @@ To calibrate or refresh:
    Provider, model, relay-profile, starter-kit, dataset, or formula changes
    require a new baseline identity rather than editing numbers in place.
 
-Numeric budgets are deliberately empty and `scoring_enabled` is false in this
-commit. Phase A therefore reports trusted usage without scoring it.
+The reviewed phase-B manifest contains 20 audited observations in each group
+and `scoring_enabled` is true:
+
+| Provider | Run size | Prompt | Completion | Total p90 budget |
+| --- | --- | ---: | ---: | ---: |
+| Chutes | small | 102,641 | 1,004 | 103,645 |
+| Chutes | medium | 613,406 | 6,483 | 619,889 |
+| Chutes | full | 1,476,423 | 15,370 | 1,491,793 |
+| OpenRouter | small | 89,133 | 1,309 | 90,442 |
+| OpenRouter | medium | 508,706 | 6,447 | 515,153 |
+| OpenRouter | full | 1,254,314 | 16,059 | 1,270,373 |
+
+The complete sanitized per-seed observations and distributions are committed
+in [`calibration/token-efficiency-v5/summary.json`](../calibration/token-efficiency-v5/summary.json).
 
 ## Phase-B activation and screener feedback loop
 
