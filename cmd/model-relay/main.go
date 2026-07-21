@@ -193,6 +193,8 @@ type relay struct {
 	requests               atomic.Uint64
 	successes              atomic.Uint64
 	infrastructureFailures atomic.Uint64
+	callerCancellations    atomic.Uint64
+	upstreamAttempts       atomic.Uint64
 	usageAvailable         atomic.Uint64
 	usageUnavailable       atomic.Uint64
 	promptTokens           atomic.Uint64
@@ -223,6 +225,8 @@ type relayHealth struct {
 	Requests               uint64 `json:"requests"`
 	Successes              uint64 `json:"successes"`
 	InfrastructureFailures uint64 `json:"infrastructure_failures"`
+	CallerCancellations    uint64 `json:"caller_cancellations"`
+	UpstreamAttempts       uint64 `json:"upstream_attempts"`
 	Provider               string `json:"provider"`
 	ProfileRevision        string `json:"profile_revision"`
 	Model                  string `json:"model"`
@@ -323,6 +327,7 @@ func (r *relay) handle(w http.ResponseWriter, req *http.Request) {
 	// infrastructure_failures / successes are incremented exactly once below, on
 	// the final outcome — never per attempt.
 	for attempt := 1; ; attempt++ {
+		r.upstreamAttempts.Add(1)
 		up, err := http.NewRequestWithContext(req.Context(), http.MethodPost, r.upstream, bytes.NewReader(out))
 		if err != nil {
 			http.Error(w, "build upstream request", http.StatusInternalServerError)
@@ -346,6 +351,7 @@ func (r *relay) handle(w http.ResponseWriter, req *http.Request) {
 			// is a real (retryable) infrastructure failure and flows through the
 			// normal path below.
 			if callerCanceled(req, err) {
+				r.callerCancellations.Add(1)
 				log.Print("model-relay: caller cancelled upstream call; not counted as an infrastructure failure")
 				return
 			}
@@ -365,6 +371,7 @@ func (r *relay) handle(w http.ResponseWriter, req *http.Request) {
 			// caller cancellation: no provider outcome or usage was received, and
 			// the abandoned call must not taint an otherwise complete run.
 			if callerCanceled(req, rerr) {
+				r.callerCancellations.Add(1)
 				log.Print("model-relay: caller cancelled response body read; not counted as an infrastructure failure")
 				return
 			}
@@ -506,6 +513,8 @@ func (r *relay) health(w http.ResponseWriter, _ *http.Request) {
 		Requests:               r.requests.Load(),
 		Successes:              r.successes.Load(),
 		InfrastructureFailures: r.infrastructureFailures.Load(),
+		CallerCancellations:    r.callerCancellations.Load(),
+		UpstreamAttempts:       r.upstreamAttempts.Load(),
 		Provider:               r.provider,
 		ProfileRevision:        r.profileRevision,
 		Model:                  r.model,

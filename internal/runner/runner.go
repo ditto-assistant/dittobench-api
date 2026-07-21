@@ -20,7 +20,7 @@ import (
 )
 
 // perCaseTimeout bounds a single /run call.
-const perCaseTimeout = 60 * time.Second
+const perCaseTimeout = 120 * time.Second
 
 // healthTimeout bounds the /health probe.
 const healthTimeout = 10 * time.Second
@@ -183,13 +183,43 @@ type CaseOptions struct {
 	UserID       string
 }
 
+// AttemptTelemetry is validator-observed execution evidence for one HTTP
+// attempt. It deliberately records a bounded outcome class rather than the raw
+// error, which may contain host paths or network details that do not belong in
+// the public transcript.
+type AttemptTelemetry struct {
+	Attempt    int    `json:"attempt"`
+	DurationMs int64  `json:"duration_ms"`
+	Outcome    string `json:"outcome"`
+	HTTPStatus int    `json:"http_status,omitempty"`
+}
+
+// CaseExecution is trusted runner telemetry for a single benchmark question.
+// It is published beside that question in the content-addressed transcript;
+// none of these values come from the harness response.
+type CaseExecution struct {
+	Attempts        []AttemptTelemetry `json:"attempts"`
+	TotalDurationMs int64              `json:"total_duration_ms"`
+	TimedOut        bool               `json:"timed_out,omitempty"`
+	Cancelled       bool               `json:"cancelled,omitempty"`
+	TerminalOutcome string             `json:"terminal_outcome"`
+}
+
 // RunCase POSTs one tool OR memory case to <harnessURL>/run. For a tool case,
 // pass c (the toolcase) and prompt=c.Prompt; for a memory case, pass a synthetic
 // ToolCase with the question as the prompt. Exported so the pipeline can run +
 // score cases one at a time (appending partial results). opts carries the
 // optional observed-execution fields (tool_endpoint, user_id).
 func RunCase(ctx context.Context, harnessURL, caseID, prompt string, tools []protocol.ToolDefinition, opts CaseOptions) (protocol.RunResponse, error) {
-	return runOne(ctx, harnessURL, protocol.ToolCase{ID: caseID, Prompt: prompt}, tools, opts)
+	resp, _, err := RunCaseWithTelemetry(ctx, harnessURL, caseID, prompt, tools, opts)
+	return resp, err
+}
+
+// RunCaseWithTelemetry is RunCase plus validator-observed attempt, timing, and
+// terminal-outcome evidence. Callers that publish a transcript should prefer
+// this form; the legacy RunCase wrapper remains for compatibility.
+func RunCaseWithTelemetry(ctx context.Context, harnessURL, caseID, prompt string, tools []protocol.ToolDefinition, opts CaseOptions) (protocol.RunResponse, CaseExecution, error) {
+	return runOneWithTelemetry(ctx, harnessURL, protocol.ToolCase{ID: caseID, Prompt: prompt}, tools, opts)
 }
 
 // runAttemptBackoff is the fixed pause before the Nth retry (index 0 is the
@@ -216,8 +246,22 @@ func envInt(key string, def int) int {
 }
 
 func runOne(ctx context.Context, harnessURL string, c protocol.ToolCase, tools []protocol.ToolDefinition, opts CaseOptions) (protocol.RunResponse, error) {
+	resp, _, err := runOneWithTelemetry(ctx, harnessURL, c, tools, opts)
+	return resp, err
+}
+
+func runOneWithTelemetry(ctx context.Context, harnessURL string, c protocol.ToolCase, tools []protocol.ToolDefinition, opts CaseOptions) (protocol.RunResponse, CaseExecution, error) {
+	started := time.Now()
+	execution := CaseExecution{Attempts: make([]AttemptTelemetry, 0, runAttempts)}
 	ctx, cancel := context.WithTimeout(ctx, perCaseTimeout)
 	defer cancel()
+	finish := func(outcome string, err error) (protocol.RunResponse, CaseExecution, error) {
+		execution.TotalDurationMs = time.Since(started).Milliseconds()
+		execution.TerminalOutcome = outcome
+		execution.TimedOut = ctx.Err() == context.DeadlineExceeded
+		execution.Cancelled = ctx.Err() == context.Canceled
+		return protocol.RunResponse{}, execution, err
+	}
 
 	reqBody := protocol.RunRequest{
 		CaseID:       c.ID,
@@ -229,7 +273,7 @@ func runOne(ctx context.Context, harnessURL string, c protocol.ToolCase, tools [
 	}
 	buf, err := json.Marshal(reqBody)
 	if err != nil {
-		return protocol.RunResponse{}, fmt.Errorf("marshal run request: %w", err)
+		return finish("request_encode_error", fmt.Errorf("marshal run request: %w", err))
 	}
 
 	attempts := runAttempts
@@ -243,59 +287,95 @@ func runOne(ctx context.Context, harnessURL string, c protocol.ToolCase, tools [
 			pause := runAttemptBackoff[min(attempt-1, len(runAttemptBackoff)-1)]
 			select {
 			case <-ctx.Done():
-				return protocol.RunResponse{}, lastErr
+				outcome := "cancelled"
+				if ctx.Err() == context.DeadlineExceeded {
+					outcome = "timeout"
+				}
+				return finish(outcome, lastErr)
 			case <-time.After(pause):
 			}
 		}
-		resp, retryable, err := runAttempt(ctx, harnessURL, buf)
+		resp, attemptTelemetry, retryable, err := runAttempt(ctx, harnessURL, buf)
+		attemptTelemetry.Attempt = attempt + 1
+		execution.Attempts = append(execution.Attempts, attemptTelemetry)
 		if err == nil {
-			return resp, nil
+			execution.TotalDurationMs = time.Since(started).Milliseconds()
+			execution.TerminalOutcome = "success"
+			return resp, execution, nil
 		}
 		lastErr = err
 		// A non-retryable failure (a 4xx other than 429, or a valid 200 the
 		// harness returned as unparseable) will not change on a retry.
 		if !retryable {
-			return protocol.RunResponse{}, err
+			return finish(attemptTelemetry.Outcome, err)
 		}
 	}
-	return protocol.RunResponse{}, lastErr
+	outcome := "retry_exhausted"
+	if len(execution.Attempts) > 0 {
+		outcome = execution.Attempts[len(execution.Attempts)-1].Outcome
+	}
+	return finish(outcome, lastErr)
 }
 
 // runAttempt makes one POST /run. retryable is true when the failure is
 // transient (connection error, 429, or 5xx) and a fresh attempt could succeed.
-func runAttempt(ctx context.Context, harnessURL string, buf []byte) (protocol.RunResponse, bool, error) {
+func runAttempt(ctx context.Context, harnessURL string, buf []byte) (protocol.RunResponse, AttemptTelemetry, bool, error) {
+	started := time.Now()
+	telemetry := AttemptTelemetry{}
+	finish := func(outcome string, status int) AttemptTelemetry {
+		telemetry.DurationMs = time.Since(started).Milliseconds()
+		telemetry.Outcome = outcome
+		telemetry.HTTPStatus = status
+		return telemetry
+	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, harnessURL+"/run", bytes.NewReader(buf))
 	if err != nil {
-		return protocol.RunResponse{}, false, fmt.Errorf("build run request: %w", err)
+		return protocol.RunResponse{}, finish("request_build_error", 0), false, fmt.Errorf("build run request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	start := time.Now()
 	httpResp, err := clientFor(ctx).Do(httpReq)
 	if err != nil {
 		// A network/connection error is transient unless the context itself is
 		// done (deadline or cancellation), in which case a retry cannot help.
-		return protocol.RunResponse{}, ctx.Err() == nil, fmt.Errorf("post /run: %w", err)
+		outcome := "connection_error"
+		if ctx.Err() == context.DeadlineExceeded {
+			outcome = "timeout"
+		} else if ctx.Err() == context.Canceled {
+			outcome = "cancelled"
+		}
+		return protocol.RunResponse{}, finish(outcome, 0), ctx.Err() == nil, fmt.Errorf("post /run: %w", err)
 	}
 	defer httpResp.Body.Close()
 
 	body, err := io.ReadAll(io.LimitReader(httpResp.Body, 4<<20))
 	if err != nil {
-		return protocol.RunResponse{}, ctx.Err() == nil, fmt.Errorf("read /run body: %w", err)
+		outcome := "response_read_error"
+		if ctx.Err() == context.DeadlineExceeded {
+			outcome = "timeout"
+		} else if ctx.Err() == context.Canceled {
+			outcome = "cancelled"
+		}
+		return protocol.RunResponse{}, finish(outcome, httpResp.StatusCode), ctx.Err() == nil, fmt.Errorf("read /run body: %w", err)
 	}
-	elapsed := time.Since(start)
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		retryable := httpResp.StatusCode == http.StatusTooManyRequests || httpResp.StatusCode >= 500
-		return protocol.RunResponse{}, retryable, fmt.Errorf("/run returned %d", httpResp.StatusCode)
+		outcome := "client_error"
+		if httpResp.StatusCode == http.StatusTooManyRequests {
+			outcome = "rate_limited"
+		} else if httpResp.StatusCode >= 500 {
+			outcome = "server_error"
+		}
+		return protocol.RunResponse{}, finish(outcome, httpResp.StatusCode), retryable, fmt.Errorf("/run returned %d", httpResp.StatusCode)
 	}
 
 	var out protocol.RunResponse
 	if err := json.Unmarshal(body, &out); err != nil {
-		return protocol.RunResponse{}, false, fmt.Errorf("decode /run response: %w", err)
+		return protocol.RunResponse{}, finish("invalid_response", httpResp.StatusCode), false, fmt.Errorf("decode /run response: %w", err)
 	}
 	// Measure latency validator-side (the /run round trip) and override any
 	// self-reported value: a harness-supplied latency_ms is untrusted and must
 	// never reach a score.
-	out.LatencyMs = elapsed.Milliseconds()
-	return out, false, nil
+	out.LatencyMs = time.Since(started).Milliseconds()
+	return out, finish("success", httpResp.StatusCode), false, nil
 }

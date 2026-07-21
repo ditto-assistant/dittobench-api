@@ -166,8 +166,8 @@ func TestRelayFailureIsRetryableValidatorInfrastructure(t *testing.T) {
 }
 
 func TestRelayDegradedSince(t *testing.T) {
-	start := relayHealthSnapshot{Requests: 10, Successes: 9, InfrastructureFailures: 1}
-	if err := relayDegradedSince(start, relayHealthSnapshot{Requests: 20, Successes: 19, InfrastructureFailures: 1}); err != nil {
+	start := relayHealthSnapshot{Requests: 10, Successes: 9, InfrastructureFailures: 1, CallerCancellations: 2, UpstreamAttempts: 12}
+	if err := relayDegradedSince(start, relayHealthSnapshot{Requests: 20, Successes: 19, InfrastructureFailures: 1, CallerCancellations: 3, UpstreamAttempts: 23}); err != nil {
 		t.Fatalf("healthy run was rejected: %v", err)
 	}
 	if err := relayDegradedSince(start, relayHealthSnapshot{Requests: 20, Successes: 18, InfrastructureFailures: 2}); err == nil {
@@ -175,6 +175,25 @@ func TestRelayDegradedSince(t *testing.T) {
 	}
 	if err := relayDegradedSince(start, relayHealthSnapshot{}); err == nil {
 		t.Fatal("relay restart during run must reject the attempt")
+	}
+}
+
+func TestRelayExecutionSinceProducesTrustedRunDelta(t *testing.T) {
+	start := relayHealthSnapshot{Requests: 10, Successes: 9, InfrastructureFailures: 1, CallerCancellations: 2, UpstreamAttempts: 12}
+	end := relayHealthSnapshot{Requests: 14, Successes: 12, InfrastructureFailures: 1, CallerCancellations: 3, UpstreamAttempts: 18}
+
+	got, err := relayExecutionSince(start, end)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Requests != 4 || got.Successes != 3 || got.InfrastructureFailures != 0 ||
+		got.CallerCancellations != 1 || got.UpstreamAttempts != 6 || got.Retries != 2 {
+		t.Fatalf("execution = %#v", got)
+	}
+
+	end.UpstreamAttempts = 1
+	if _, err := relayExecutionSince(start, end); err == nil {
+		t.Fatal("relay restart must invalidate execution attribution")
 	}
 }
 

@@ -24,6 +24,8 @@ type relayHealthSnapshot struct {
 	Requests               uint64 `json:"requests"`
 	Successes              uint64 `json:"successes"`
 	InfrastructureFailures uint64 `json:"infrastructure_failures"`
+	CallerCancellations    uint64 `json:"caller_cancellations"`
+	UpstreamAttempts       uint64 `json:"upstream_attempts"`
 	Provider               string `json:"provider"`
 	ProfileRevision        string `json:"profile_revision"`
 	Model                  string `json:"model"`
@@ -34,6 +36,15 @@ type relayHealthSnapshot struct {
 	CompletionTokens       uint64 `json:"completion_tokens"`
 	ProviderLatencyMs      uint64 `json:"provider_latency_ms"`
 	TTFTStatus             string `json:"ttft_status"`
+}
+
+type relayExecutionSummary struct {
+	Requests               uint64 `json:"requests"`
+	Successes              uint64 `json:"successes"`
+	InfrastructureFailures uint64 `json:"infrastructure_failures"`
+	CallerCancellations    uint64 `json:"caller_cancellations"`
+	UpstreamAttempts       uint64 `json:"upstream_attempts"`
+	Retries                uint64 `json:"retries"`
 }
 
 // lockScoredRelayRun serializes the portion of scored jobs that can call the
@@ -162,13 +173,34 @@ func requireTokenAccounting(snapshot relayHealthSnapshot) error {
 }
 
 func relayDegradedSince(start, end relayHealthSnapshot) error {
-	if end.Requests < start.Requests || end.Successes < start.Successes || end.InfrastructureFailures < start.InfrastructureFailures {
+	if end.Requests < start.Requests || end.Successes < start.Successes ||
+		end.InfrastructureFailures < start.InfrastructureFailures ||
+		end.CallerCancellations < start.CallerCancellations || end.UpstreamAttempts < start.UpstreamAttempts {
 		return fmt.Errorf("relay restarted during benchmark")
 	}
 	if end.InfrastructureFailures > start.InfrastructureFailures {
 		return fmt.Errorf("relay recorded %d upstream failure(s) during benchmark", end.InfrastructureFailures-start.InfrastructureFailures)
 	}
 	return nil
+}
+
+func relayExecutionSince(start, end relayHealthSnapshot) (relayExecutionSummary, error) {
+	if end.Requests < start.Requests || end.Successes < start.Successes ||
+		end.InfrastructureFailures < start.InfrastructureFailures ||
+		end.CallerCancellations < start.CallerCancellations || end.UpstreamAttempts < start.UpstreamAttempts {
+		return relayExecutionSummary{}, fmt.Errorf("relay restarted during benchmark")
+	}
+	summary := relayExecutionSummary{
+		Requests:               end.Requests - start.Requests,
+		Successes:              end.Successes - start.Successes,
+		InfrastructureFailures: end.InfrastructureFailures - start.InfrastructureFailures,
+		CallerCancellations:    end.CallerCancellations - start.CallerCancellations,
+		UpstreamAttempts:       end.UpstreamAttempts - start.UpstreamAttempts,
+	}
+	if summary.UpstreamAttempts > summary.Requests {
+		summary.Retries = summary.UpstreamAttempts - summary.Requests
+	}
+	return summary, nil
 }
 
 func relayUsageSince(start, end relayHealthSnapshot) (protocol.TokenUsage, error) {
@@ -229,7 +261,7 @@ func (s *server) relayRunStart(ctx context.Context, runID string, benchVersion i
 	return snapshot, true
 }
 
-func (s *server) relayRunResult(ctx context.Context, runID string, start relayHealthSnapshot) (protocol.TokenUsage, bool) {
+func (s *server) relayRunResult(ctx context.Context, runID string, start relayHealthSnapshot) (protocol.TokenUsage, relayExecutionSummary, bool) {
 	gateway := envOr("HARNESS_GATEWAY_URL", "http://host.docker.internal:11434")
 	end, err := readRelayHealth(ctx, gateway)
 	if err == nil {
@@ -237,14 +269,19 @@ func (s *server) relayRunResult(ctx context.Context, runID string, start relayHe
 	}
 	if err != nil {
 		s.failRelayUnavailable(runID, err)
-		return protocol.TokenUsage{}, false
+		return protocol.TokenUsage{}, relayExecutionSummary{}, false
 	}
 	usage, usageErr := relayUsageSince(start, end)
 	if usageErr != nil {
 		s.failRelayUnavailable(runID, usageErr)
-		return protocol.TokenUsage{}, false
+		return protocol.TokenUsage{}, relayExecutionSummary{}, false
 	}
-	return usage, true
+	execution, executionErr := relayExecutionSince(start, end)
+	if executionErr != nil {
+		s.failRelayUnavailable(runID, executionErr)
+		return protocol.TokenUsage{}, relayExecutionSummary{}, false
+	}
+	return usage, execution, true
 }
 
 // handleRelayPreflight lets an off-netns caller verify the locked model relay is

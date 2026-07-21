@@ -1147,9 +1147,9 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	toolTranscripts := make([]transcriptCase, len(toolCases))
 	runBounded(ctx, len(toolCases), caseConcurrency, func(i int) {
 		c := toolCases[i]
-		resp, runErr := runner.RunCase(ctx, harnessURL, c.ID, c.Prompt, tools, runner.CaseOptions{ToolEndpoint: toolEndpoint})
+		resp, execution, runErr := runner.RunCaseWithTelemetry(ctx, harnessURL, c.ID, c.Prompt, tools, runner.CaseOptions{ToolEndpoint: toolEndpoint})
 		observed := toolSrv.Observed(c.ID)
-		toolTranscripts[i] = transcriptCase{CaseID: c.ID, Kind: protocol.KindTool, Response: resp, Observed: observed}
+		toolTranscripts[i] = transcriptCase{CaseID: c.ID, Kind: protocol.KindTool, Response: resp, Observed: observed, Execution: execution}
 		cs := scorer.ScoreToolCaseObservedScope(c, resp, runErr == nil, observed, scope)
 		if datagen.IsResultUsage(c.Category) {
 			// Result-usage: trajectory + whether the answer carried the served
@@ -1238,10 +1238,10 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 			if uid == "" {
 				uid = wave.UserID
 			}
-			resp, runErr := runner.RunCase(ctx, harnessURL, mc.ID, mc.Question, tools, runner.CaseOptions{ToolEndpoint: toolEndpoint, UserID: uid})
+			resp, execution, runErr := runner.RunCaseWithTelemetry(ctx, harnessURL, mc.ID, mc.Question, tools, runner.CaseOptions{ToolEndpoint: toolEndpoint, UserID: uid})
 			observedCalls := toolSrv.Observed(mc.ID)
 			resp = withObservedTrajectory(resp, observedCalls)
-			waveTranscripts[i] = transcriptCase{CaseID: mc.ID, Kind: protocol.KindMemory, UserID: uid, Response: resp, Observed: observedCalls}
+			waveTranscripts[i] = transcriptCase{CaseID: mc.ID, Kind: protocol.KindMemory, UserID: uid, Response: resp, Observed: observedCalls, Execution: execution}
 			cs := scorer.GradeMemory(mc, resp)
 			if runErr != nil {
 				// The case still scores 0 on its own accuracy (an empty response
@@ -1278,9 +1278,10 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	// intentionally does not inspect response content or score magnitude, so a
 	// legitimately weak harness still receives its legitimate low score.
 	var tokenUsage protocol.TokenUsage
+	var relayExecution relayExecutionSummary
 	if scope == scorer.ScopeScored {
 		var ok bool
-		tokenUsage, ok = s.relayRunResult(ctx, runID, relayStart)
+		tokenUsage, relayExecution, ok = s.relayRunResult(ctx, runID, relayStart)
 		if !ok {
 			return
 		}
@@ -1385,6 +1386,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		BenchVersion:  artifact.BenchVersion,
 		DatasetSHA256: datasetHash,
 		Cases:         transcripts,
+		ModelRelay:    relayExecution,
 	}
 	if tSHA, tBody, tErr := tArtifact.canonicalBytes(); tErr != nil {
 		log.Printf("run %s: transcript hashing failed: %v", runID, tErr)
