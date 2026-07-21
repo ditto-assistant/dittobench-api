@@ -4,7 +4,7 @@
   "bench_version": 5,
   "scoring_enabled": false,
   "dataset_known_vector": "ee70387b2470bb72a7ce457cd76187b9d89819016f3d58276f895a55b30a9f1c",
-  "starter_kit_revision": "60aab4e5e2839ddb0fe8c80492bd7b76ba2668fd",
+  "starter_kit_revision": "106076a40e4214cda821dfd0bee5c9c6785d425c",
   "calibration_datasets": [
     {
       "run_size": "small",
