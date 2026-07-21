@@ -547,9 +547,17 @@ func (s *server) handleSubmit(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, msg)
 		return
 	}
-	if msg := validateBenchmarkImageContract(req); msg != "" {
-		writeError(w, http.StatusForbidden, msg)
-		return
+	// The screened-image contract bans validator-side SOURCE BUILDS (git_url /
+	// tarball_url). A direct harness_url run never builds anything — the miner runs
+	// their own already-built harness and the API only drives + scores it — so the
+	// contract is inapplicable there. In local/dev mode (allowPrivate) exempt the
+	// direct path so a reachable harness can be scored on v5 without a screener
+	// round-trip; build modes stay gated.
+	if req.HarnessURL == "" || !s.allowPrivate {
+		if msg := validateBenchmarkImageContract(req); msg != "" {
+			writeError(w, http.StatusForbidden, msg)
+			return
+		}
 	}
 
 	// SSRF guard: a caller-supplied harness_url / tarball_url must be a public
@@ -1431,7 +1439,12 @@ func withObservedTrajectory(resp protocol.RunResponse, observed []protocol.Obser
 // scored capped (the harness simply won't call it). Listens on all interfaces so
 // a Docker-sandboxed container reaches it via host.docker.internal.
 func (s *server) startToolServer(h http.Handler, docker bool) (endpoint string, stop func(), err error) {
-	ln, err := net.Listen("tcp", ":0")
+	// Bind IPv4 explicitly: a container reaching the host via host.docker.internal
+	// (Docker Desktop's host-gateway) connects over IPv4, and a Go dual-stack "[::]"
+	// listener is not reliably reachable that way on Docker Desktop/WSL2. tcp4 makes
+	// the tool endpoint reachable for a containerized harness; Docker networking is
+	// IPv4, so this loses nothing.
+	ln, err := net.Listen("tcp4", "0.0.0.0:0")
 	if err != nil {
 		return "", func() {}, err
 	}
@@ -1452,8 +1465,13 @@ func (s *server) startToolServer(h http.Handler, docker bool) (endpoint string, 
 		// (mapped to host-gateway when the container is started, see sandbox.Run).
 		endpoint = fmt.Sprintf("http://host.docker.internal:%d/tool", port)
 	case s.allowPrivate:
-		// Local dev: the harness runs on the same host as the validator.
-		endpoint = fmt.Sprintf("http://127.0.0.1:%d/tool", port)
+		// Local dev: the harness runs on the same host as the validator. A
+		// CONTAINERIZED local harness (e.g. a miner practicing their own image via
+		// harness_url) cannot reach the validator's 127.0.0.1, so DITTOBENCH_TOOL_HOST
+		// lets the operator advertise a container-reachable host (host.docker.internal)
+		// for tool observation. Defaults to loopback for a same-host process harness.
+		host := envOr("DITTOBENCH_TOOL_HOST", "127.0.0.1")
+		endpoint = fmt.Sprintf("http://%s:%d/tool", host, port)
 	default:
 		// Hosted practice with a remote harness_url: it cannot reach our loopback
 		// port. Leave the endpoint unadvertised; observable cases score capped.

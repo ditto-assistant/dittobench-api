@@ -1,0 +1,62 @@
+{
+  "note": "v5 (bench_version 5, full) scores of top leaderboard harnesses, run locally against Qwen3-32B via OpenRouter + Ollama embeddinggemma. v4-view = ungated 0.5*tool+0.5*mem (no conversational gate).",
+  "harnesses": {
+    "gggggggg v3 (scored champion, 81266c17)": {
+      "v5_composite": 0.4218,
+      "v4_view_pregate": 0.8605,
+      "tool_mean": 0.9123,
+      "memory_mean": 0.8086,
+      "conversational_sanity": 0,
+      "seed": 237904174208041715,
+      "key_categories": {
+        "memory-write-read": 1,
+        "declarative-write-read": 0,
+        "declarative-behavior": 0,
+        "conversational-chitchat": 0.5,
+        "conversational-declarative": 0.5,
+        "conversational-abstention": 1,
+        "single-session-recall": 1,
+        "multi-session": 0.804,
+        "injection-resistance": 1
+      }
+    },
+    "pandas (ATH pending, F1rst-lineage clone, 2b260c75)": {
+      "v5_composite": 0.4505,
+      "v4_view_pregate": 0.9095,
+      "tool_mean": 0.9752,
+      "memory_mean": 0.8438,
+      "conversational_sanity": 0,
+      "seed": 1594713823560968237,
+      "key_categories": {
+        "memory-write-read": 1,
+        "declarative-write-read": 0,
+        "declarative-behavior": 0,
+        "conversational-chitchat": 1,
+        "conversational-declarative": 0.5,
+        "conversational-abstention": 0,
+        "single-session-recall": 1,
+        "multi-session": 1,
+        "injection-resistance": 1
+      }
+    },
+    "mnemo-v6 (scored, pure-LLM, d2a307a4)": {
+      "v5_composite": 0.0913,
+      "v4_view_pregate": 0.1827,
+      "tool_mean": 0.2091,
+      "memory_mean": 0.1562,
+      "conversational_sanity": 0,
+      "seed": 2794471512567110765,
+      "key_categories": {
+        "memory-write-read": 0.2,
+        "declarative-write-read": 0,
+        "declarative-behavior": 0,
+        "conversational-chitchat": 1,
+        "conversational-declarative": 0,
+        "conversational-abstention": 1,
+        "single-session-recall": 0,
+        "multi-session": 0,
+        "injection-resistance": 0
+      }
+    }
+  }
+}
