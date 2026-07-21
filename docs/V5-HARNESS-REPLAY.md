@@ -9,18 +9,58 @@ tool cases observed through the validator's mock tool endpoint.
 
 Raw numbers: `docs/v5-harness-replay.json`.
 
-## Result — the ship gate holds
+## Result — v5 SEPARATES grounded champions from routing exploiters
 
-| harness | v4-view (ungated mean) | **v5 composite** | tool | memory | conv-sanity |
+The full current top-of-leaderboard cohort, run unmodified against v5 (Qwen3-32B):
+
+| harness | v4 (leaderboard) | v4-view here | **v5 composite** | conv-sanity | verdict |
 |---|---|---|---|---|---|
-| **gggggggg v3** (scored champion, `81266c17`) | 0.86 | **0.42** | 0.91 | 0.81 | **0.00** |
-| **pandas** (ATH-pending, F1rst-lineage clone, `2b260c75`) | 0.91 | **0.45** | 0.98 | 0.84 | **0.00** |
-| mnemo-v6 (scored, pure-LLM, `d2a307a4`) | 0.18 | 0.09 | 0.21 | 0.16 | 0.00 |
+| **mnemo-v6** (champion, `d2a307a4`) | 0.988 | 0.97 | **0.87** ✓ | **1.00** | grounded — **stays champion** |
+| ditto-scratch (`1fddf196`) | 0.949 | 0.92 | 0.46 | 0.00 | router — drops |
+| ditto-fan-v0 (`dea14c11`) | 0.953 | 0.94 | 0.47 | 0.00 | router — drops |
+| pandas (`2b260c75`) | ~0.91 | 0.91 | 0.45 | 0.00 | router — drops |
+| zeus_v8 (`977782fa`) | 0.988 | 0.88 | 0.43 | 0.00 | router — drops |
+| gggggggg v3 (`81266c17`) | ~0.86 | 0.86 | 0.42 | 0.00 | router — drops |
+| tada (`2b870216`) | 0.944 | 0.75 | 0.37 | 0.00 | router — drops |
 
-"v4-view" is the ungated `0.5·tool + 0.5·memory` — what a v4 contract (no conversational
-gate) would score, ≈ these harnesses' v4 composite. Every current top harness drops from
-**~0.86–0.91 to ~0.42–0.45 on v5**, all **well below the 0.85 champion line** (4.11
-necessary + target tiers both met for the top cohort).
+"v4-view" is the ungated `0.5·tool + 0.5·memory` (≈ the v4 composite). The result is
+NOT a blanket difficulty hike — it is a **separation**:
+
+- **mnemo-v6, the #1 champion, is a genuinely grounded harness** (reads memory, handles
+  greetings/declaratives correctly): `conversational_sanity = 1.0`, so it PASSES the v5
+  gate and stays a champion at **0.87**.
+- **Every other top harness is a phrase-list router**: `conversational_sanity = 0`
+  (leaks on greetings, never captures a no-save-verb declarative), so its composite is
+  halved to **0.37–0.47** — all below 0.85. Both 4.11 tiers hold for the exploiter
+  cohort while the honest champion is preserved (the counter-guard).
+
+### Running these harnesses locally (reproducibility)
+
+Faithful reproduction requires matching each harness's runtime. Two chat patterns
+exist: DIRECT (gggggggg/pandas read `OPENROUTER_API_KEY` and call OpenRouter) and
+GATEWAY (mnemo-v6/zeus read `HARNESS_GATEWAY_URL` — the validator's model-relay).
+For the gateway harnesses, run `cmd/model-relay` (`RELAY_PROVIDER=openrouter`) and point
+`HARNESS_GATEWAY_URL` at it. **On Docker Desktop / WSL2, the relay must NOT use port 9100
+(Docker Desktop intercepts it and returns HTTP 426) and must bind IPv4** — mnemo-v6 (the
+champion) scored a broken 0.09 until both were fixed (its chat calls all failed with 426);
+with the working relay it scores its true 0.87.
+
+## Raising the ceiling — hardening even the grounded champion (v5 4.9 / 4.6)
+
+Because mnemo-v6 saturates almost every category at 1.0, two new capability
+dimensions were added to keep a capability gradient at the champion boundary:
+
+- **multi-hop relational retrieval (KG join, 4.9):** answerable only by joining two
+  memories across sessions (`sister → Dana → puppy <coined>`), with a wrong-relative
+  decoy. mnemo-v6 scores **0.75** here (fails 1 of 4) — winnable but hard, the single
+  strongest discriminator between shallow and real retrieval.
+- **temporal-depth (4.6):** the SECOND-most-recent value in an update chain ("what was
+  my color before I changed it to X"), with the latest and oldest as distractors.
+
+Adding these dropped mnemo-v6 from 0.872 to **0.854** and exposed multi-session
+synthesis as its genuine high-variance weak spot (0.48–0.90 across seeds). Both new
+classes clear the 4.10 winnability precheck against the strongest harness (mnemo-v6
+scores in a band, not 0).
 
 ## Why they drop — the phrase-list-router signature, confirmed
 
