@@ -64,6 +64,8 @@ import (
 // field is consensus-critical and therefore a constant: RELAY_PROVIDER only
 // chooses WHICH profile runs, never what a profile pins.
 type providerProfile struct {
+	name     string
+	revision string
 	upstream string
 	model    string
 	// pinBody applies provider-specific consensus pins beyond the model id.
@@ -77,10 +79,14 @@ type providerProfile struct {
 // un-pin the scored backend).
 var providers = map[string]providerProfile{
 	"chutes": {
+		name:     "chutes",
+		revision: llm.ChutesRelayProfileRevision,
 		upstream: "https://llm.chutes.ai/v1/chat/completions",
 		model:    llm.LockedUpstreamModel,
 	},
 	"openrouter": {
+		name:     "openrouter",
+		revision: llm.OpenRouterRelayProfileRevision,
 		upstream: "https://openrouter.ai/api/v1/chat/completions",
 		model:    llm.LockedHarnessModel,
 		pinBody: func(body map[string]any) {
@@ -136,6 +142,10 @@ const maxBody = 4 << 20
 // completion.
 const maxResponseBody = 16 << 20
 
+// maxUsageTokensPerCompletion rejects telemetry that is clearly corrupt before
+// it can poison a run total. It is deliberately far above every case budget.
+const maxUsageTokensPerCompletion = 10_000_000
+
 // retryConfig bounds how aggressively the relay re-sends a transiently-failed
 // upstream request before it counts as an infrastructure_failure. The scorer is
 // fail-closed on that counter, so turning a flaky upstream (dropped connections,
@@ -166,13 +176,15 @@ func (c retryConfig) backoff(attempt int) time.Duration {
 }
 
 type relay struct {
-	upstream string
-	apiKey   string
-	model    string
-	thinking bool
-	pinBody  func(body map[string]any)
-	client   *http.Client
-	retry    retryConfig
+	provider        string
+	profileRevision string
+	upstream        string
+	apiKey          string
+	model           string
+	thinking        bool
+	pinBody         func(body map[string]any)
+	client          *http.Client
+	retry           retryConfig
 	// sleep waits for d or until ctx is done, returning ctx.Err() if the
 	// context ends first. Injected so tests can assert backoff bounds without
 	// real delay; nil falls back to the context-aware real sleep.
@@ -180,6 +192,12 @@ type relay struct {
 	requests               atomic.Uint64
 	successes              atomic.Uint64
 	infrastructureFailures atomic.Uint64
+	usageAvailable         atomic.Uint64
+	usageUnavailable       atomic.Uint64
+	promptTokens           atomic.Uint64
+	promptBytes            atomic.Uint64
+	completionTokens       atomic.Uint64
+	providerLatencyMs      atomic.Uint64
 }
 
 // ctxSleep is the default relay.sleep: it honors the incoming request deadline
@@ -204,6 +222,16 @@ type relayHealth struct {
 	Requests               uint64 `json:"requests"`
 	Successes              uint64 `json:"successes"`
 	InfrastructureFailures uint64 `json:"infrastructure_failures"`
+	Provider               string `json:"provider"`
+	ProfileRevision        string `json:"profile_revision"`
+	Model                  string `json:"model"`
+	UsageAvailable         uint64 `json:"usage_available"`
+	UsageUnavailable       uint64 `json:"usage_unavailable"`
+	PromptTokens           uint64 `json:"prompt_tokens"`
+	PromptBytes            uint64 `json:"prompt_bytes"`
+	CompletionTokens       uint64 `json:"completion_tokens"`
+	ProviderLatencyMs      uint64 `json:"provider_latency_ms"`
+	TTFTStatus             string `json:"ttft_status"`
 }
 
 func main() {
@@ -213,12 +241,14 @@ func main() {
 		log.Fatalf("RELAY_PROVIDER %q is not a certified profile (chutes|openrouter)", providerName)
 	}
 	r := &relay{
-		upstream: profile.upstream,
-		apiKey:   strings.TrimSpace(os.Getenv("RELAY_API_KEY")),
-		model:    profile.model,
-		thinking: lockedThinking,
-		pinBody:  profile.pinBody,
-		client:   &http.Client{Timeout: 300 * time.Second},
+		provider:        profile.name,
+		profileRevision: profile.revision,
+		upstream:        profile.upstream,
+		apiKey:          strings.TrimSpace(os.Getenv("RELAY_API_KEY")),
+		model:           profile.model,
+		thinking:        lockedThinking,
+		pinBody:         profile.pinBody,
+		client:          &http.Client{Timeout: 300 * time.Second},
 		retry: retryConfig{
 			maxAttempts: envInt("RELAY_RETRY_MAX_ATTEMPTS", 6),
 			base:        time.Duration(envInt("RELAY_RETRY_BASE_MS", 200)) * time.Millisecond,
@@ -271,6 +301,7 @@ func (r *relay) handle(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "marshal body", http.StatusInternalServerError)
 		return
 	}
+	r.promptBytes.Add(uint64(len(out)))
 	r.requests.Add(1)
 
 	// One relayed request may take several upstream attempts: a transient
@@ -290,7 +321,9 @@ func (r *relay) handle(w http.ResponseWriter, req *http.Request) {
 		up.Header.Set("Content-Type", "application/json")
 		up.Header.Set("Authorization", "Bearer "+r.apiKey) // never the sandbox's header
 
+		providerStarted := time.Now()
 		resp, err := r.client.Do(up)
+		r.providerLatencyMs.Add(uint64(time.Since(providerStarted).Milliseconds()))
 		if err != nil {
 			// The caller (sandbox/harness) abandoned this call — an early exit
 			// or run teardown cancelled the request context. That is the
@@ -351,11 +384,19 @@ func (r *relay) handle(w http.ResponseWriter, req *http.Request) {
 		} else if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
 			var completion struct {
 				Choices []json.RawMessage `json:"choices"`
+				Usage   *providerUsage    `json:"usage"`
 			}
 			if err := json.Unmarshal(responseBody, &completion); err != nil || len(completion.Choices) == 0 {
 				r.infrastructureFailures.Add(1)
 			} else {
 				r.successes.Add(1)
+				if validProviderUsage(completion.Usage) {
+					r.usageAvailable.Add(1)
+					r.promptTokens.Add(uint64(completion.Usage.PromptTokens))
+					r.completionTokens.Add(uint64(completion.Usage.CompletionTokens))
+				} else {
+					r.usageUnavailable.Add(1)
+				}
 			}
 		}
 		r.forward(w, resp, responseBody)
@@ -396,6 +437,24 @@ func (r *relay) retryUpstream(ctx context.Context, attempt int, reason string) b
 	return true
 }
 
+type providerUsage struct {
+	PromptTokens     int64 `json:"prompt_tokens"`
+	CompletionTokens int64 `json:"completion_tokens"`
+	TotalTokens      int64 `json:"total_tokens"`
+}
+
+func validProviderUsage(usage *providerUsage) bool {
+	if usage == nil || usage.PromptTokens < 0 || usage.CompletionTokens < 0 ||
+		usage.PromptTokens > maxUsageTokensPerCompletion || usage.CompletionTokens > maxUsageTokensPerCompletion {
+		return false
+	}
+	sum := usage.PromptTokens + usage.CompletionTokens
+	if sum == 0 || sum > maxUsageTokensPerCompletion {
+		return false
+	}
+	return usage.TotalTokens == 0 || usage.TotalTokens == sum
+}
+
 func isInfrastructureStatus(status int) bool {
 	switch status {
 	case http.StatusUnauthorized, http.StatusForbidden, http.StatusRequestTimeout, http.StatusTooManyRequests:
@@ -421,11 +480,21 @@ func isRetryableStatus(status int) bool {
 func (r *relay) health(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(relayHealth{
-		AccountingVersion:      1,
+		AccountingVersion:      2,
 		Status:                 "ok",
 		Requests:               r.requests.Load(),
 		Successes:              r.successes.Load(),
 		InfrastructureFailures: r.infrastructureFailures.Load(),
+		Provider:               r.provider,
+		ProfileRevision:        r.profileRevision,
+		Model:                  r.model,
+		UsageAvailable:         r.usageAvailable.Load(),
+		UsageUnavailable:       r.usageUnavailable.Load(),
+		PromptTokens:           r.promptTokens.Load(),
+		PromptBytes:            r.promptBytes.Load(),
+		CompletionTokens:       r.completionTokens.Load(),
+		ProviderLatencyMs:      r.providerLatencyMs.Load(),
+		TTFTStatus:             "unavailable_non_streaming",
 	})
 }
 

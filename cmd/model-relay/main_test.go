@@ -62,7 +62,7 @@ func TestRelayRetriesTransientThenSucceeds(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":11,"completion_tokens":2,"total_tokens":13}}`))
 	}))
 	defer upstream.Close()
 
@@ -74,6 +74,9 @@ func TestRelayRetriesTransientThenSucceeds(t *testing.T) {
 	}
 	if got.Requests != 1 || got.Successes != 1 || got.InfrastructureFailures != 0 {
 		t.Fatalf("health = %#v (want requests=1 successes=1 failures=0)", got)
+	}
+	if got.UsageAvailable != 1 || got.UsageUnavailable != 0 || got.PromptTokens != 11 || got.CompletionTokens != 2 {
+		t.Fatalf("final successful attempt usage must be counted exactly once: %#v", got)
 	}
 	if n := atomic.LoadInt32(&hits); n != k+1 {
 		t.Fatalf("upstream hit %d times, want %d (K failures + 1 success)", n, k+1)
@@ -279,7 +282,7 @@ func TestRelayHealthTracksAuthoritativeUpstreamOutcomes(t *testing.T) {
 		wantSuccess  uint64
 		wantFailures uint64
 	}{
-		{name: "completion", status: http.StatusOK, body: `{"choices":[{"message":{"content":"ok"}}]}`, wantSuccess: 1},
+		{name: "completion", status: http.StatusOK, body: `{"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":11,"completion_tokens":2,"total_tokens":13}}`, wantSuccess: 1},
 		{name: "provider unavailable", status: http.StatusServiceUnavailable, body: `unavailable`, wantFailures: 1},
 		{name: "rate limited", status: http.StatusTooManyRequests, body: `limited`, wantFailures: 1},
 		{name: "bad credentials", status: http.StatusUnauthorized, body: `unauthorized`, wantFailures: 1},
@@ -314,8 +317,14 @@ func TestRelayHealthTracksAuthoritativeUpstreamOutcomes(t *testing.T) {
 			if err := json.NewDecoder(healthResp.Body).Decode(&got); err != nil {
 				t.Fatal(err)
 			}
-			if got.AccountingVersion != 1 || got.Status != "ok" || got.Requests != 1 || got.Successes != tc.wantSuccess || got.InfrastructureFailures != tc.wantFailures {
+			if got.AccountingVersion != 2 || got.Status != "ok" || got.Requests != 1 || got.Successes != tc.wantSuccess || got.InfrastructureFailures != tc.wantFailures {
 				t.Fatalf("health = %#v", got)
+			}
+			if tc.wantSuccess == 1 && (got.UsageAvailable != 1 || got.UsageUnavailable != 0 || got.PromptTokens != 11 || got.CompletionTokens != 2) {
+				t.Fatalf("usage accounting = %#v", got)
+			}
+			if got.PromptBytes == 0 {
+				t.Fatalf("relay did not measure its pinned prompt payload: %#v", got)
 			}
 		})
 	}
@@ -410,17 +419,39 @@ func TestRelayRejectsNonJSON(t *testing.T) {
 	}
 }
 
+func TestRelayMakesMissingOrInvalidProviderUsageExplicit(t *testing.T) {
+	for _, body := range []string{
+		`{"choices":[{"message":{"content":"ok"}}]}`,
+		`{"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":-1,"completion_tokens":2,"total_tokens":1}}`,
+		`{"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":11,"completion_tokens":2,"total_tokens":99}}`,
+	} {
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(body)) }))
+		r := &relay{upstream: upstream.URL, apiKey: "k", model: "m", client: http.DefaultClient}
+		srv := httptest.NewServer(http.HandlerFunc(r.handle))
+		resp, err := http.Post(srv.URL, "application/json", strings.NewReader(`{"messages":[]}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if r.successes.Load() != 1 || r.usageAvailable.Load() != 0 || r.usageUnavailable.Load() != 1 {
+			t.Fatalf("invalid usage was not fail-neutral: successes=%d available=%d unavailable=%d", r.successes.Load(), r.usageAvailable.Load(), r.usageUnavailable.Load())
+		}
+		srv.Close()
+		upstream.Close()
+	}
+}
+
 // TestProviderProfilesAreFrozen: both certified profiles pin the exact scored
 // backend. Chutes serves the TEE model id; OpenRouter serves the canonical
 // slug with routing locked to the certified Nebius deployment and fallbacks
 // disabled, so OpenRouter cannot silently reroute to an uncertified host.
 func TestProviderProfilesAreFrozen(t *testing.T) {
 	chutes, ok := providers["chutes"]
-	if !ok || chutes.model != "Qwen/Qwen3-32B-TEE" || chutes.pinBody != nil {
+	if !ok || chutes.name != "chutes" || chutes.revision == "" || chutes.model != "Qwen/Qwen3-32B-TEE" || chutes.pinBody != nil {
 		t.Fatalf("chutes profile drifted: %+v", chutes)
 	}
 	or, ok := providers["openrouter"]
-	if !ok || or.model != "qwen/qwen3-32b" {
+	if !ok || or.name != "openrouter" || or.revision == "" || or.model != "qwen/qwen3-32b" {
 		t.Fatalf("openrouter profile drifted: %+v", or)
 	}
 	body := map[string]any{"provider": map[string]any{"only": []string{"attacker-host"}, "allow_fallbacks": true}}

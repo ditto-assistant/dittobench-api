@@ -18,6 +18,12 @@ const (
 	// gateway serves it (TEE, hardware-attested). cmd/model-relay forces this id
 	// upstream; LockedHarnessModel is what the harness and score reports name.
 	LockedUpstreamModel = "Qwen/Qwen3-32B-TEE"
+
+	// Relay profile revisions are part of the v5 efficiency baseline key. Any
+	// serving-route or thinking-mode change must mint a new revision and a new
+	// starter-kit baseline instead of comparing unlike contracts.
+	ChutesRelayProfileRevision     = "chutes-qwen3-32b-tee-no-think-v1"
+	OpenRouterRelayProfileRevision = "openrouter-nebius-qwen3-32b-no-think-v1"
 )
 
 // HarnessModel returns the frozen locked model id every miner harness is scored

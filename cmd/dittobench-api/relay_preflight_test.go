@@ -119,6 +119,45 @@ func TestRelayDegradedSince(t *testing.T) {
 	}
 }
 
+func TestRelayUsageSinceProducesTrustedRunDelta(t *testing.T) {
+	start := relayHealthSnapshot{
+		AccountingVersion: 2, Provider: "openrouter", ProfileRevision: "profile-v1",
+		Model: "qwen/qwen3-32b", Requests: 10, Successes: 9, UsageAvailable: 9,
+		PromptTokens: 1000, CompletionTokens: 200, ProviderLatencyMs: 3000,
+		PromptBytes: 4000,
+		TTFTStatus:  "unavailable_non_streaming",
+	}
+	end := start
+	end.Requests += 4
+	end.Successes += 4
+	end.UsageAvailable += 4
+	end.PromptTokens += 700
+	end.PromptBytes += 2800
+	end.CompletionTokens += 100
+	end.ProviderLatencyMs += 900
+
+	got, err := relayUsageSince(start, end)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "complete" || got.Source != "model_proxy_provider_response" ||
+		got.PromptTokens != 700 || got.PromptBytes != 2800 || got.CompletionTokens != 100 || got.TotalTokens != 800 ||
+		got.ProviderLatencyMs != 900 || got.UsageAvailable != 4 || got.UsageUnavailable != 0 {
+		t.Fatalf("usage = %#v", got)
+	}
+
+	end.UsageUnavailable++
+	got, err = relayUsageSince(start, end)
+	if err != nil || got.Status != "unavailable" {
+		t.Fatalf("missing usage must be explicit and neutral: usage=%#v err=%v", got, err)
+	}
+
+	end.ProfileRevision = "profile-v2"
+	if _, err := relayUsageSince(start, end); err == nil {
+		t.Fatal("provider profile change must invalidate attribution")
+	}
+}
+
 func TestReadRelayHealthRejectsStaticLegacyHealth(t *testing.T) {
 	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
@@ -129,12 +168,34 @@ func TestReadRelayHealthRejectsStaticLegacyHealth(t *testing.T) {
 	}
 }
 
+func TestV5RequiresTrustedTokenAccountingWhileLegacyAccountingRemainsReadable(t *testing.T) {
+	legacy := relayHealthSnapshot{AccountingVersion: 1, Status: "ok"}
+	if err := requireTokenAccounting(legacy); err == nil {
+		t.Fatal("v5 accepted relay accounting v1")
+	}
+	metered := relayHealthSnapshot{
+		AccountingVersion: 2, Status: "ok", Provider: "p",
+		ProfileRevision: "r", Model: "m",
+	}
+	if err := requireTokenAccounting(metered); err != nil {
+		t.Fatalf("v5 rejected trusted accounting: %v", err)
+	}
+
+	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(legacy)
+	}))
+	defer relay.Close()
+	if _, err := readRelayHealth(context.Background(), relay.URL); err != nil {
+		t.Fatalf("v2-v4 rollout compatibility rejected accounting v1: %v", err)
+	}
+}
+
 func TestRelayCountersCatchMaskedTwoHundredEmptyHarnessResponse(t *testing.T) {
 	var failures uint64
 	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/health":
-			_ = json.NewEncoder(w).Encode(relayHealthSnapshot{AccountingVersion: 1, Status: "ok", InfrastructureFailures: failures})
+			_ = json.NewEncoder(w).Encode(relayHealthSnapshot{AccountingVersion: 2, Status: "ok", InfrastructureFailures: failures, Provider: "provider", ProfileRevision: "revision", Model: "model", TTFTStatus: "unavailable_non_streaming"})
 		case "/v1/chat/completions":
 			failures++
 			http.Error(w, "provider unavailable", http.StatusBadGateway)

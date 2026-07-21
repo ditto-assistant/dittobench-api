@@ -12,6 +12,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"math"
 	"math/rand"
 	"net"
 	"net/http"
@@ -24,6 +25,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/ditto-assistant/dittobench-api/internal/efficiency"
 	"github.com/ditto-assistant/dittobench-api/internal/llm"
 	"github.com/ditto-assistant/dittobench-api/internal/netguard"
 	"github.com/ditto-assistant/dittobench-api/internal/ratelimit"
@@ -237,10 +239,14 @@ func (s *server) handleCapabilities(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "scorer release identity unavailable")
 		return
 	}
+	versions := []int{protocol.BenchVersionV2, protocol.BenchVersionV3, protocol.BenchVersionV4}
+	if efficiency.ProductionReady() {
+		versions = append(versions, protocol.BenchVersionV5)
+	}
 	writeJSON(w, http.StatusOK, capabilitiesResponse{
 		SoftwareVersion:        s.softwareVersion,
 		SourceRevision:         s.sourceRevision,
-		SupportedBenchVersions: []int{protocol.BenchVersionV2, protocol.BenchVersionV3, protocol.BenchVersionV4},
+		SupportedBenchVersions: versions,
 	})
 }
 
@@ -692,12 +698,12 @@ func (s *server) handleScoreRequest(w http.ResponseWriter, r *http.Request, requ
 func requestedBenchVersion(requested int, requireExplicit bool) (int, string) {
 	if requested == 0 {
 		if requireExplicit {
-			return 0, "bench_version is required (supported: 2, 3, 4)"
+			return 0, "bench_version is required (supported: 2, 3, 4, 5)"
 		}
 		return 2, ""
 	}
 	if !protocol.SupportedBenchVersion(requested) {
-		return 0, "unsupported bench_version (supported: 2, 3, 4)"
+		return 0, "unsupported bench_version (supported: 2, 3, 4, 5)"
 	}
 	return requested, ""
 }
@@ -906,6 +912,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	}()
 
 	total := prof.Tools + prof.Mem
+	scope := runScope(req)
 
 	// 1. building — build the crate in the Docker sandbox. Skipped on the local
 	//    harness_url path (the miner is already running their harness).
@@ -1011,6 +1018,16 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		}
 	}
 
+	// The relay exposes process-wide monotonic counters. Serialize the entire
+	// scored sandbox lifetime, not just the case loop: because the sandbox cleanup
+	// defer is registered after this unlock defer, LIFO cleanup stops/cancels the
+	// old sandbox before the lease can pass to the next run. That prevents a late
+	// completion from being charged to another miner's counter window.
+	if scope == scorer.ScopeScored {
+		unlockRelayRun := s.lockScoredRelayRun()
+		defer unlockRelayRun()
+	}
+
 	// 3. start the container. On the local harness_url path we skip the container
 	//    and target the miner's already-running harness.
 	harnessURL := req.HarnessURL
@@ -1062,12 +1079,6 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	}
 	defer stopToolSrv()
 
-	scope := runScope(req)
-	if scope == scorer.ScopeScored {
-		unlockRelayRun := s.lockScoredRelayRun()
-		defer unlockRelayRun()
-	}
-
 	if toolEndpoint == "" {
 		if scope == scorer.ScopeScored {
 			// Observed execution is mandatory on the scored path: without the mock
@@ -1105,7 +1116,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	var relayStart relayHealthSnapshot
 	if scope == scorer.ScopeScored {
 		var ok bool
-		relayStart, ok = s.relayRunStart(ctx, runID)
+		relayStart, ok = s.relayRunStart(ctx, runID, req.BenchVersion)
 		if !ok {
 			return
 		}
@@ -1253,8 +1264,13 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	// run invalidates the whole attempt and lets the validator retry later. This
 	// intentionally does not inspect response content or score magnitude, so a
 	// legitimately weak harness still receives its legitimate low score.
-	if scope == scorer.ScopeScored && !s.relayRunHealthy(ctx, runID, relayStart) {
-		return
+	var tokenUsage protocol.TokenUsage
+	if scope == scorer.ScopeScored {
+		var ok bool
+		tokenUsage, ok = s.relayRunResult(ctx, runID, relayStart)
+		if !ok {
+			return
+		}
 	}
 
 	// 6. scoring — aggregate + finish.
@@ -1273,6 +1289,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	}
 	report.Details = &protocol.RunDetails{
 		BenchVersion:      req.BenchVersion,
+		RunSize:           req.RunSize,
 		DatasetSHA256:     datasetHash,
 		Paraphrase:        &para,
 		InjectionAttempts: injections,
@@ -1291,6 +1308,9 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 			Harness: llm.HarnessModel(),
 		},
 		PerCategory: report.PerCategory,
+	}
+	if scope == scorer.ScopeScored {
+		report.Details.TokenUsage = &tokenUsage
 	}
 	if memSuite.LexicalGap.Questions > 0 {
 		lg := memSuite.LexicalGap
@@ -1312,6 +1332,21 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	if brier, cn := scorer.CalibrationBrier(perCase); brier != nil {
 		report.Details.CalibrationBrier = brier
 		report.Details.CalibrationN = cn
+	}
+	if req.BenchVersion == protocol.BenchVersionV5 {
+		rawComposite := report.Composite
+		rawStderr := report.CompositeStderr
+		var baseline *efficiency.Baseline
+		if found, ok := efficiency.Lookup(req.RunSize, tokenUsage); ok {
+			baseline = &found
+		}
+		decision := efficiency.Apply(report, tokenUsage, baseline)
+		decision.RawCompositeStderr = rawStderr
+		decision.AdjustedCompositeStderr = math.Round(rawStderr*decision.Multiplier*1e6) / 1e6
+		report.RawComposite = rawComposite
+		report.Composite = decision.AdjustedComposite
+		report.CompositeStderr = decision.AdjustedCompositeStderr
+		report.Details.TokenEfficiency = &decision
 	}
 	if injections > 0 {
 		log.Printf("run %s: %d injection-compliance case(s) flagged", runID, injections)

@@ -1,0 +1,195 @@
+// Package efficiency implements the versioned DittoBench v5 token transform.
+// It consumes only validator-observed model-proxy telemetry and keeps the raw
+// quality score separate from the adjusted score.
+package efficiency
+
+import (
+	_ "embed"
+	"encoding/json"
+	"fmt"
+	"math"
+
+	"github.com/ditto-assistant/dittobench-api/internal/llm"
+	"github.com/ditto-assistant/dittobench-datagen/protocol"
+)
+
+const (
+	FormulaVersion   = "v5-relay-token-waste-p90-v1"
+	BudgetPercentile = 0.90
+	MaximumPenalty   = 0.10
+	MinMultiplier    = 1 - MaximumPenalty
+)
+
+type Baseline struct {
+	ID                 string `json:"id"`
+	BenchVersion       int    `json:"bench_version"`
+	RunSize            string `json:"run_size"`
+	Provider           string `json:"provider"`
+	ProfileRevision    string `json:"profile_revision"`
+	Model              string `json:"model"`
+	PromptTokens       uint64 `json:"prompt_tokens"`
+	CompletionTokens   uint64 `json:"completion_tokens"`
+	TotalTokens        uint64 `json:"total_tokens"`
+	Samples            int    `json:"samples"`
+	Aggregation        string `json:"aggregation"`
+	StarterKitRevision string `json:"starter_kit_revision"`
+}
+
+type CalibrationDataset struct {
+	RunSize       string `json:"run_size"`
+	Seed          int64  `json:"seed"`
+	DatasetSHA256 string `json:"dataset_sha256"`
+}
+
+type Manifest struct {
+	SchemaVersion      int                  `json:"schema_version"`
+	FormulaVersion     string               `json:"formula_version"`
+	BenchVersion       int                  `json:"bench_version"`
+	ScoringEnabled     bool                 `json:"scoring_enabled"`
+	DatasetKnownVector string               `json:"dataset_known_vector"`
+	StarterKitRevision string               `json:"starter_kit_revision"`
+	Calibration        []CalibrationDataset `json:"calibration_datasets"`
+	Baselines          []Baseline           `json:"baselines"`
+}
+
+//go:embed baselines_v5.json
+var manifestJSON []byte
+
+var productionManifest = mustManifest(manifestJSON)
+
+func mustManifest(body []byte) Manifest {
+	var manifest Manifest
+	if err := json.Unmarshal(body, &manifest); err != nil {
+		panic(fmt.Sprintf("invalid embedded token baseline manifest: %v", err))
+	}
+	if manifest.SchemaVersion != 2 || manifest.FormulaVersion != FormulaVersion || manifest.BenchVersion != protocol.BenchVersionV5 {
+		panic("embedded token baseline manifest has incompatible contract metadata")
+	}
+	return manifest
+}
+
+func ManifestSnapshot() Manifest {
+	copy := productionManifest
+	copy.Calibration = append([]CalibrationDataset(nil), productionManifest.Calibration...)
+	copy.Baselines = append([]Baseline(nil), productionManifest.Baselines...)
+	return copy
+}
+
+// ProductionReady is true only after reviewed baselines exist for every run
+// size on both certified provider profiles. Until then v5 remains hidden from
+// capability negotiation and any direct v5 report fails neutral.
+func ProductionReady() bool {
+	if !productionManifest.ScoringEnabled {
+		return false
+	}
+	required := []struct {
+		provider string
+		revision string
+		model    string
+	}{
+		{"chutes", llm.ChutesRelayProfileRevision, llm.LockedUpstreamModel},
+		{"openrouter", llm.OpenRouterRelayProfileRevision, llm.LockedHarnessModel},
+	}
+	for _, contract := range required {
+		for _, runSize := range []string{"small", "medium", "full"} {
+			found := false
+			for _, b := range productionManifest.Baselines {
+				if b.BenchVersion == protocol.BenchVersionV5 && b.Provider == contract.provider &&
+					b.ProfileRevision == contract.revision && b.Model == contract.model && b.RunSize == runSize &&
+					b.StarterKitRevision == productionManifest.StarterKitRevision && validBaseline(b) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func Lookup(runSize string, usage protocol.TokenUsage) (Baseline, bool) {
+	if !productionManifest.ScoringEnabled {
+		return Baseline{}, false
+	}
+	for _, b := range productionManifest.Baselines {
+		if b.BenchVersion == protocol.BenchVersionV5 && b.RunSize == runSize &&
+			b.Provider == usage.Provider && b.ProfileRevision == usage.ProfileRevision &&
+			b.Model == usage.Model && b.StarterKitRevision == productionManifest.StarterKitRevision && validBaseline(b) {
+			return b, true
+		}
+	}
+	return Baseline{}, false
+}
+
+func validBaseline(b Baseline) bool {
+	return b.ID != "" && b.Samples >= 20 && b.Aggregation == "nearest_rank_p90" &&
+		b.PromptTokens > 0 && b.CompletionTokens > 0 &&
+		b.TotalTokens == b.PromptTokens+b.CompletionTokens && b.StarterKitRevision != ""
+}
+
+// Apply returns the complete audit record and mutates no report. Callers assign
+// AdjustedComposite to ScoreReport.Composite only for bench v5.
+func Apply(raw protocol.ScoreReport, usage protocol.TokenUsage, baseline *Baseline) protocol.TokenEfficiency {
+	result := protocol.TokenEfficiency{
+		FormulaVersion:           FormulaVersion,
+		BudgetPercentile:         BudgetPercentile,
+		ObservedPromptTokens:     usage.PromptTokens,
+		ObservedCompletionTokens: usage.CompletionTokens,
+		ObservedTotalTokens:      usage.TotalTokens,
+		MaximumPenalty:           MaximumPenalty,
+		MinimumMultiplier:        MinMultiplier,
+		Multiplier:               1,
+		RawComposite:             raw.Composite,
+		AdjustedComposite:        raw.Composite,
+		DecisionReason:           "within_budget",
+	}
+
+	if !ValidUsage(usage) {
+		result.DecisionReason = "token_telemetry_unavailable"
+		return result
+	}
+	if baseline == nil || !validBaseline(*baseline) {
+		result.DecisionReason = "baseline_unavailable"
+		return result
+	}
+	result.BaselineID = baseline.ID
+	result.BaselinePromptTokens = baseline.PromptTokens
+	result.BaselineCompletionTokens = baseline.CompletionTokens
+	result.BaselineTotalTokens = baseline.TotalTokens
+	if usage.TotalTokens <= baseline.TotalTokens {
+		return result
+	}
+
+	ratio := float64(usage.TotalTokens) / float64(baseline.TotalTokens)
+	result.ExcessRatio = ratio - 1
+	// A one-sided rational curve is neutral through the generous p90 budget,
+	// then approaches (but never crosses) the 0.90 floor as waste grows.
+	result.Multiplier = 1 - MaximumPenalty*(result.ExcessRatio/(1+result.ExcessRatio))
+	if math.IsNaN(result.Multiplier) || math.IsInf(result.Multiplier, 0) {
+		result.Multiplier = 1
+		result.ExcessRatio = 0
+		result.DecisionReason = "token_transform_unavailable"
+		return result
+	}
+	result.Multiplier = math.Max(MinMultiplier, result.Multiplier)
+	result.PenaltyApplied = true
+	result.DecisionReason = "above_budget"
+	result.AdjustedComposite = round6(raw.Composite * result.Multiplier)
+	return result
+}
+
+// ValidUsage applies the same completeness and arithmetic checks to scoring
+// and starter-kit calibration inputs.
+func ValidUsage(usage protocol.TokenUsage) bool {
+	if usage.Status != "complete" || usage.Successes == 0 ||
+		usage.UsageAvailable != usage.Successes || usage.UsageUnavailable != 0 ||
+		usage.TotalTokens == 0 || usage.PromptTokens == 0 ||
+		usage.PromptTokens > ^uint64(0)-usage.CompletionTokens {
+		return false
+	}
+	return usage.TotalTokens == usage.PromptTokens+usage.CompletionTokens
+}
+
+func round6(value float64) float64 { return math.Round(value*1e6) / 1e6 }
