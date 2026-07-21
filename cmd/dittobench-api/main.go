@@ -244,6 +244,10 @@ func (s *server) handleCapabilities(w http.ResponseWriter, _ *http.Request) {
 	if efficiency.ProductionReady() {
 		versions = append(versions, protocol.BenchVersionV5)
 	}
+	// v6 (memory-as-data / stored-instruction release) reuses the v5 scoring
+	// contract (the gates apply at benchVersion >= V5); it is advertised as the
+	// active development version so a validator can request it.
+	versions = append(versions, protocol.BenchVersionV6)
 	writeJSON(w, http.StatusOK, capabilitiesResponse{
 		SoftwareVersion:        s.softwareVersion,
 		SourceRevision:         s.sourceRevision,
@@ -1345,7 +1349,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		report.Details.CalibrationBrier = brier
 		report.Details.CalibrationN = cn
 	}
-	if req.BenchVersion == protocol.BenchVersionV5 {
+	if req.BenchVersion >= protocol.BenchVersionV5 {
 		rawComposite := report.Composite
 		rawStderr := report.CompositeStderr
 		var baseline *efficiency.Baseline
