@@ -20,6 +20,11 @@ class Handler(BaseHTTPRequestHandler):
             message = {"role": "assistant", "content": "Vellichor-47."}
             finish_reason = "stop"
         else:
+            names = {
+                tool.get("function", {}).get("name")
+                for tool in request.get("tools", [])
+            }
+            native = "session_search" in names
             message = {
                 "role": "assistant",
                 "content": None,
@@ -28,8 +33,10 @@ class Handler(BaseHTTPRequestHandler):
                         "id": "call_memory_1",
                         "type": "function",
                         "function": {
-                            "name": "search_memories",
-                            "arguments": json.dumps({"queries": ["Vellichor"]}),
+                            "name": "session_search" if native else "search_memories",
+                            "arguments": json.dumps(
+                                {"query": "Vellichor"} if native else {"queries": ["Vellichor"]}
+                            ),
                         },
                     }
                 ],

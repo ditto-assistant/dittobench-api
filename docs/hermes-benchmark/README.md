@@ -51,7 +51,7 @@ be required to isolate sampling and transport variance.
 The `favorable` profile uses three general Hermes-facing changes:
 
 - Hermes' documented default 90 agent-loop iterations instead of eight;
-- up to 20 native `session_search` results instead of five;
+- the native `session_search` ceiling of 10 results instead of five;
 - generic recall guidance adapted to the benchmark's memory-tool aliases.
 
 It does **not** contain expected answers, case IDs, benchmark categories,
@@ -60,6 +60,10 @@ benchmark-specific skill. Qwen still chose every tool name and argument through
 the ordinary Hermes agent loop. Both profiles used the same model, disabled
 thinking, non-streaming relay shape, public tool catalog, observed tool
 endpoint, container sandbox, seed, and deterministic grader.
+
+The original profile requested 20 results, but Hermes 0.19.0 clamps discovery
+limits to 10. The committed result metadata now records both values; the score
+itself is unchanged.
 
 This is deliberately a generous **native SessionDB** profile, not a claim to
 cover every third-party memory provider Hermes supports. Provider-assisted

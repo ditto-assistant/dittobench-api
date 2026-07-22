@@ -94,15 +94,30 @@ validator's locked model relay. The adapter cannot choose a stronger model.
 The default `baseline` profile preserves the settings used for the first
 published measurement: eight agent-loop iterations and five native
 `session_search` results. A second, explicitly labeled `favorable` profile
-gives Hermes its documented 90-iteration default, raises the native search
-limit to 20, and adds generic recall guidance adapted to the benchmark's memory
-tool aliases:
+gives Hermes its documented 90-iteration default, uses the native search
+ceiling of 10, and adds generic recall guidance adapted to the benchmark's
+memory-tool aliases:
 
 ```sh
 HERMES_DITTOBENCH_PROFILE=favorable
 ```
 
-Both profiles use the same Hermes agent loop, validator tool catalog, native
+The `native-session` profile is the least translated condition:
+
+```sh
+HERMES_DITTOBENCH_PROFILE=native-session
+```
+
+It removes all seven Ditto memory read/write names from the model's tool
+surface, enables Hermes' own `session_search` tool with its upstream schema and
+name, and keeps ordinary Hermes session persistence enabled. Seeded history is
+still imported verbatim into native `SessionDB` sessions. The retained trace
+therefore says `session_search`, not a canonical Ditto alias. This profile is
+appropriate for memory-answer accuracy, but its Ditto tool-routing score and
+composite are not comparable because the benchmark expects different memory
+tool names.
+
+The alias profiles use the same Hermes agent loop, validator tool catalog, native
 SQLite FTS5 retrieval, model lock, and observed tool endpoint. The favorable
 profile does not contain benchmark category names, expected answers, routing
 examples, query rewriting, embeddings, reranking, or a benchmark-specific

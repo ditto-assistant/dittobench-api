@@ -53,6 +53,30 @@ class FakeAgent:
         return None
 
 
+class NativeFakeAgent(FakeAgent):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "session_search",
+                    "description": "Hermes native session search",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ]
+        self.valid_tool_names = {"session_search"}
+
+    def run_conversation(self, user_input):
+        self.callback("call-native-1", "session_search", {"query": "needle"})
+        return {
+            "final_response": "native remembered",
+            "input_tokens": 13,
+            "output_tokens": 3,
+        }
+
+
 class RuntimeTests(unittest.TestCase):
     def test_preflight_executes_observed_search_without_model(self):
         calls = []
@@ -163,11 +187,54 @@ class RuntimeTests(unittest.TestCase):
                 )
             )
         self.assertEqual(response["final_text"], "remembered")
-        self.assertEqual(searches[0]["limit"], 20)
+        self.assertEqual(searches[0]["limit"], 10)
         self.assertEqual(FakeAgent.last_instance.kwargs["max_iterations"], 90)
         prompt = FakeAgent.last_instance.kwargs["ephemeral_system_prompt"]
         self.assertIn("benchmark system", prompt)
         self.assertIn("past conversation", prompt)
+
+    def test_native_session_profile_preserves_hermes_tool_name_and_persistence_path(self):
+        registry = FakeRegistry()
+        NativeFakeAgent.registry = registry
+        runner = HermesRunner(
+            FakeState(),
+            agent_factory=NativeFakeAgent,
+            registry=registry,
+            session_search=lambda **kwargs: "unused alias",
+        )
+        with patch.dict("os.environ", {"HERMES_DITTOBENCH_PROFILE": "native-session"}, clear=False):
+            response = runner.run(
+                RunRequest.from_json(
+                    {
+                        "case_id": "memory-native",
+                        "system_prompt": "benchmark system",
+                        "user_input": "what was the needle?",
+                        "tools": [
+                            {
+                                "name": "search_memories",
+                                "description": "Ditto memory search",
+                                "parameters": {"type": "object", "properties": {}},
+                            },
+                            {
+                                "name": "search_web",
+                                "description": "web search",
+                                "parameters": {"type": "object", "properties": {}},
+                            },
+                        ],
+                    }
+                )
+            )
+
+        self.assertEqual(response["final_text"], "native remembered")
+        self.assertEqual(response["tool_calls"], [
+            {"name": "session_search", "args": {"query": "needle"}, "hop": 0}
+        ])
+        kwargs = NativeFakeAgent.last_instance.kwargs
+        self.assertEqual(kwargs["enabled_toolsets"], ["dittobench-wire", "session_search"])
+        self.assertFalse(kwargs["skip_memory"])
+        self.assertEqual(NativeFakeAgent.last_instance.valid_tool_names, {"session_search"})
+        self.assertNotIn("search_memories", registry.entries)
+        self.assertIn("search_web", registry.entries)
 
     def test_unknown_profile_fails_closed(self):
         runner = HermesRunner(
@@ -177,7 +244,7 @@ class RuntimeTests(unittest.TestCase):
             session_search=lambda **kwargs: "memory",
         )
         with patch.dict("os.environ", {"HERMES_DITTOBENCH_PROFILE": "unknown"}, clear=False):
-            with self.assertRaisesRegex(ValueError, "baseline or favorable"):
+            with self.assertRaisesRegex(ValueError, "baseline, favorable, or native-session"):
                 runner.run(
                     RunRequest.from_json(
                         {"case_id": "case", "user_input": "hello", "tools": []}
