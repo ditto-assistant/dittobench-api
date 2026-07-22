@@ -1,15 +1,62 @@
 # Hermes Agent on DittoBench v6
 
-This directory records two full DittoBench v6 measurements of Nous Research
-Hermes Agent on the same seed and generated dataset:
+This directory records four retained full DittoBench v6 measurements of Nous
+Research Hermes Agent on the same seed and generated dataset:
 
 - the original controlled baseline in
   [`results/2026-07-22-hermes-openrouter-v6.json`](results/2026-07-22-hermes-openrouter-v6.json);
 - a separately labeled Hermes-favorable replay in
-  [`results/2026-07-22-hermes-favorable-openrouter-v6.json`](results/2026-07-22-hermes-favorable-openrouter-v6.json).
+  [`results/2026-07-22-hermes-favorable-openrouter-v6.json`](results/2026-07-22-hermes-favorable-openrouter-v6.json);
+- a same-model native-session run in
+  [`results/2026-07-22-hermes-native-session-qwen-openrouter-v6.json`](results/2026-07-22-hermes-native-session-qwen-openrouter-v6.json);
+- a stronger-model native-session upper bound in
+  [`results/2026-07-22-hermes-native-session-claude-openrouter-v6.json`](results/2026-07-22-hermes-native-session-claude-openrouter-v6.json).
 
 The adapter is under [`integrations/hermes`](../../integrations/hermes/README.md).
 The first result remains unchanged.
+
+## Native Hermes follow-up
+
+The original profiles expose DittoBench's memory tool names as aliases over
+Hermes' native FTS handler. That preserves the retrieval engine, but it is not
+the cleanest answer to “how does Hermes itself use memory?” The new
+`native-session` condition instead:
+
+- imports every benchmark conversation verbatim as a native Hermes session;
+- exposes Hermes' upstream `session_search` name, schema, and result shape;
+- preserves Hermes' normal evaluation-session persistence;
+- removes all seven Ditto memory read/write names from the model's tool list;
+- retains the actual `session_search` calls in the transcript;
+- adds no skill, answer router, embedding model, reranker, graph, or external
+  memory provider.
+
+| Condition | Model | Native memory trace | Memory mean | Correct |
+| --- | --- | --- | ---: | ---: |
+| Original alias baseline | Qwen 3 32B | Ditto aliases over SessionDB | 0.239583 | 23/96 |
+| Alias favorable | Qwen 3 32B | Ditto aliases over SessionDB | 0.260417 | 25/96 |
+| Native session | Qwen 3 32B | Hermes `session_search` | 0.229167 | 22/96 |
+| Native session, stronger model | Claude Sonnet 4.6 | Hermes `session_search` | **0.302083** | **29/96** |
+
+The same-model native result is the closest model-controlled comparison. The
+Claude result is intentionally a generous upper bound: it improves native
+Hermes by seven correct cases over native Qwen and four over the prior
+alias-favorable result, but it does **not** share the miners' locked model and
+must not be used as a causal model-controlled comparison. Its memory subscore
+is suitable for a clearly labeled off-network reference chart; its Ditto tool
+score and composite are not, because Hermes emits native `session_search`
+rather than the benchmark's expected memory tool names.
+
+The trace explains part of the gap. Native Qwen called `session_search` in 45
+of 96 memory cases; Claude did so in 63. Neither condition solved Hermes'
+missing subject graph or temporal/multi-hop retrieval semantics. Both scored
+zero on isolation, multi-session, temporal-depth, multi-hop, and multi-query
+recall. Claude improved single-session recall from 1/15 to 4/15 and lifecycle
+write/read from 1/5 to 2/5.
+
+At the public snapshot generated `2026-07-22T20:10:12Z`, the strongest
+finalized v6 miner memory subscore was 0.947917, 3.14 times the Claude-driven
+Hermes upper bound. This is observational context: miner scores are
+three-validator production medians with independent provider routes and seeds.
 
 ## Paired result
 
@@ -51,7 +98,7 @@ be required to isolate sampling and transport variance.
 The `favorable` profile uses three general Hermes-facing changes:
 
 - Hermes' documented default 90 agent-loop iterations instead of eight;
-- up to 20 native `session_search` results instead of five;
+- the native `session_search` ceiling of 10 results instead of five;
 - generic recall guidance adapted to the benchmark's memory-tool aliases.
 
 It does **not** contain expected answers, case IDs, benchmark categories,
@@ -60,6 +107,10 @@ benchmark-specific skill. Qwen still chose every tool name and argument through
 the ordinary Hermes agent loop. Both profiles used the same model, disabled
 thinking, non-streaming relay shape, public tool catalog, observed tool
 endpoint, container sandbox, seed, and deterministic grader.
+
+The original profile requested 20 results, but Hermes 0.19.0 clamps discovery
+limits to 10. The committed result metadata now records both values; the score
+itself is unchanged.
 
 This is deliberately a generous **native SessionDB** profile, not a claim to
 cover every third-party memory provider Hermes supports. Provider-assisted
@@ -98,6 +149,34 @@ Hermes-favorable:
 - relay: 439 requests, 2,224,942 tokens, no upstream errors, $0.318771
 - elapsed: 7m43s
 
+Native session, same-model:
+
+- adapter implementation: `b89b1bd2bc3e62a4dea65768774bcbeec70925a2`
+- DittoBench API engine: `8df6ba37a3c4e46ede9db1cb6014551d49ac6ba8`
+- run: `1e0acc3c-23e3-41e8-bb6f-805612d276e1`
+- model: `qwen/qwen3-32b`; provider: 379 SiliconFlow responses
+- transcript SHA-256: `0a0dba9720be31eb399c0ecfd03d022eac2f5d663e9cc4929076feed6f46522b`
+- relay: 379 requests, 2,144,771 tokens, no upstream/API/HTTP errors,
+  $0.307092
+- elapsed: 7m08s
+
+Native session, stronger-model upper bound:
+
+- adapter implementation: `b89b1bd2bc3e62a4dea65768774bcbeec70925a2`
+- DittoBench API engine: `8df6ba37a3c4e46ede9db1cb6014551d49ac6ba8`
+- run: `b171417a-9d45-415e-8573-de2f06e82dba`
+- model: `anthropic/claude-sonnet-4.6`; provider: 481 Anthropic responses
+- transcript SHA-256: `09dc8b3335bca96dfac5de933d012c059c9dfd9e346ccd88de030604f6968130`
+- relay: 481 requests, 3,079,876 tokens, no upstream/API/HTTP errors,
+  $9.982308
+- elapsed: 8m36s
+
+The practice report's built-in model metadata remains the benchmark's Qwen
+lock label even for the explicit Claude experiment. The Claude evidence record
+therefore binds the actual model independently through both the adapter model
+setting and the host relay's forced upstream model. This exception is why that
+run is labeled an upper bound rather than a matched-model result.
+
 The host-side relay kept the OpenRouter key out of both containers. Practice
 scope cannot bind trusted relay accounting into the score, so the token
 efficiency multiplier remained neutral. Memory accuracy is deterministically
@@ -129,8 +208,12 @@ observed callback, and complete repository Go tests. The favorable run used the
 same dataset hash as the baseline, and the committed aggregates were checked
 against the retained local run, transcript, relay, and dataset artifacts.
 
-One earlier run (`6967bd8c-3a76-4a42-9c84-49153dc708df`) remains excluded. It
+Two earlier runs remain excluded. `6967bd8c-3a76-4a42-9c84-49153dc708df`
 was cancelled after exposing adapter transport defects that were fixed before
-either published measurement. The raw anti-cheat datasets and transcripts are
+the published alias measurements. `e1c5baed-5fcf-40cf-90fd-60ed27187574`
+completed, but the local validator had advertised its observed-tool endpoint
+as container-local loopback. Its reachability preflight failed, so its 0.15625
+memory result is not used or published as a retained measurement. The raw
+anti-cheat datasets and transcripts are
 not committed; content hashes bind the retained local evidence without
 publishing fresh evaluation material.

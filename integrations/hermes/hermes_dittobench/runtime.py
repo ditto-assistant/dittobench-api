@@ -24,9 +24,12 @@ MEMORY_READ_TOOLS = frozenset(
         "search_memories_in_subjects",
     }
 )
+MEMORY_WRITE_TOOLS = frozenset({"save_memory", "update_memory", "delete_memory"})
+WIRE_MEMORY_TOOLS = MEMORY_READ_TOOLS | MEMORY_WRITE_TOOLS
 
 BASELINE_PROFILE = "baseline"
 FAVORABLE_PROFILE = "favorable"
+NATIVE_SESSION_PROFILE = "native-session"
 FAVORABLE_RECALL_GUIDANCE = (
     "When the user references something from a past conversation or relevant "
     "cross-session context may exist, use the supplied memory search tools to "
@@ -90,8 +93,10 @@ class HermesRunner:
     @staticmethod
     def _profile() -> str:
         value = os.environ.get("HERMES_DITTOBENCH_PROFILE", BASELINE_PROFILE).strip().lower()
-        if value not in {BASELINE_PROFILE, FAVORABLE_PROFILE}:
-            raise ValueError("HERMES_DITTOBENCH_PROFILE must be baseline or favorable")
+        if value not in {BASELINE_PROFILE, FAVORABLE_PROFILE, NATIVE_SESSION_PROFILE}:
+            raise ValueError(
+                "HERMES_DITTOBENCH_PROFILE must be baseline, favorable, or native-session"
+            )
         return value
 
     @staticmethod
@@ -102,11 +107,13 @@ class HermesRunner:
         return value
 
     def _search_limit(self) -> int:
-        default = 20 if self._profile() == FAVORABLE_PROFILE else 5
+        # Hermes clamps native session_search discovery to ten results. Keep
+        # the alias profile honest about that effective upstream ceiling.
+        default = 10 if self._profile() == FAVORABLE_PROFILE else 5
         return self._positive_int("HERMES_DITTOBENCH_SEARCH_LIMIT", default)
 
     def _max_iterations(self) -> int:
-        default = 90 if self._profile() == FAVORABLE_PROFILE else 8
+        default = 90 if self._profile() in {FAVORABLE_PROFILE, NATIVE_SESSION_PROFILE} else 8
         return self._positive_int("HERMES_DITTOBENCH_MAX_ITERATIONS", default)
 
     def _system_prompt(self, request: RunRequest) -> str:
@@ -115,13 +122,20 @@ class HermesRunner:
         return "\n\n".join(part for part in (request.system_prompt, FAVORABLE_RECALL_GUIDANCE) if part)
 
     def _hermes(self) -> tuple[Callable[..., Any], Any, Callable[..., str]]:
-        if self._agent_factory is None:
+        agent_factory = self._agent_factory
+        if agent_factory is None:
             from run_agent import AIAgent
 
-            class EvalAgent(EvalAgentMixin, AIAgent):
-                pass
+            if self._profile() == NATIVE_SESSION_PROFILE:
+                # This condition deliberately keeps Hermes' ordinary session
+                # persistence. Later cases can recall earlier native sessions,
+                # including explicit remember/update/forget conversations.
+                agent_factory = AIAgent
+            else:
+                class EvalAgent(EvalAgentMixin, AIAgent):
+                    pass
 
-            self._agent_factory = EvalAgent
+                agent_factory = EvalAgent
         if self._registry is None:
             from tools.registry import registry
 
@@ -130,7 +144,7 @@ class HermesRunner:
             from tools.session_search_tool import session_search
 
             self._session_search = session_search
-        return self._agent_factory, self._registry, self._session_search
+        return agent_factory, self._registry, self._session_search
 
     @staticmethod
     def _queries(args: dict[str, Any]) -> str:
@@ -174,6 +188,12 @@ class HermesRunner:
     def _register_tools(self, tools: tuple[ToolDefinition, ...]) -> None:
         _, registry, _ = self._hermes()
         for tool in tools:
+            if self._profile() == NATIVE_SESSION_PROFILE and tool.name in WIRE_MEMORY_TOOLS:
+                # The native condition must not teach Hermes DittoBench's
+                # memory dialect. Hermes sees its own session_search tool and
+                # emits that exact tool name in the retained trace.
+                continue
+
             def handler(args: dict[str, Any], _name: str = tool.name, **_: Any) -> str:
                 return self._dispatch_wire_tool(_name, args)
 
@@ -238,6 +258,7 @@ class HermesRunner:
                 self._local.hop = hop
                 observed.append({"name": name, "args": args or {}, "hop": hop})
 
+            native_session = self._profile() == NATIVE_SESSION_PROFILE
             agent = agent_factory(
                 base_url=os.environ.get("CHUTES_BASE_URL") or os.environ.get("OPENAI_BASE_URL"),
                 api_key=os.environ.get("CHUTES_API_KEY") or os.environ.get("OPENAI_API_KEY") or "relay",
@@ -246,7 +267,9 @@ class HermesRunner:
                 model=os.environ.get("DITTOBENCH_MODEL", "qwen/qwen3-32b"),
                 max_iterations=self._max_iterations(),
                 tool_delay=0,
-                enabled_toolsets=[],
+                enabled_toolsets=(
+                    ["dittobench-wire", "session_search"] if native_session else []
+                ),
                 quiet_mode=True,
                 ephemeral_system_prompt=self._system_prompt(request),
                 session_id="dittobench_eval_"
@@ -254,7 +277,10 @@ class HermesRunner:
                 session_db=db,
                 skip_context_files=True,
                 load_soul_identity=False,
-                skip_memory=True,
+                # Native-session keeps Hermes' ordinary (empty, container-local)
+                # curated-memory prompt path. Seeded benchmark history remains
+                # in the native SessionDB, not in adapter-authored MEMORY.md.
+                skip_memory=not native_session,
                 tool_start_callback=on_tool_start,
                 reasoning_config={"enabled": False},
             )
@@ -264,11 +290,14 @@ class HermesRunner:
             # streaming consumer treats the valid non-stream response as an
             # empty SSE stream and never executes the returned tool call.
             agent._disable_streaming = True
-            # AIAgent was intentionally initialized with no Hermes tools. Add
-            # exactly the validator-supplied catalog; registered handlers above
-            # route each call to the observed endpoint or native FTS memory.
-            agent.tools = [tool.openai_schema() for tool in request.tools]
-            agent.valid_tool_names = {tool.name for tool in request.tools}
+            if not native_session:
+                # Alias profiles intentionally expose exactly the validator
+                # catalog and route its memory names onto native FTS.
+                agent.tools = [tool.openai_schema() for tool in request.tools]
+                agent.valid_tool_names = {tool.name for tool in request.tools}
+            # The native condition leaves the tool surface AIAgent built from
+            # Hermes' own registry untouched: session_search plus the ordinary
+            # non-memory tools registered above.
             agent._end_session_on_close = False
 
             started = time.monotonic()
