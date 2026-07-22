@@ -241,13 +241,24 @@ func relayUsageSince(start, end relayHealthSnapshot) (protocol.TokenUsage, error
 	return usage, nil
 }
 
-func (s *server) relayRunStart(ctx context.Context, runID string, benchVersion int) (relayHealthSnapshot, bool) {
-	gateway := envOr("HARNESS_GATEWAY_URL", "http://host.docker.internal:11434")
-	if err := probeLockedModelRelay(ctx, gateway); err != nil {
-		s.failRelayUnavailable(runID, err)
+func (s *server) relayRunStart(ctx context.Context, runID string, benchVersion int, gateway, sessionID string) (relayHealthSnapshot, bool) {
+	var probeErr error
+	if sessionID != "" {
+		probeErr = s.broker.trustedProbe(ctx, sessionID)
+	} else {
+		probeErr = probeLockedModelRelay(ctx, gateway)
+	}
+	if probeErr != nil {
+		s.failRelayUnavailable(runID, probeErr)
 		return relayHealthSnapshot{}, false
 	}
-	snapshot, err := readRelayHealth(ctx, gateway)
+	var snapshot relayHealthSnapshot
+	var err error
+	if sessionID != "" {
+		snapshot, err = s.broker.snapshot(sessionID)
+	} else {
+		snapshot, err = readRelayHealth(ctx, gateway)
+	}
 	if err != nil {
 		s.failRelayUnavailable(runID, err)
 		return relayHealthSnapshot{}, false
@@ -261,9 +272,14 @@ func (s *server) relayRunStart(ctx context.Context, runID string, benchVersion i
 	return snapshot, true
 }
 
-func (s *server) relayRunResult(ctx context.Context, runID string, start relayHealthSnapshot) (protocol.TokenUsage, relayExecutionSummary, bool) {
-	gateway := envOr("HARNESS_GATEWAY_URL", "http://host.docker.internal:11434")
-	end, err := readRelayHealth(ctx, gateway)
+func (s *server) relayRunResult(ctx context.Context, runID string, start relayHealthSnapshot, gateway, sessionID string) (protocol.TokenUsage, relayExecutionSummary, bool) {
+	var end relayHealthSnapshot
+	var err error
+	if sessionID != "" {
+		end, err = s.broker.snapshot(sessionID)
+	} else {
+		end, err = readRelayHealth(ctx, gateway)
+	}
 	if err == nil {
 		err = relayDegradedSince(start, end)
 	}

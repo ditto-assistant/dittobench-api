@@ -7,15 +7,10 @@
 // fail-closed: the sandbox reaches only this relay (host.docker.internal), and
 // the relay is the only process that reaches the upstream.
 //
-// The same locked model (Qwen3-32B) is served by two interchangeable certified
-// providers, and each validator picks one with RELAY_PROVIDER. This spreads
-// scoring load: pinning the whole fleet to Chutes saturated that endpoint and
-// drove up latency, so validators now split across Chutes (the hardware-
-// attested TEE deployment, "chutes") and OpenRouter (the same weights via the
-// certified Nebius deployment, "openrouter"). The two are certified as
-// comparable, so a submission's k=3 quorum may mix providers by design; every
-// score reports the same harness model id (llm.LockedHarnessModel), so the
-// median is taken over comparable numbers.
+// This binary is rollback-only after platform ticket inference is enabled.
+// OpenRouter/Nebius is the default compatibility profile. The historical
+// Chutes profile remains code-frozen but disabled unless an operator explicitly
+// enables the bounded transition escape hatch.
 //
 // Each profile is CODE-FROZEN: RELAY_PROVIDER only chooses which certified
 // profile runs, never what it pins (upstream, exact model id, serving-provider
@@ -25,7 +20,9 @@
 // override: the pin is enforced in code, not left to a validator's env.
 //
 // Env (deployment only):
-//   - RELAY_PROVIDER  "chutes" (default) or "openrouter"
+//   - RELAY_DISABLED  "1" starts a no-provider compatibility stub
+//   - RELAY_PROVIDER  "openrouter" (default); "chutes" is soft-deprecated
+//   - RELAY_ENABLE_DEPRECATED_CHUTES  explicit "1" needed for the old profile
 //   - RELAY_API_KEY   upstream bearer key for the selected provider (required)
 //   - PORT            listen port (default 11434, the gateway port the sandbox
 //     already expects)
@@ -94,6 +91,8 @@ var providers = map[string]providerProfile{
 			body["provider"] = map[string]any{
 				"only":            []string{"nebius"},
 				"allow_fallbacks": false,
+				"data_collection": "deny",
+				"zdr":             true,
 			}
 			appendNoThink(body)
 		},
@@ -240,7 +239,17 @@ type relayHealth struct {
 }
 
 func main() {
-	providerName := envOr("RELAY_PROVIDER", "chutes")
+	addr := ":" + envOr("PORT", "11434")
+	if strings.TrimSpace(os.Getenv("RELAY_DISABLED")) == "1" {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/", disabledHandler)
+		serveRelay(addr, mux, "model-relay compatibility stub disabled")
+		return
+	}
+	providerName := envOr("RELAY_PROVIDER", "openrouter")
+	if providerName == "chutes" && strings.TrimSpace(os.Getenv("RELAY_ENABLE_DEPRECATED_CHUTES")) != "1" {
+		log.Fatal("the Chutes relay profile is disabled; use platform ticket inference")
+	}
 	profile, ok := providers[providerName]
 	if !ok {
 		log.Fatalf("RELAY_PROVIDER %q is not a certified profile (chutes|openrouter)", providerName)
@@ -271,8 +280,21 @@ func main() {
 	mux.HandleFunc("POST /v1/chat/completions", r.handle)
 	mux.HandleFunc("POST /chat/completions", r.handle)
 	mux.HandleFunc("GET /health", r.health)
-	addr := ":" + envOr("PORT", "11434")
 	log.Printf("model-relay on %s -> %s (model pinned to %s)", addr, r.upstream, r.model)
+	serveRelay(addr, mux, "")
+}
+
+func disabledHandler(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusGone)
+	_, _ = w.Write([]byte(`{"status":"disabled"}`))
+}
+
+func serveRelay(addr string, handler http.Handler, message string) {
+	if message != "" {
+		log.Printf("%s on %s", message, addr)
+	}
 	// Bind IPv4 explicitly. The relay is the gateway a sandboxed harness reaches via
 	// host.docker.internal (Docker Desktop's IPv4 host-gateway); a Go dual-stack
 	// "[::]" listener is not reachable that way on Docker Desktop/WSL2, so the
@@ -282,7 +304,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("listen %s: %v", addr, err)
 	}
-	log.Fatal(http.Serve(ln, mux))
+	log.Fatal(http.Serve(ln, handler))
 }
 
 func (r *relay) handle(w http.ResponseWriter, req *http.Request) {

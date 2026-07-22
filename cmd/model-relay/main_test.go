@@ -33,6 +33,20 @@ func (cancelingBody) Close() error { return nil }
 // noSleep is a stubbed relay.sleep that never blocks.
 func noSleep(context.Context, time.Duration) error { return nil }
 
+func TestDisabledHandlerHasNoInferenceSurface(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	disabledHandler(
+		recorder,
+		httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil),
+	)
+	if recorder.Code != http.StatusGone || recorder.Body.String() != `{"status":"disabled"}` {
+		t.Fatalf("disabled response = %d %s", recorder.Code, recorder.Body.String())
+	}
+	if recorder.Header().Get("Cache-Control") != "no-store" {
+		t.Fatal("disabled response must not be cached")
+	}
+}
+
 // postAndHealth drives one chat request through the relay's mux and returns the
 // chat response together with the /health snapshot.
 func postAndHealth(t *testing.T, r *relay, reqBody string) (*http.Response, relayHealth) {
@@ -506,8 +520,9 @@ func TestProviderProfilesAreFrozen(t *testing.T) {
 	or.pinBody(body)
 	pin, _ := body["provider"].(map[string]any)
 	only, _ := pin["only"].([]string)
-	if len(only) != 1 || only[0] != "nebius" || pin["allow_fallbacks"] != false {
-		t.Fatalf("openrouter routing not locked to nebius/no-fallbacks: %v", body["provider"])
+	if len(only) != 1 || only[0] != "nebius" || pin["allow_fallbacks"] != false ||
+		pin["data_collection"] != "deny" || pin["zdr"] != true {
+		t.Fatalf("openrouter routing/privacy not locked: %v", body["provider"])
 	}
 }
 
@@ -536,8 +551,9 @@ func TestRelayOpenRouterPinsServingProvider(t *testing.T) {
 	}
 	pin, _ := got["provider"].(map[string]any)
 	only, _ := pin["only"].([]any)
-	if len(only) != 1 || only[0] != "nebius" || pin["allow_fallbacks"] != false {
-		t.Fatalf("serving provider not locked: %v", got["provider"])
+	if len(only) != 1 || only[0] != "nebius" || pin["allow_fallbacks"] != false ||
+		pin["data_collection"] != "deny" || pin["zdr"] != true {
+		t.Fatalf("serving provider/privacy not locked: %v", got["provider"])
 	}
 }
 

@@ -2,10 +2,49 @@ package sandbox
 
 import (
 	"context"
+	"errors"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestRunFailureRemovesPartiallyCreatedNamedContainer(t *testing.T) {
+	d := NewLocalDocker()
+	var runName string
+	removed := false
+	d.dockerCommand = func(_ context.Context, args ...string) ([]byte, error) {
+		switch args[0] {
+		case "run":
+			for i := 0; i+1 < len(args); i++ {
+				if args[i] == "--name" {
+					runName = args[i+1]
+				}
+			}
+			return nil, errors.New("start deadline")
+		case "rm":
+			removed = len(args) == 3 && args[1] == "-f" && args[2] == runName
+			return nil, nil
+		default:
+			t.Fatalf("unexpected docker command: %v", args)
+			return nil, nil
+		}
+	}
+
+	if _, err := d.Run(context.Background(), "operator-image:latest", nil); err == nil {
+		t.Fatal("expected docker start failure")
+	}
+	if runName == "" || !removed {
+		t.Fatalf("partial container was not removed by exact generated name %q", runName)
+	}
+}
+
+func TestStartTimeoutDefaultsToTwoMinutes(t *testing.T) {
+	if got := (&LocalDocker{}).startTimeout(); got != 2*time.Minute {
+		t.Fatalf("zero-value start timeout = %s", got)
+	}
+}
 
 // hasFlagPair reports whether args contains the adjacent pair [flag, value].
 func hasFlagPair(args []string, flag, value string) bool {
@@ -172,5 +211,34 @@ func TestRunArgs_EgressProxyInjectsEnv(t *testing.T) {
 	// The caller's env still rides along.
 	if !hasFlagPair(args, "-e", "OPENROUTER_API_KEY=sk-x") {
 		t.Errorf("caller env must be preserved, got %v", args)
+	}
+}
+
+func TestCleanupStaleRemovesOnlyOwnedExplicitResources(t *testing.T) {
+	d := NewLocalDocker()
+	var calls [][]string
+	d.dockerCommand = func(_ context.Context, args ...string) ([]byte, error) {
+		calls = append(calls, append([]string(nil), args...))
+		switch {
+		case reflect.DeepEqual(args, []string{"ps", "-aq", "--filter", "label=io.heyditto.dittobench.run"}):
+			return []byte("container-a\ncontainer-b\n"), nil
+		case reflect.DeepEqual(args, []string{"rm", "-f", "container-a", "container-b"}):
+			return nil, nil
+		case reflect.DeepEqual(args, []string{"network", "ls", "-q", "--filter", "label=io.heyditto.dittobench.run"}):
+			return []byte("network-a\nnetwork-b\n"), nil
+		case reflect.DeepEqual(args, []string{"network", "rm", "network-a"}),
+			reflect.DeepEqual(args, []string{"network", "rm", "network-b"}):
+			return nil, nil
+		default:
+			t.Fatalf("unexpected docker command: %v", args)
+			return nil, nil
+		}
+	}
+
+	if err := d.CleanupStale(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 5 {
+		t.Fatalf("expected five explicit docker calls, got %v", calls)
 	}
 }

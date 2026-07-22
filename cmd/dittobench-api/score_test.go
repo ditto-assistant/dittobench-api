@@ -87,6 +87,22 @@ func TestVersionedScoreRequiresSupportedBenchVersion(t *testing.T) {
 	}
 }
 
+func TestCanonicalScoreRequiresTicketInferenceWhenEnforced(t *testing.T) {
+	s := newScoreTestServer()
+	s.requireTicketInference = true
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v2/score",
+		strings.NewReader(`{"bench_version":5}`),
+	)
+	s.handleVersionedScore(rr, req)
+	if rr.Code != http.StatusServiceUnavailable ||
+		!strings.Contains(rr.Body.String(), "ticket inference session is required") {
+		t.Fatalf("expected ticket inference 503, got %d %s", rr.Code, rr.Body.String())
+	}
+}
+
 func TestRequestedBenchVersionLegacyCompatibility(t *testing.T) {
 	if got, msg := requestedBenchVersion(0, false); got != 2 || msg != "" {
 		t.Fatalf("legacy omitted version must select exact v2, got (%d, %q)", got, msg)

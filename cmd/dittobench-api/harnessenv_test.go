@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/ditto-assistant/dittobench-api/internal/llm"
@@ -60,6 +61,18 @@ func TestHarnessSandboxEnvRelayRouting(t *testing.T) {
 	}
 	if _, ok := env["OPENROUTER_API_KEY"]; ok {
 		t.Fatal("locked path must not forward the OpenRouter key")
+	}
+}
+
+func TestTicketInferenceEnvContainsNoSessionCapability(t *testing.T) {
+	env := harnessSandboxEnv(nil, "secret-session-route")
+	if got := env["CHUTES_BASE_URL"]; got != "http://host.docker.internal:11436/v1/inference" {
+		t.Fatalf("ticket gateway = %q", got)
+	}
+	for key, value := range env {
+		if key != "BENIGN" && strings.Contains(value, "secret-session-route") {
+			t.Fatalf("session capability leaked through %s", key)
+		}
 	}
 }
 
