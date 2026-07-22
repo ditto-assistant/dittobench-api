@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/ditto-assistant/dittobench-api/internal/efficiency"
+	"github.com/ditto-assistant/dittobench-api/internal/llm"
 )
 
 const testSourceRevision = "0123456789abcdef0123456789abcdef01234567"
@@ -31,6 +33,12 @@ func TestCapabilitiesReportBoundReleaseIdentity(t *testing.T) {
 	}
 	if got.MemoryPhaseCapacity != maxConcurrentMemoryPhases {
 		t.Fatalf("memory-phase capacity = %d, want %d", got.MemoryPhaseCapacity, maxConcurrentMemoryPhases)
+	}
+	if !efficiency.ValidV7CalibrationReadiness(got.V7Calibration) {
+		t.Fatalf("reviewed v7 calibration missing: %+v", got.V7Calibration)
+	}
+	if !strings.Contains(rr.Body.String(), `"profile_revision":"openrouter-route-8efde5ce9f5a4e58-v1"`) {
+		t.Fatalf("v7 calibration wire shape missing from capabilities: %s", rr.Body.String())
 	}
 	// v2-v4 are always advertised; v5 is negotiated only once reviewed token
 	// baselines make efficiency.ProductionReady() true (the #54 release gate).
@@ -57,9 +65,36 @@ func TestCapabilitiesReportBoundReleaseIdentity(t *testing.T) {
 	}
 }
 
-func TestV7CapabilityStaysDarkUntilGPTOSSCalibrationLands(t *testing.T) {
-	if efficiency.ProductionReadyForVersion(7) {
-		t.Fatal("v7 must not advertise before its reviewed GPT-OSS baseline manifest lands")
+func TestV7CapabilityAdvertisesAfterGPTOSSCalibrationLands(t *testing.T) {
+	if !efficiency.ProductionReadyForVersion(7) {
+		t.Fatal("v7 must advertise after its reviewed GPT-OSS baseline manifest lands")
+	}
+}
+
+func TestV7CalibrationReadinessRequiresManifestAndExactRoutes(t *testing.T) {
+	readiness := efficiency.CalibrationReadiness{
+		ManifestSHA256: strings.Repeat("a", 64),
+		SupportedRoutes: []efficiency.CalibrationRouteIdentity{{
+			Provider: "openrouter", ProfileRevision: "openrouter-route-8efde5ce9f5a4e58-v1",
+			Model: llm.V7HarnessModel,
+		}},
+	}
+	if !efficiency.ValidV7CalibrationReadiness(readiness) {
+		t.Fatal("complete v7 calibration identity rejected")
+	}
+	readiness.ManifestSHA256 = ""
+	if efficiency.ValidV7CalibrationReadiness(readiness) {
+		t.Fatal("v7 calibration identity accepted without reviewed manifest digest")
+	}
+	readiness.ManifestSHA256 = strings.Repeat("a", 64)
+	readiness.SupportedRoutes[0].Provider = "groq"
+	if efficiency.ValidV7CalibrationReadiness(readiness) {
+		t.Fatal("v7 calibration identity accepted an unreviewed provider route")
+	}
+	readiness.SupportedRoutes[0].Provider = "openrouter"
+	readiness.SupportedRoutes = append(readiness.SupportedRoutes, readiness.SupportedRoutes[0])
+	if efficiency.ValidV7CalibrationReadiness(readiness) {
+		t.Fatal("v7 calibration identity accepted an extra route")
 	}
 }
 
