@@ -14,6 +14,11 @@ const (
 	// model. Bump it here (a network-wide model change), then redeploy.
 	LockedHarnessModel = "qwen/qwen3-32b"
 
+	// V7HarnessModel is the consensus model for the v7 benchmark contract.
+	// Historical versions remain pinned to LockedHarnessModel so replaying an
+	// old ticket cannot silently cross the model boundary.
+	V7HarnessModel = "openai/gpt-oss-20b"
+
 	// LockedUpstreamModel is the same locked model in the form the Chutes
 	// gateway serves it (TEE, hardware-attested). cmd/model-relay forces this id
 	// upstream; LockedHarnessModel is what the harness and score reports name.
@@ -31,3 +36,12 @@ const (
 // sandbox instead of letting the harness pick its own model. See
 // LockedHarnessModel.
 func HarnessModel() string { return LockedHarnessModel }
+
+// HarnessModelForVersion returns the immutable model identity for a benchmark
+// contract. The v7 boundary is intentionally explicit and not env-tunable.
+func HarnessModelForVersion(benchVersion int) string {
+	if benchVersion >= 7 {
+		return V7HarnessModel
+	}
+	return LockedHarnessModel
+}

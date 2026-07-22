@@ -181,6 +181,7 @@ func Seed(ctx context.Context, harnessURL string, req protocol.SeedRequest) (pro
 type CaseOptions struct {
 	ToolEndpoint string
 	UserID       string
+	BenchVersion int
 }
 
 // AttemptTelemetry is validator-observed execution evidence for one HTTP
@@ -263,11 +264,16 @@ func runOneWithTelemetry(ctx context.Context, harnessURL string, c protocol.Tool
 		return protocol.RunResponse{}, execution, err
 	}
 
+	wireBenchVersion := 0
+	if opts.BenchVersion >= 7 {
+		wireBenchVersion = opts.BenchVersion
+	}
 	reqBody := protocol.RunRequest{
 		CaseID:       c.ID,
 		SystemPrompt: "You are Ditto, a helpful assistant with access to tools. Call a tool only when it is the right action for the user's request.",
 		UserInput:    c.Prompt,
 		Tools:        tools,
+		BenchVersion: wireBenchVersion,
 		ToolEndpoint: opts.ToolEndpoint,
 		UserID:       opts.UserID,
 	}

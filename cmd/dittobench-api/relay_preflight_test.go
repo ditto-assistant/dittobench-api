@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ditto-assistant/dittobench-api/internal/llm"
 	"github.com/ditto-assistant/dittobench-api/internal/runner"
 	"github.com/ditto-assistant/dittobench-api/internal/store"
 	"github.com/ditto-assistant/dittobench-datagen/catalog"
@@ -60,11 +61,14 @@ func TestProbeLockedModelRelay(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		if err := probeLockedModelRelay(context.Background(), srv.URL); err != nil {
+		if err := probeLockedModelRelay(context.Background(), srv.URL, protocol.BenchVersionV7); err != nil {
 			t.Fatalf("probe failed: %v", err)
 		}
 		if got["max_tokens"] != float64(1) || got["stream"] != false {
 			t.Fatalf("probe was not bounded: %#v", got)
+		}
+		if got["model"] != "openai/gpt-oss-20b" {
+			t.Fatalf("probe model = %q", got["model"])
 		}
 	})
 
@@ -82,7 +86,7 @@ func TestProbeLockedModelRelay(t *testing.T) {
 				_, _ = w.Write([]byte(tc.body))
 			}))
 			defer srv.Close()
-			err := probeLockedModelRelay(context.Background(), srv.URL)
+			err := probeLockedModelRelay(context.Background(), srv.URL, protocol.BenchVersionV6)
 			if err == nil {
 				t.Fatal("expected relay probe failure")
 			}
@@ -248,14 +252,14 @@ func TestReadRelayHealthRejectsStaticLegacyHealth(t *testing.T) {
 
 func TestV5RequiresTrustedTokenAccountingWhileLegacyAccountingRemainsReadable(t *testing.T) {
 	legacy := relayHealthSnapshot{AccountingVersion: 1, Status: "ok"}
-	if err := requireTokenAccounting(legacy); err == nil {
+	if err := requireTokenAccounting(legacy, protocol.BenchVersionV5, "full"); err == nil {
 		t.Fatal("v5 accepted relay accounting v1")
 	}
 	metered := relayHealthSnapshot{
 		AccountingVersion: 2, Status: "ok", Provider: "p",
 		ProfileRevision: "r", Model: "m",
 	}
-	if err := requireTokenAccounting(metered); err != nil {
+	if err := requireTokenAccounting(metered, protocol.BenchVersionV5, "full"); err != nil {
 		t.Fatalf("v5 rejected trusted accounting: %v", err)
 	}
 
@@ -265,6 +269,63 @@ func TestV5RequiresTrustedTokenAccountingWhileLegacyAccountingRemainsReadable(t 
 	defer relay.Close()
 	if _, err := readRelayHealth(context.Background(), relay.URL); err != nil {
 		t.Fatalf("v2-v4 rollout compatibility rejected accounting v1: %v", err)
+	}
+}
+
+func TestV7RequiresExactModelProfileAndReviewedBaseline(t *testing.T) {
+	snapshot := relayHealthSnapshot{
+		AccountingVersion: 2,
+		Status:            "ok",
+		Provider:          "groq",
+		ProfileRevision:   "openrouter-route-0123456789abcdef-v1",
+		Model:             llm.V7HarnessModel,
+	}
+
+	wrongModel := snapshot
+	wrongModel.Model = llm.LockedHarnessModel
+	if err := requireTokenAccounting(wrongModel, protocol.BenchVersionV7, "full"); err == nil || !strings.Contains(err.Error(), "model") {
+		t.Fatalf("v7 accepted wrong model: %v", err)
+	}
+
+	wrongProfile := snapshot
+	wrongProfile.ProfileRevision = "profile-v1"
+	if err := requireTokenAccounting(wrongProfile, protocol.BenchVersionV7, "full"); err == nil || !strings.Contains(err.Error(), "profile") {
+		t.Fatalf("v7 accepted unversioned profile: %v", err)
+	}
+
+	if err := requireTokenAccounting(snapshot, protocol.BenchVersionV7, "full"); err == nil || !strings.Contains(err.Error(), "reviewed") {
+		t.Fatalf("v7 must remain dark without a reviewed baseline: %v", err)
+	}
+}
+
+func TestV7RequiresCompleteProviderUsage(t *testing.T) {
+	incomplete := protocol.TokenUsage{
+		Provider:        "groq",
+		ProfileRevision: "openrouter-route-0123456789abcdef-v1",
+		Model:           llm.V7HarnessModel,
+		PromptTokens:    1,
+	}
+	if err := requireCompleteV7Usage(protocol.BenchVersionV6, incomplete); err != nil {
+		t.Fatalf("v6 compatibility rejected incomplete usage: %v", err)
+	}
+	if err := requireCompleteV7Usage(protocol.BenchVersionV7, incomplete); err == nil {
+		t.Fatal("v7 accepted incomplete provider usage")
+	}
+	incomplete.CompletionTokens = 1
+	incomplete.TotalTokens = 2
+	incomplete.Requests = 1
+	incomplete.Successes = 1
+	incomplete.UsageAvailable = 1
+	incomplete.Status = "complete"
+	if err := requireCompleteV7Usage(protocol.BenchVersionV7, incomplete); err != nil {
+		t.Fatalf("v7 rejected complete provider usage: %v", err)
+	}
+	// Caller cancellations may make requests exceed successful provider
+	// responses, as observed in the reviewed campaign. They remain acceptable
+	// when every successful response has usage and no response is unaccounted.
+	incomplete.Requests = 2
+	if err := requireCompleteV7Usage(protocol.BenchVersionV7, incomplete); err != nil {
+		t.Fatalf("v7 rejected complete usage after a caller cancellation: %v", err)
 	}
 }
 

@@ -165,6 +165,34 @@ func TestRunCase(t *testing.T) {
 	}
 }
 
+func TestRunCaseSendsBenchVersionOnlyForV7Plus(t *testing.T) {
+	versions := make(chan int, 2)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req protocol.RunRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		versions <- req.BenchVersion
+		json.NewEncoder(w).Encode(protocol.RunResponse{FinalText: "ok"})
+	}))
+	defer srv.Close()
+
+	for _, version := range []int{6, 7} {
+		if _, err := RunCase(
+			sandboxContext(), srv.URL, "m1", "question", nil,
+			CaseOptions{BenchVersion: version},
+		); err != nil {
+			t.Fatalf("v%d RunCase: %v", version, err)
+		}
+	}
+	if got := <-versions; got != 0 {
+		t.Fatalf("v6 wire bench_version = %d, want omitted/zero", got)
+	}
+	if got := <-versions; got != 7 {
+		t.Fatalf("v7 wire bench_version = %d, want 7", got)
+	}
+}
+
 func TestRunCaseRetriesTransientThenSucceeds(t *testing.T) {
 	var calls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

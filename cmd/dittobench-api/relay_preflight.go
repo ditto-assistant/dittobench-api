@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ditto-assistant/dittobench-api/internal/efficiency"
 	"github.com/ditto-assistant/dittobench-api/internal/llm"
 	"github.com/ditto-assistant/dittobench-api/internal/store"
 	"github.com/ditto-assistant/dittobench-datagen/protocol"
@@ -63,12 +64,12 @@ func (s *server) lockScoredRelayRun() func() {
 // /health and tool-endpoint preflight do not exercise this dependency, so both
 // can pass while a provider outage turns every model-backed case into a silent
 // miss.
-func probeLockedModelRelay(ctx context.Context, gateway string) error {
+func probeLockedModelRelay(ctx context.Context, gateway string, benchVersion int) error {
 	ctx, cancel := context.WithTimeout(ctx, relayProbeTimeout)
 	defer cancel()
 
 	body, err := json.Marshal(map[string]any{
-		"model": llm.HarnessModel(),
+		"model": llm.HarnessModelForVersion(benchVersion),
 		"messages": []map[string]string{{
 			"role":    "user",
 			"content": "Reply OK.",
@@ -162,12 +163,53 @@ func readRelayHealth(ctx context.Context, gateway string) (relayHealthSnapshot, 
 	return snapshot, nil
 }
 
-func requireTokenAccounting(snapshot relayHealthSnapshot) error {
+func validV7RouteProfile(profile string) bool {
+	const prefix = "openrouter-route-"
+	const suffix = "-v1"
+	if !strings.HasPrefix(profile, prefix) || !strings.HasSuffix(profile, suffix) {
+		return false
+	}
+	digest := strings.TrimSuffix(strings.TrimPrefix(profile, prefix), suffix)
+	if len(digest) != 16 || digest != strings.ToLower(digest) {
+		return false
+	}
+	for _, r := range digest {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func requireTokenAccounting(snapshot relayHealthSnapshot, benchVersion int, runSize string) error {
 	if snapshot.AccountingVersion != 2 {
 		return fmt.Errorf("relay health lacks trusted token accounting")
 	}
 	if snapshot.Provider == "" || snapshot.ProfileRevision == "" || snapshot.Model == "" {
 		return fmt.Errorf("relay health lacks immutable provider identity")
+	}
+	if benchVersion >= protocol.BenchVersionV7 {
+		if snapshot.Model != llm.V7HarnessModel {
+			return fmt.Errorf("relay model does not match benchmark v7")
+		}
+		if !validV7RouteProfile(snapshot.ProfileRevision) {
+			return fmt.Errorf("relay profile does not match benchmark v7")
+		}
+		identity := protocol.TokenUsage{
+			Provider:        snapshot.Provider,
+			ProfileRevision: snapshot.ProfileRevision,
+			Model:           snapshot.Model,
+		}
+		if _, ok := efficiency.LookupForVersion(benchVersion, runSize, identity); !ok {
+			return fmt.Errorf("relay profile lacks a reviewed benchmark v7 token baseline")
+		}
+	}
+	return nil
+}
+
+func requireCompleteV7Usage(benchVersion int, usage protocol.TokenUsage) error {
+	if benchVersion >= protocol.BenchVersionV7 && !efficiency.ValidUsage(usage) {
+		return fmt.Errorf("benchmark v7 requires complete provider token usage")
 	}
 	return nil
 }
@@ -241,12 +283,12 @@ func relayUsageSince(start, end relayHealthSnapshot) (protocol.TokenUsage, error
 	return usage, nil
 }
 
-func (s *server) relayRunStart(ctx context.Context, runID string, benchVersion int, gateway, sessionID string) (relayHealthSnapshot, bool) {
+func (s *server) relayRunStart(ctx context.Context, runID string, benchVersion int, runSize, gateway, sessionID string) (relayHealthSnapshot, bool) {
 	var probeErr error
 	if sessionID != "" {
 		probeErr = s.broker.trustedProbe(ctx, sessionID)
 	} else {
-		probeErr = probeLockedModelRelay(ctx, gateway)
+		probeErr = probeLockedModelRelay(ctx, gateway, benchVersion)
 	}
 	if probeErr != nil {
 		s.failRelayUnavailable(runID, probeErr)
@@ -264,7 +306,7 @@ func (s *server) relayRunStart(ctx context.Context, runID string, benchVersion i
 		return relayHealthSnapshot{}, false
 	}
 	if benchVersion >= protocol.BenchVersionV5 {
-		if err := requireTokenAccounting(snapshot); err != nil {
+		if err := requireTokenAccounting(snapshot, benchVersion, runSize); err != nil {
 			s.failRelayUnavailable(runID, err)
 			return relayHealthSnapshot{}, false
 		}

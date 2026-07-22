@@ -1,15 +1,7 @@
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
-github.com/ditto-assistant/dittobench-datagen v0.10.0 h1:dDGKl87ynG0z69Z6Cxp8mAq/hlRzQ95KUErpnK1FfuI=
-github.com/ditto-assistant/dittobench-datagen v0.10.0/go.mod h1:b5oKfDqwoHFDt8eaJ/J6SXIM07jxVdENUl+D3sm/Z+g=
-github.com/ditto-assistant/dittobench-datagen v0.10.1-0.20260721181619-651e7e4b459c h1:qEiDxHQAKpxY1KMKvAsnKozOW6FUTqQG8eIoMo9fdbw=
-github.com/ditto-assistant/dittobench-datagen v0.10.1-0.20260721181619-651e7e4b459c/go.mod h1:b5oKfDqwoHFDt8eaJ/J6SXIM07jxVdENUl+D3sm/Z+g=
-github.com/ditto-assistant/dittobench-datagen v0.10.1-0.20260721183534-032b945162ab h1:bvhmqLsMSEqE9MbcVaC35vG+0uDsZntktgmfinn+ccs=
-github.com/ditto-assistant/dittobench-datagen v0.10.1-0.20260721183534-032b945162ab/go.mod h1:b5oKfDqwoHFDt8eaJ/J6SXIM07jxVdENUl+D3sm/Z+g=
-github.com/ditto-assistant/dittobench-datagen v0.11.0 h1:6YhgAtYdRkg12LflUpuguBsTXipESKIQt2eYK5KJbuM=
-github.com/ditto-assistant/dittobench-datagen v0.11.0/go.mod h1:b5oKfDqwoHFDt8eaJ/J6SXIM07jxVdENUl+D3sm/Z+g=
-github.com/ditto-assistant/dittobench-datagen v0.11.1 h1:xn5Jhw1P9BINVXCw2KUTiKmLPpXZRxfEsQvP4UryXus=
-github.com/ditto-assistant/dittobench-datagen v0.11.1/go.mod h1:b5oKfDqwoHFDt8eaJ/J6SXIM07jxVdENUl+D3sm/Z+g=
+github.com/ditto-assistant/dittobench-datagen v0.11.2-0.20260722063340-ef3af0387b46 h1:oeZExuuh3yypsf04zhJJPPIu9Y2IWiAt8nqicp8t6dQ=
+github.com/ditto-assistant/dittobench-datagen v0.11.2-0.20260722063340-ef3af0387b46/go.mod h1:b5oKfDqwoHFDt8eaJ/J6SXIM07jxVdENUl+D3sm/Z+g=
 github.com/google/uuid v1.6.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=
 github.com/google/uuid v1.6.0/go.mod h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
