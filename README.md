@@ -367,6 +367,8 @@ caller-supplied harness URLs, so it guards against abuse:
   (`cmd/model-relay` fronting Chutes).
 - `docs/token-efficiency-v5.md`: trusted proxy metering, the one-sided v5 token
   waste penalty, phase gate, and reproducible starter-kit p90 budget process.
+- `docs/hermes-benchmark/README.md`: the reproducible Hermes Agent adapter and
+  sanitized full-v6 OpenRouter measurement.
 
 ## License
 
