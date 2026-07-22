@@ -274,11 +274,12 @@ func (s *server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 }
 
 type capabilitiesResponse struct {
-	SoftwareVersion        string `json:"software_version"`
-	SourceRevision         string `json:"source_revision"`
-	SupportedBenchVersions []int  `json:"supported_bench_versions"`
-	FullRunCapacity        int    `json:"full_run_capacity"`
-	MemoryPhaseCapacity    int    `json:"memory_phase_capacity"`
+	SoftwareVersion        string                          `json:"software_version"`
+	SourceRevision         string                          `json:"source_revision"`
+	SupportedBenchVersions []int                           `json:"supported_bench_versions"`
+	FullRunCapacity        int                             `json:"full_run_capacity"`
+	MemoryPhaseCapacity    int                             `json:"memory_phase_capacity"`
+	V7Calibration          efficiency.CalibrationReadiness `json:"v7_calibration"`
 }
 
 // handleCapabilities reports public release metadata to a co-located validator.
@@ -300,9 +301,11 @@ func (s *server) handleCapabilities(w http.ResponseWriter, _ *http.Request) {
 	if efficiency.ProductionReadyForVersion(protocol.BenchVersionV6) {
 		versions = append(versions, protocol.BenchVersionV6)
 	}
-	// Execution support ships client-first, but v7 stays dark until the audited
-	// GPT-OSS starter-kit token manifest is embedded and production-ready.
-	if efficiency.ProductionReadyForVersion(protocol.BenchVersionV7) {
+	// Advertise v7 only with the audited GPT-OSS token manifest and exact route
+	// identity embedded in this scorer release. Platform rollout stays separate.
+	v7Calibration := efficiency.V7CalibrationReadiness()
+	if efficiency.ProductionReadyForVersion(protocol.BenchVersionV7) &&
+		efficiency.ValidV7CalibrationReadiness(v7Calibration) {
 		versions = append(versions, protocol.BenchVersionV7)
 	}
 	writeJSON(w, http.StatusOK, capabilitiesResponse{
@@ -311,6 +314,7 @@ func (s *server) handleCapabilities(w http.ResponseWriter, _ *http.Request) {
 		SupportedBenchVersions: versions,
 		FullRunCapacity:        maxConcurrentRuns,
 		MemoryPhaseCapacity:    maxConcurrentMemoryPhases,
+		V7Calibration:          v7Calibration,
 	})
 }
 

@@ -4,10 +4,12 @@
 package efficiency
 
 import (
+	"crypto/sha256"
 	_ "embed"
 	"encoding/json"
 	"fmt"
 	"math"
+	"sort"
 
 	"github.com/ditto-assistant/dittobench-api/internal/llm"
 	"github.com/ditto-assistant/dittobench-datagen/protocol"
@@ -52,17 +54,38 @@ type Manifest struct {
 	Baselines          []Baseline           `json:"baselines"`
 }
 
+// CalibrationRouteIdentity is the exact provider route contract covered by a
+// reviewed token-baseline manifest. Consumers must intersect all three fields;
+// a provider name alone is not a calibrated route identity.
+type CalibrationRouteIdentity struct {
+	Provider        string `json:"provider"`
+	ProfileRevision string `json:"profile_revision"`
+	Model           string `json:"model"`
+}
+
+// CalibrationReadiness is the public identity of a reviewed baseline
+// manifest. An empty digest and route set means no reviewed v7 manifest is
+// embedded and v7 must remain unavailable.
+type CalibrationReadiness struct {
+	ManifestSHA256  string                     `json:"manifest_sha256"`
+	SupportedRoutes []CalibrationRouteIdentity `json:"supported_routes"`
+}
+
 //go:embed baselines_v5.json
 var manifestJSON []byte
 
-var productionManifest = mustManifest(manifestJSON)
+//go:embed baselines_v7.json
+var manifestV7JSON []byte
 
-func mustManifest(body []byte) Manifest {
+var productionManifest = mustManifest(manifestJSON, protocol.BenchVersionV5)
+var productionV7Manifest = mustManifest(manifestV7JSON, protocol.BenchVersionV7)
+
+func mustManifest(body []byte, benchVersion int) Manifest {
 	var manifest Manifest
 	if err := json.Unmarshal(body, &manifest); err != nil {
 		panic(fmt.Sprintf("invalid embedded token baseline manifest: %v", err))
 	}
-	if manifest.SchemaVersion != 2 || manifest.FormulaVersion != FormulaVersion || manifest.BenchVersion != protocol.BenchVersionV5 {
+	if manifest.SchemaVersion != 2 || manifest.FormulaVersion != FormulaVersion || manifest.BenchVersion != benchVersion {
 		panic("embedded token baseline manifest has incompatible contract metadata")
 	}
 	return manifest
@@ -72,6 +95,13 @@ func ManifestSnapshot() Manifest {
 	copy := productionManifest
 	copy.Calibration = append([]CalibrationDataset(nil), productionManifest.Calibration...)
 	copy.Baselines = append([]Baseline(nil), productionManifest.Baselines...)
+	return copy
+}
+
+func V7ManifestSnapshot() Manifest {
+	copy := productionV7Manifest
+	copy.Calibration = append([]CalibrationDataset(nil), productionV7Manifest.Calibration...)
+	copy.Baselines = append([]Baseline(nil), productionV7Manifest.Baselines...)
 	return copy
 }
 
@@ -89,9 +119,58 @@ func ProductionReadyForVersion(benchVersion int) bool {
 	switch benchVersion {
 	case protocol.BenchVersionV5, protocol.BenchVersionV6:
 		return ProductionReady()
+	case protocol.BenchVersionV7:
+		return ReadyForV7Production(productionV7Manifest)
 	default:
 		return false
 	}
+}
+
+// V7CalibrationReadiness returns only identities proven by the embedded,
+// reviewed v7 manifest. There is deliberately no candidate/smoke fallback.
+func V7CalibrationReadiness() CalibrationReadiness {
+	return v7CalibrationReadiness(productionV7Manifest, manifestV7JSON)
+}
+
+func v7CalibrationReadiness(manifest Manifest, rawManifest []byte) CalibrationReadiness {
+	readiness := CalibrationReadiness{SupportedRoutes: []CalibrationRouteIdentity{}}
+	if len(rawManifest) == 0 || !ReadyForV7Production(manifest) {
+		return readiness
+	}
+	seen := map[CalibrationRouteIdentity]bool{}
+	for _, baseline := range manifest.Baselines {
+		seen[CalibrationRouteIdentity{
+			Provider:        baseline.Provider,
+			ProfileRevision: baseline.ProfileRevision,
+			Model:           baseline.Model,
+		}] = true
+	}
+	for route := range seen {
+		readiness.SupportedRoutes = append(readiness.SupportedRoutes, route)
+	}
+	sort.Slice(readiness.SupportedRoutes, func(i, j int) bool {
+		a, b := readiness.SupportedRoutes[i], readiness.SupportedRoutes[j]
+		if a.Provider != b.Provider {
+			return a.Provider < b.Provider
+		}
+		if a.ProfileRevision != b.ProfileRevision {
+			return a.ProfileRevision < b.ProfileRevision
+		}
+		return a.Model < b.Model
+	})
+	sum := sha256.Sum256(rawManifest)
+	readiness.ManifestSHA256 = fmt.Sprintf("%x", sum[:])
+	return readiness
+}
+
+func ValidV7CalibrationReadiness(readiness CalibrationReadiness) bool {
+	if !canonicalSHA256(readiness.ManifestSHA256) || len(readiness.SupportedRoutes) != 1 {
+		return false
+	}
+	return readiness.SupportedRoutes[0] == (CalibrationRouteIdentity{
+		Provider: v7AggregateProvider, ProfileRevision: v7AggregateProfile,
+		Model: llm.V7HarnessModel,
+	})
 }
 
 // ReadyForProduction validates a candidate manifest using the same gate as the
@@ -128,33 +207,44 @@ func ReadyForProduction(manifest Manifest) bool {
 	return true
 }
 
-// ReadyForV7Production validates the single-provider-per-run GPT-OSS
-// calibration contract. Provider eligibility is dynamic on the platform, but
-// every route must carry this exact immutable profile and its own 20-sample p90
-// for each run size before it may serve a scored ticket.
+const (
+	v7AggregateProvider        = "openrouter"
+	v7AggregateProfile         = "openrouter-route-8efde5ce9f5a4e58-v1"
+	v7StarterKitRevision       = "2ec9029568f20015562193a378eb8bce51191470"
+	v7DatasetKnownVector       = "1cfc6e3b9f3f4c04afe04b058a6851f9357f6463170b879867e2cf4588f58fcf"
+	v7CalibrationDatasetDigest = "11067ee51dd87582af939f26631cfc075588a13f708a726a3ebae1199dcabfa8"
+)
+
+// ReadyForV7Production validates the initial aggregate GPT-OSS calibration
+// contract. Provider-specific manifests remain dark until adaptive routing is
+// separately reviewed and enabled.
 func ReadyForV7Production(manifest Manifest) bool {
 	if !manifest.ScoringEnabled || manifest.BenchVersion != protocol.BenchVersionV7 ||
-		manifest.StarterKitRevision == "" || len(manifest.Calibration) != 60 {
+		manifest.StarterKitRevision != v7StarterKitRevision ||
+		manifest.DatasetKnownVector != v7DatasetKnownVector ||
+		calibrationDatasetDigest(manifest.Calibration) != v7CalibrationDatasetDigest ||
+		!validV7CalibrationDatasets(manifest.Calibration) {
 		return false
 	}
-	groups := map[string]bool{}
-	for _, b := range manifest.Baselines {
-		if b.BenchVersion == protocol.BenchVersionV7 && b.Provider != "" &&
-			b.Model == llm.V7HarnessModel && b.StarterKitRevision == manifest.StarterKitRevision &&
-			b.ProfileRevision != "" && b.RunSize != "" && validBaseline(b) {
-			groups[b.Provider+":"+b.ProfileRevision+":"+b.RunSize] = true
-		}
-	}
-	if len(manifest.Baselines) == 0 || len(manifest.Baselines)%3 != 0 {
-		return false
-	}
+	groups := map[string]int{}
 	profiles := map[string]bool{}
 	for _, b := range manifest.Baselines {
-		profiles[b.Provider+":"+b.ProfileRevision] = true
+		if b.BenchVersion != protocol.BenchVersionV7 || b.Provider != v7AggregateProvider ||
+			b.Model != llm.V7HarnessModel || b.StarterKitRevision != manifest.StarterKitRevision ||
+			b.ProfileRevision != v7AggregateProfile || b.Samples != 20 || !validBaseline(b) ||
+			b.ID != baselineID(protocol.BenchVersionV7, b) {
+			return false
+		}
+		profile := b.Provider + ":" + b.ProfileRevision
+		profiles[profile] = true
+		groups[profile+":"+b.RunSize]++
+	}
+	if len(profiles) != 1 || len(manifest.Baselines) != 3 {
+		return false
 	}
 	for profile := range profiles {
 		for _, runSize := range []string{"small", "medium", "full"} {
-			if !groups[profile+":"+runSize] {
+			if groups[profile+":"+runSize] != 1 {
 				return false
 			}
 		}
@@ -162,25 +252,86 @@ func ReadyForV7Production(manifest Manifest) bool {
 	return true
 }
 
+func canonicalSHA256(value string) bool {
+	if len(value) != sha256.Size*2 {
+		return false
+	}
+	for _, r := range value {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func calibrationDatasetDigest(datasets []CalibrationDataset) string {
+	h := sha256.New()
+	for _, dataset := range datasets {
+		_, _ = fmt.Fprintf(h, "%s:%d:%s\n", dataset.RunSize, dataset.Seed, dataset.DatasetSHA256)
+	}
+	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
+func baselineID(benchVersion int, b Baseline) string {
+	canonical := fmt.Sprintf("%s:%s:%s:%s:%s:%d:%d:%d:%s", FormulaVersion, b.RunSize, b.Provider,
+		b.ProfileRevision, b.Model, b.PromptTokens, b.CompletionTokens, b.TotalTokens, b.StarterKitRevision)
+	sum := sha256.Sum256([]byte(canonical))
+	return fmt.Sprintf("v%d-starter-p90-%x", benchVersion, sum[:8])
+}
+
+func validV7CalibrationDatasets(datasets []CalibrationDataset) bool {
+	if len(datasets) != 60 {
+		return false
+	}
+	counts := map[string]int{}
+	seenSeeds := map[string]bool{}
+	for _, dataset := range datasets {
+		if dataset.RunSize != "small" && dataset.RunSize != "medium" && dataset.RunSize != "full" {
+			return false
+		}
+		if len(dataset.DatasetSHA256) != sha256.Size*2 {
+			return false
+		}
+		for _, r := range dataset.DatasetSHA256 {
+			if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+				return false
+			}
+		}
+		seedKey := fmt.Sprintf("%s:%d", dataset.RunSize, dataset.Seed)
+		if seenSeeds[seedKey] {
+			return false
+		}
+		seenSeeds[seedKey] = true
+		counts[dataset.RunSize]++
+	}
+	return counts["small"] == 20 && counts["medium"] == 20 && counts["full"] == 20
+}
+
 func Lookup(runSize string, usage protocol.TokenUsage) (Baseline, bool) {
 	return LookupForVersion(protocol.BenchVersionV5, runSize, usage)
 }
 
-// LookupForVersion refuses to compare v7 GPT-OSS usage with the historical
-// Qwen manifest. A direct pre-rollout v7 run therefore scores neutrally until
-// the separately reviewed v7 calibration lands.
+// LookupForVersion selects only the reviewed manifest for the requested model
+// epoch. v6 intentionally retains the historical v5 Qwen calibration.
 func LookupForVersion(benchVersion int, runSize string, usage protocol.TokenUsage) (Baseline, bool) {
-	if !productionManifest.ScoringEnabled {
+	manifest := productionManifest
+	baselineVersion := benchVersion
+	switch benchVersion {
+	case protocol.BenchVersionV5:
+	case protocol.BenchVersionV6:
+		baselineVersion = protocol.BenchVersionV5
+	case protocol.BenchVersionV7:
+		manifest = productionV7Manifest
+	default:
 		return Baseline{}, false
 	}
-	baselineVersion := benchVersion
-	if benchVersion == protocol.BenchVersionV6 {
-		baselineVersion = protocol.BenchVersionV5
+	if !ProductionReadyForVersion(benchVersion) {
+		return Baseline{}, false
 	}
-	for _, b := range productionManifest.Baselines {
+	for _, b := range manifest.Baselines {
 		if b.BenchVersion == baselineVersion && b.RunSize == runSize &&
 			b.Provider == usage.Provider && b.ProfileRevision == usage.ProfileRevision &&
-			b.Model == usage.Model && b.StarterKitRevision == productionManifest.StarterKitRevision && validBaseline(b) {
+			b.Model == usage.Model && b.StarterKitRevision == manifest.StarterKitRevision && validBaseline(b) {
 			return b, true
 		}
 	}
