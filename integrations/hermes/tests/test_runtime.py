@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from hermes_dittobench.protocol import RunRequest
 from hermes_dittobench.runtime import HermesRunner
@@ -29,6 +30,7 @@ class FakeAgent:
 
     def __init__(self, **kwargs):
         type(self).last_instance = self
+        self.kwargs = kwargs
         self.callback = kwargs["tool_start_callback"]
         self.tools = []
         self.valid_tool_names = set()
@@ -130,7 +132,57 @@ class RuntimeTests(unittest.TestCase):
         )
         self.assertEqual(response["final_text"], "remembered")
         self.assertEqual(searches[0]["query"], "needle")
+        self.assertEqual(searches[0]["limit"], 5)
         self.assertIs(searches[0]["db"], runner.state.db)
+
+    def test_favorable_profile_uses_documented_budget_and_broader_native_recall(self):
+        searches = []
+        registry = FakeRegistry()
+        FakeAgent.registry = registry
+        runner = HermesRunner(
+            FakeState(),
+            agent_factory=FakeAgent,
+            registry=registry,
+            session_search=lambda **kwargs: searches.append(kwargs) or "remembered",
+        )
+        with patch.dict("os.environ", {"HERMES_DITTOBENCH_PROFILE": "favorable"}, clear=False):
+            response = runner.run(
+                RunRequest.from_json(
+                    {
+                        "case_id": "memory-favorable",
+                        "system_prompt": "benchmark system",
+                        "user_input": "what was the needle?",
+                        "tools": [
+                            {
+                                "name": "search_memories",
+                                "description": "memory search",
+                                "parameters": {"type": "object", "properties": {}},
+                            }
+                        ],
+                    }
+                )
+            )
+        self.assertEqual(response["final_text"], "remembered")
+        self.assertEqual(searches[0]["limit"], 20)
+        self.assertEqual(FakeAgent.last_instance.kwargs["max_iterations"], 90)
+        prompt = FakeAgent.last_instance.kwargs["ephemeral_system_prompt"]
+        self.assertIn("benchmark system", prompt)
+        self.assertIn("past conversation", prompt)
+
+    def test_unknown_profile_fails_closed(self):
+        runner = HermesRunner(
+            FakeState(),
+            agent_factory=FakeAgent,
+            registry=FakeRegistry(),
+            session_search=lambda **kwargs: "memory",
+        )
+        with patch.dict("os.environ", {"HERMES_DITTOBENCH_PROFILE": "unknown"}, clear=False):
+            with self.assertRaisesRegex(ValueError, "baseline or favorable"):
+                runner.run(
+                    RunRequest.from_json(
+                        {"case_id": "case", "user_input": "hello", "tools": []}
+                    )
+                )
 
 
 if __name__ == "__main__":

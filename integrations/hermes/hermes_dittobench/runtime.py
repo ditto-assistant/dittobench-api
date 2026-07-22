@@ -25,6 +25,15 @@ MEMORY_READ_TOOLS = frozenset(
     }
 )
 
+BASELINE_PROFILE = "baseline"
+FAVORABLE_PROFILE = "favorable"
+FAVORABLE_RECALL_GUIDANCE = (
+    "When the user references something from a past conversation or relevant "
+    "cross-session context may exist, use the supplied memory search tools to "
+    "recall it before asking the user to repeat themselves or concluding that "
+    "the information is unavailable."
+)
+
 
 @dataclass
 class _RunContext:
@@ -78,6 +87,33 @@ class HermesRunner:
         self._post_json = post_json
         self._local = threading.local()
 
+    @staticmethod
+    def _profile() -> str:
+        value = os.environ.get("HERMES_DITTOBENCH_PROFILE", BASELINE_PROFILE).strip().lower()
+        if value not in {BASELINE_PROFILE, FAVORABLE_PROFILE}:
+            raise ValueError("HERMES_DITTOBENCH_PROFILE must be baseline or favorable")
+        return value
+
+    @staticmethod
+    def _positive_int(name: str, default: int) -> int:
+        value = int(os.environ.get(name, str(default)))
+        if value <= 0:
+            raise ValueError(f"{name} must be positive")
+        return value
+
+    def _search_limit(self) -> int:
+        default = 20 if self._profile() == FAVORABLE_PROFILE else 5
+        return self._positive_int("HERMES_DITTOBENCH_SEARCH_LIMIT", default)
+
+    def _max_iterations(self) -> int:
+        default = 90 if self._profile() == FAVORABLE_PROFILE else 8
+        return self._positive_int("HERMES_DITTOBENCH_MAX_ITERATIONS", default)
+
+    def _system_prompt(self, request: RunRequest) -> str:
+        if self._profile() != FAVORABLE_PROFILE:
+            return request.system_prompt
+        return "\n\n".join(part for part in (request.system_prompt, FAVORABLE_RECALL_GUIDANCE) if part)
+
     def _hermes(self) -> tuple[Callable[..., Any], Any, Callable[..., str]]:
         if self._agent_factory is None:
             from run_agent import AIAgent
@@ -108,10 +144,10 @@ class HermesRunner:
         context: _RunContext = self._local.context
         query = self._queries(args)
         if not query:
-            return session_search(limit=5, db=context.db)
+            return session_search(limit=self._search_limit(), db=context.db)
         # These aliases deliberately retain Hermes' native FTS5 behavior. The
         # adapter translates the catalog name, not the retrieval algorithm.
-        return session_search(query=query, limit=5, db=context.db)
+        return session_search(query=query, limit=self._search_limit(), db=context.db)
 
     def _dispatch_wire_tool(self, name: str, args: dict[str, Any]) -> str:
         context: _RunContext = self._local.context
@@ -208,11 +244,11 @@ class HermesRunner:
                 provider="custom",
                 api_mode="chat_completions",
                 model=os.environ.get("DITTOBENCH_MODEL", "qwen/qwen3-32b"),
-                max_iterations=int(os.environ.get("HERMES_DITTOBENCH_MAX_ITERATIONS", "8")),
+                max_iterations=self._max_iterations(),
                 tool_delay=0,
                 enabled_toolsets=[],
                 quiet_mode=True,
-                ephemeral_system_prompt=request.system_prompt,
+                ephemeral_system_prompt=self._system_prompt(request),
                 session_id="dittobench_eval_"
                 + hashlib.sha256(request.case_id.encode("utf-8")).hexdigest()[:32],
                 session_db=db,

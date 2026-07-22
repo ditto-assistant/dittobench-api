@@ -89,6 +89,27 @@ The adapter reads the same runtime model lock variables as a miner harness:
 Under the scored sandbox, `dittobench-api` overwrites those values with the
 validator's locked model relay. The adapter cannot choose a stronger model.
 
+### Runtime profiles
+
+The default `baseline` profile preserves the settings used for the first
+published measurement: eight agent-loop iterations and five native
+`session_search` results. A second, explicitly labeled `favorable` profile
+gives Hermes its documented 90-iteration default, raises the native search
+limit to 20, and adds generic recall guidance adapted to the benchmark's memory
+tool aliases:
+
+```sh
+HERMES_DITTOBENCH_PROFILE=favorable
+```
+
+Both profiles use the same Hermes agent loop, validator tool catalog, native
+SQLite FTS5 retrieval, model lock, and observed tool endpoint. The favorable
+profile does not contain benchmark category names, expected answers, routing
+examples, query rewriting, embeddings, reranking, or a benchmark-specific
+skill. `HERMES_DITTOBENCH_MAX_ITERATIONS` and
+`HERMES_DITTOBENCH_SEARCH_LIMIT` remain available as explicit positive-integer
+overrides for controlled experiments.
+
 Build and run locally:
 
 ```sh
