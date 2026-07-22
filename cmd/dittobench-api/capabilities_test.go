@@ -38,8 +38,12 @@ func TestCapabilitiesReportBoundReleaseIdentity(t *testing.T) {
 	if efficiency.ProductionReady() {
 		want = append(want, 5)
 	}
-	// v6 (memory-as-data) is advertised as the active development version.
-	want = append(want, 6)
+	if efficiency.ProductionReadyForVersion(6) {
+		want = append(want, 6)
+	}
+	if efficiency.ProductionReadyForVersion(7) {
+		want = append(want, 7)
+	}
 	if len(got.SupportedBenchVersions) != len(want) {
 		t.Fatalf("wrong supported versions: %v (want %v)", got.SupportedBenchVersions, want)
 	}
@@ -50,6 +54,12 @@ func TestCapabilitiesReportBoundReleaseIdentity(t *testing.T) {
 	}
 	if rr.Header().Get("Cache-Control") != "no-store" {
 		t.Fatal("capabilities response must not be cached")
+	}
+}
+
+func TestV7CapabilityStaysDarkUntilGPTOSSCalibrationLands(t *testing.T) {
+	if efficiency.ProductionReadyForVersion(7) {
+		t.Fatal("v7 must not advertise before its reviewed GPT-OSS baseline manifest lands")
 	}
 }
 

@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -232,7 +233,7 @@ func main() {
 	go func() {
 		brokerAddr := ":" + strconv.Itoa(brokerPort)
 		log.Printf("trusted inference broker listening on %s", brokerAddr)
-		if err := http.ListenAndServe(brokerAddr, brokerMux); err != nil {
+		if err := newInferenceBrokerHTTPServer(brokerAddr, brokerMux).ListenAndServe(); err != nil {
 			log.Fatalf("inference broker error: %v", err)
 		}
 	}()
@@ -296,10 +297,14 @@ func (s *server) handleCapabilities(w http.ResponseWriter, _ *http.Request) {
 	if efficiency.ProductionReady() {
 		versions = append(versions, protocol.BenchVersionV5)
 	}
-	// v6 (memory-as-data / stored-instruction release) reuses the v5 scoring
-	// contract (the gates apply at benchVersion >= V5); it is advertised as the
-	// active development version so a validator can request it.
-	versions = append(versions, protocol.BenchVersionV6)
+	if efficiency.ProductionReadyForVersion(protocol.BenchVersionV6) {
+		versions = append(versions, protocol.BenchVersionV6)
+	}
+	// Execution support ships client-first, but v7 stays dark until the audited
+	// GPT-OSS starter-kit token manifest is embedded and production-ready.
+	if efficiency.ProductionReadyForVersion(protocol.BenchVersionV7) {
+		versions = append(versions, protocol.BenchVersionV7)
+	}
 	writeJSON(w, http.StatusOK, capabilitiesResponse{
 		SoftwareVersion:        s.softwareVersion,
 		SourceRevision:         s.sourceRevision,
@@ -318,6 +323,28 @@ func canonicalSourceRevision(value string) bool {
 	}
 	_, err := hex.DecodeString(value)
 	return err == nil
+}
+
+func canonicalSHA256(value string) bool {
+	if len(value) != sha256.Size*2 || value != strings.ToLower(value) {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
+}
+
+func verifyDatasetHash(expected, actual string, hashErr error) error {
+	if hashErr != nil {
+		return fmt.Errorf("dataset hashing failed for platform-issued dataset: %w", hashErr)
+	}
+	if expected != actual {
+		return fmt.Errorf(
+			"dataset_sha256 mismatch: platform issued %s but this validator regenerated %s (generator/bench_version drift)",
+			expected,
+			actual,
+		)
+	}
+	return nil
 }
 
 func (s *server) handleCatalog(w http.ResponseWriter, _ *http.Request) {
@@ -439,6 +466,20 @@ type submitRequest struct {
 	// InferenceSessionID selects a trusted, memory-only platform capability
 	// prepared by the validator. It is an opaque broker routing id, not a bearer.
 	InferenceSessionID string `json:"inference_session_id,omitempty"`
+	// The v7 validator echoes the immutable platform ticket identity delivered
+	// during trusted session activation. The broker compares these fields before
+	// atomically assigning the session to this API-generated run id.
+	InferenceGrantID        string    `json:"inference_grant_id,omitempty"`
+	InferenceAgentID        string    `json:"inference_agent_id,omitempty"`
+	InferenceSlotID         string    `json:"inference_slot_id,omitempty"`
+	InferenceTicketDeadline time.Time `json:"inference_ticket_deadline,omitempty"`
+}
+
+func inferenceTicketIdentity(req submitRequest) brokerTicketIdentity {
+	return brokerTicketIdentity{
+		GrantID: req.InferenceGrantID, AgentID: req.InferenceAgentID,
+		SlotID: req.InferenceSlotID, TicketDeadline: req.InferenceTicketDeadline,
+	}
 }
 
 // sourceFromReq builds the sandbox Source for a build submission. git_url and
@@ -705,7 +746,7 @@ func (s *server) handleScoreRequest(w http.ResponseWriter, r *http.Request, requ
 		return
 	}
 	req.BenchVersion = version
-	if s.requireTicketInference && req.InferenceSessionID == "" {
+	if (s.requireTicketInference || req.BenchVersion >= protocol.BenchVersionV7) && req.InferenceSessionID == "" {
 		writeError(
 			w,
 			http.StatusServiceUnavailable,
@@ -720,6 +761,10 @@ func (s *server) handleScoreRequest(w http.ResponseWriter, r *http.Request, requ
 	}
 	if strings.TrimSpace(req.ExpectedDatasetSHA256) == "" {
 		writeError(w, http.StatusBadRequest, "dataset_sha256 is required (the platform-issued dataset hash) for canonical scoring")
+		return
+	}
+	if !canonicalSHA256(req.ExpectedDatasetSHA256) {
+		writeError(w, http.StatusBadRequest, "dataset_sha256 must be 64 lowercase hex characters")
 		return
 	}
 	if req.RunSize == "" {
@@ -776,12 +821,12 @@ func (s *server) handleScoreRequest(w http.ResponseWriter, r *http.Request, requ
 func requestedBenchVersion(requested int, requireExplicit bool) (int, string) {
 	if requested == 0 {
 		if requireExplicit {
-			return 0, "bench_version is required (supported: 2, 3, 4, 5)"
+			return 0, "bench_version is required (supported: 2, 3, 4, 5, 6, 7)"
 		}
 		return 2, ""
 	}
 	if !protocol.SupportedBenchVersion(requested) {
-		return 0, "unsupported bench_version (supported: 2, 3, 4, 5)"
+		return 0, "unsupported bench_version (supported: 2, 3, 4, 5, 6, 7)"
 	}
 	return requested, ""
 }
@@ -933,6 +978,12 @@ func (s *server) submitRunSize(w http.ResponseWriter, r *http.Request, req submi
 
 	seed := pinnedOrFreshSeed(req.Seed)
 	runID := uuid.NewString()
+	if req.InferenceSessionID != "" &&
+		!s.broker.claimRun(req.InferenceSessionID, runID, inferenceTicketIdentity(req), req.BenchVersion) {
+		<-s.runSlots
+		writeError(w, http.StatusConflict, "ticket inference session is unavailable")
+		return
+	}
 	s.store.Create(runID, "run_size", store.StatusQueued, seed, prof.Tools+prof.Mem)
 	s.store.SetRunSize(runID, req.RunSize)
 	s.store.SetBenchVersion(runID, req.BenchVersion)
@@ -982,6 +1033,9 @@ func runScope(req submitRequest) scorer.Scope {
 func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest, prof gen.Profile, seed int64) {
 	defer func() { <-s.runSlots }() // release the concurrency slot
 	defer s.unregisterRunCancel(runID)
+	if req.InferenceSessionID != "" {
+		defer s.broker.removeRun(req.InferenceSessionID, runID)
+	}
 	defer func() {
 		if rec := recover(); rec != nil {
 			s.store.Fail(runID, "internal panic during run_size job")
@@ -1085,10 +1139,12 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	// issued with the ticket. Regeneration is deterministic, so a mismatch means
 	// the generator/bench_version drifted from what the platform shipped — fail
 	// loudly rather than score a different dataset than the one under dispute.
-	if want := strings.TrimSpace(req.ExpectedDatasetSHA256); want != "" && hashErr == nil && !strings.EqualFold(want, datasetHash) {
-		s.store.Fail(runID, "dataset_sha256 mismatch: platform issued "+want+" but this validator regenerated "+datasetHash+" (generator/bench_version drift)")
-		log.Printf("run %s: dataset_sha256 mismatch (want %s got %s)", runID, want, datasetHash)
-		return
+	if want := strings.TrimSpace(req.ExpectedDatasetSHA256); want != "" {
+		if err := verifyDatasetHash(want, datasetHash, hashErr); err != nil {
+			s.store.Fail(runID, err.Error())
+			log.Printf("run %s: %v", runID, err)
+			return
+		}
 	}
 	if dir := strings.TrimSpace(os.Getenv("DITTOBENCH_ARTIFACT_DIR")); dir != "" && artifactBytes != nil {
 		if err := os.WriteFile(filepath.Join(dir, runID+".json"), artifactBytes, 0o644); err != nil {
@@ -1111,6 +1167,8 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 			return
 		}
 		legacySessionID, err := s.broker.prepareLegacy(
+			runID,
+			req.BenchVersion,
 			gateway,
 			relay,
 		)
@@ -1119,7 +1177,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 			return
 		}
 		inferenceSessionID = legacySessionID
-		defer s.broker.remove(legacySessionID)
+		defer s.broker.removeRun(legacySessionID, runID)
 	}
 
 	// The relay exposes process-wide monotonic counters. Serialize the entire
@@ -1137,7 +1195,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	var handle *sandbox.Handle
 	var runErr error
 	if image != "" {
-		env := harnessSandboxEnv(req.Env, inferenceSessionID)
+		env := harnessSandboxEnv(req.Env, req.BenchVersion, inferenceSessionID)
 		handle, runErr = s.sandbox.Run(ctx, image, env)
 		if runErr != nil {
 			s.store.FailWith(runID, "container start failed: "+runErr.Error(), sandboxStartInfraFailure(runErr))
@@ -1145,10 +1203,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		}
 		defer s.finishSandboxRun(runID, handle)
 		if inferenceSessionID != "" {
-			if req.InferenceSessionID != "" {
-				defer s.broker.remove(req.InferenceSessionID)
-			}
-			if !s.broker.bindSource(inferenceSessionID, handle.SourceIP) {
+			if !s.broker.bindSource(inferenceSessionID, runID, handle.SourceIP) {
 				s.store.Fail(runID, "inference session is unavailable")
 				return
 			}
@@ -1232,7 +1287,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	var relayStart relayHealthSnapshot
 	if scope == scorer.ScopeScored {
 		var ok bool
-		relayStart, ok = s.relayRunStart(ctx, runID, req.BenchVersion, harnessGateway(inferenceSessionID), inferenceSessionID)
+		relayStart, ok = s.relayRunStart(ctx, runID, req.BenchVersion, req.RunSize, harnessGateway(inferenceSessionID), inferenceSessionID)
 		if !ok {
 			return
 		}
@@ -1250,7 +1305,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	toolTranscripts := make([]transcriptCase, len(toolCases))
 	runBounded(ctx, len(toolCases), caseConcurrency, func(i int) {
 		c := toolCases[i]
-		resp, execution, runErr := runner.RunCaseWithTelemetry(ctx, harnessURL, c.ID, c.Prompt, tools, runner.CaseOptions{ToolEndpoint: toolEndpoint})
+		resp, execution, runErr := runner.RunCaseWithTelemetry(ctx, harnessURL, c.ID, c.Prompt, tools, runner.CaseOptions{ToolEndpoint: toolEndpoint, BenchVersion: req.BenchVersion})
 		observed := toolSrv.Observed(c.ID)
 		toolTranscripts[i] = transcriptCase{CaseID: c.ID, Kind: protocol.KindTool, Response: resp, Observed: observed, Execution: execution}
 		cs := scorer.ScoreToolCaseObservedScope(c, resp, runErr == nil, observed, scope)
@@ -1354,7 +1409,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 			if uid == "" {
 				uid = wave.UserID
 			}
-			resp, execution, runErr := runner.RunCaseWithTelemetry(ctx, harnessURL, mc.ID, mc.Question, tools, runner.CaseOptions{ToolEndpoint: toolEndpoint, UserID: uid})
+			resp, execution, runErr := runner.RunCaseWithTelemetry(ctx, harnessURL, mc.ID, mc.Question, tools, runner.CaseOptions{ToolEndpoint: toolEndpoint, UserID: uid, BenchVersion: req.BenchVersion})
 			observedCalls := toolSrv.Observed(mc.ID)
 			resp = withObservedTrajectory(resp, observedCalls)
 			waveTranscripts[i] = transcriptCase{CaseID: mc.ID, Kind: protocol.KindMemory, UserID: uid, Response: resp, Observed: observedCalls, Execution: execution}
@@ -1407,6 +1462,10 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		if !ok {
 			return
 		}
+		if err := requireCompleteV7Usage(req.BenchVersion, tokenUsage); err != nil {
+			s.failRelayUnavailable(runID, err)
+			return
+		}
 	}
 
 	// 6. scoring — aggregate + finish.
@@ -1441,7 +1500,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		// Generation and grading are both deterministic and non-LLM; the only
 		// model in a run is the locked one the harness talks to.
 		Models: &protocol.ModelInfo{
-			Harness: llm.HarnessModel(),
+			Harness: llm.HarnessModelForVersion(req.BenchVersion),
 		},
 		PerCategory: report.PerCategory,
 	}
@@ -1476,7 +1535,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		rawComposite := report.Composite
 		rawStderr := report.CompositeStderr
 		var baseline *efficiency.Baseline
-		if found, ok := efficiency.Lookup(req.RunSize, tokenUsage); ok {
+		if found, ok := efficiency.LookupForVersion(req.BenchVersion, req.RunSize, tokenUsage); ok {
 			baseline = &found
 		}
 		decision := efficiency.Apply(report, tokenUsage, baseline)
@@ -1819,12 +1878,16 @@ func (s *server) waitSandboxHealthy(
 	return fmt.Errorf("harness not healthy after %s: %w", timeout, last)
 }
 
-// lockedProvider is the starter harness crate's historical name for its generic
+// legacyLockedProvider is the starter harness crate's historical name for its generic
 // OpenAI-compatible adapter. It is not a live Chutes dependency: the base URL
 // points only at the ticket broker (or the bounded legacy relay), and the
 // placeholder key is never sent to an external Chutes service. Renaming this
-// adapter would change the benchmark harness contract, so it remains frozen.
-const lockedProvider = "chutes"
+// adapter would change historical benchmark replay, so it remains frozen for
+// versions through v6. Benchmark v7 uses the explicit platform adapter.
+const (
+	legacyLockedProvider   = "chutes"
+	platformLockedProvider = "platform"
+)
 
 // lockedEnvKeys are the sandbox env vars the model lock owns. A caller-supplied
 // req.Env may not set any of these — otherwise a miner could route around the
@@ -1832,15 +1895,16 @@ const lockedProvider = "chutes"
 // the model id, or redirect the gateway URL). Every provider selector any
 // supported crate honors must be listed here.
 var lockedEnvKeys = map[string]bool{
-	"OPENROUTER_API_KEY":  true,
-	"DITTOBENCH_PROVIDER": true,
-	"DITTOBENCH_MODEL":    true,
-	"OLLAMA_BASE_URL":     true,
-	"CHUTES_API_KEY":      true,
-	"CHUTES_BASE_URL":     true,
-	"OPENAI_API_KEY":      true,
-	"OPENAI_BASE_URL":     true,
-	"DITTOBENCH_DB":       true,
+	"OPENROUTER_API_KEY":            true,
+	"DITTOBENCH_PROVIDER":           true,
+	"DITTOBENCH_MODEL":              true,
+	"OLLAMA_BASE_URL":               true,
+	"CHUTES_API_KEY":                true,
+	"CHUTES_BASE_URL":               true,
+	"OPENAI_API_KEY":                true,
+	"OPENAI_BASE_URL":               true,
+	"DITTOBENCH_INFERENCE_BASE_URL": true,
+	"DITTOBENCH_DB":                 true,
 }
 
 // sandboxRuntimeEnv applies filesystem invariants shared by practice and
@@ -1866,10 +1930,10 @@ func sandboxRuntimeEnv(reqEnv map[string]string) map[string]string {
 // are applied AFTER the caller-supplied env and the caller's attempts to set any
 // lockedEnvKey are dropped, so req.Env can never override the lock.
 //
-// The adapter is frozen (lockedProvider), while the gateway is the ticket-bound
-// platform broker. A legacy gateway URL exists only for the bounded rollback
-// window. The model id remains frozen (llm.HarnessModel).
-func harnessSandboxEnv(reqEnv map[string]string, inferenceSessionID ...string) map[string]string {
+// Historical versions retain their frozen compatibility adapter. Benchmark v7
+// uses the starter kit's explicit platform adapter and ticket-bound broker.
+func harnessSandboxEnv(reqEnv map[string]string, benchVersion int, inferenceSessionID ...string) map[string]string {
+	embeddingGateway := envOr("HARNESS_EMBED_URL", "http://host.docker.internal:11434")
 	gateway := envOr("HARNESS_GATEWAY_URL", "http://host.docker.internal:11434")
 	if len(inferenceSessionID) > 0 && inferenceSessionID[0] != "" {
 		gateway = harnessGateway(inferenceSessionID[0])
@@ -1881,16 +1945,18 @@ func harnessSandboxEnv(reqEnv map[string]string, inferenceSessionID ...string) m
 		}
 		env[k] = v
 	}
-	// The lock, applied last so it wins over caller env. Chat routes to the
-	// gateway through the crate's compatibility adapter (CHUTES_BASE_URL); embeddings
-	// hit the local Ollama (OLLAMA_BASE_URL), which is the same host by default.
-	// The platform upstream key lives only on the platform, so the sandbox-side
-	// value is a non-secret compatibility placeholder.
-	env["DITTOBENCH_PROVIDER"] = lockedProvider
-	env["DITTOBENCH_MODEL"] = llm.HarnessModel()
-	env["OLLAMA_BASE_URL"] = envOr("HARNESS_EMBED_URL", gateway)
-	env["CHUTES_BASE_URL"] = gateway
-	env["CHUTES_API_KEY"] = "relay"
+	// The lock, applied last so it wins over caller env. Embeddings hit the local
+	// Ollama endpoint independently. No platform credential enters the sandbox.
+	if benchVersion >= protocol.BenchVersionV7 {
+		env["DITTOBENCH_PROVIDER"] = platformLockedProvider
+		env["DITTOBENCH_INFERENCE_BASE_URL"] = gateway
+	} else {
+		env["DITTOBENCH_PROVIDER"] = legacyLockedProvider
+		env["CHUTES_BASE_URL"] = gateway
+		env["CHUTES_API_KEY"] = "relay"
+	}
+	env["DITTOBENCH_MODEL"] = llm.HarnessModelForVersion(benchVersion)
+	env["OLLAMA_BASE_URL"] = embeddingGateway
 	// The production sandbox has a read-only root and exposes exactly one
 	// bounded writable filesystem at /tmp. Force the standard harness database
 	// there so an image cannot pass screening as root and then fail to boot as

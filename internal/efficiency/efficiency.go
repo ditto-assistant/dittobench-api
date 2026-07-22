@@ -82,6 +82,18 @@ func ProductionReady() bool {
 	return ReadyForProduction(productionManifest)
 }
 
+// ProductionReadyForVersion keeps execution support separate from capability
+// advertisement. v7 remains dark until its GPT-OSS starter-kit manifest is
+// reviewed and embedded; v5/v6 retain the existing Qwen calibration.
+func ProductionReadyForVersion(benchVersion int) bool {
+	switch benchVersion {
+	case protocol.BenchVersionV5, protocol.BenchVersionV6:
+		return ProductionReady()
+	default:
+		return false
+	}
+}
+
 // ReadyForProduction validates a candidate manifest using the same gate as the
 // embedded production manifest. Calibration tooling uses this before it can
 // emit an explicitly enabled phase-B candidate.
@@ -116,12 +128,57 @@ func ReadyForProduction(manifest Manifest) bool {
 	return true
 }
 
+// ReadyForV7Production validates the single-provider-per-run GPT-OSS
+// calibration contract. Provider eligibility is dynamic on the platform, but
+// every route must carry this exact immutable profile and its own 20-sample p90
+// for each run size before it may serve a scored ticket.
+func ReadyForV7Production(manifest Manifest) bool {
+	if !manifest.ScoringEnabled || manifest.BenchVersion != protocol.BenchVersionV7 ||
+		manifest.StarterKitRevision == "" || len(manifest.Calibration) != 60 {
+		return false
+	}
+	groups := map[string]bool{}
+	for _, b := range manifest.Baselines {
+		if b.BenchVersion == protocol.BenchVersionV7 && b.Provider != "" &&
+			b.Model == llm.V7HarnessModel && b.StarterKitRevision == manifest.StarterKitRevision &&
+			b.ProfileRevision != "" && b.RunSize != "" && validBaseline(b) {
+			groups[b.Provider+":"+b.ProfileRevision+":"+b.RunSize] = true
+		}
+	}
+	if len(manifest.Baselines) == 0 || len(manifest.Baselines)%3 != 0 {
+		return false
+	}
+	profiles := map[string]bool{}
+	for _, b := range manifest.Baselines {
+		profiles[b.Provider+":"+b.ProfileRevision] = true
+	}
+	for profile := range profiles {
+		for _, runSize := range []string{"small", "medium", "full"} {
+			if !groups[profile+":"+runSize] {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func Lookup(runSize string, usage protocol.TokenUsage) (Baseline, bool) {
+	return LookupForVersion(protocol.BenchVersionV5, runSize, usage)
+}
+
+// LookupForVersion refuses to compare v7 GPT-OSS usage with the historical
+// Qwen manifest. A direct pre-rollout v7 run therefore scores neutrally until
+// the separately reviewed v7 calibration lands.
+func LookupForVersion(benchVersion int, runSize string, usage protocol.TokenUsage) (Baseline, bool) {
 	if !productionManifest.ScoringEnabled {
 		return Baseline{}, false
 	}
+	baselineVersion := benchVersion
+	if benchVersion == protocol.BenchVersionV6 {
+		baselineVersion = protocol.BenchVersionV5
+	}
 	for _, b := range productionManifest.Baselines {
-		if b.BenchVersion == protocol.BenchVersionV5 && b.RunSize == runSize &&
+		if b.BenchVersion == baselineVersion && b.RunSize == runSize &&
 			b.Provider == usage.Provider && b.ProfileRevision == usage.ProfileRevision &&
 			b.Model == usage.Model && b.StarterKitRevision == productionManifest.StarterKitRevision && validBaseline(b) {
 			return b, true

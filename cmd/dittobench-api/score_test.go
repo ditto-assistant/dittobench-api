@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -39,15 +40,17 @@ func TestValidateBenchVersionResultRejectsContradictions(t *testing.T) {
 // harness source. Each missing/invalid field is a distinct 400.
 func TestHandleScorePreconditions(t *testing.T) {
 	s := newScoreTestServer()
+	const datasetSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	cases := []struct {
 		name, body, wantSubstr string
 	}{
 		{"bad json", `{`, "invalid or oversized JSON body"},
-		{"missing seed", `{"run_size":"full","dataset_sha256":"abc","harness_url":"http://h"}`, "seed is required"},
+		{"missing seed", `{"run_size":"full","dataset_sha256":"` + datasetSHA + `","harness_url":"http://h"}`, "seed is required"},
 		{"missing hash", `{"seed":42,"run_size":"full","harness_url":"http://h"}`, "dataset_sha256 is required"},
-		{"missing run_size", `{"seed":42,"dataset_sha256":"abc","harness_url":"http://h"}`, "run_size is required"},
-		{"no source", `{"seed":42,"run_size":"full","dataset_sha256":"abc"}`, "exactly one of"},
-		{"two sources", `{"seed":42,"run_size":"full","dataset_sha256":"abc","harness_url":"http://h","git_url":"http://g"}`, "exactly one of"},
+		{"malformed hash", `{"seed":42,"run_size":"full","dataset_sha256":"abc","harness_url":"http://h"}`, "64 lowercase hex"},
+		{"missing run_size", `{"seed":42,"dataset_sha256":"` + datasetSHA + `","harness_url":"http://h"}`, "run_size is required"},
+		{"no source", `{"seed":42,"run_size":"full","dataset_sha256":"` + datasetSHA + `"}`, "exactly one of"},
+		{"two sources", `{"seed":42,"run_size":"full","dataset_sha256":"` + datasetSHA + `","harness_url":"http://h","git_url":"http://g"}`, "exactly one of"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -66,7 +69,7 @@ func TestHandleScorePreconditions(t *testing.T) {
 
 func TestVersionedScoreRequiresSupportedBenchVersion(t *testing.T) {
 	s := newScoreTestServer()
-	base := `"seed":42,"run_size":"full","dataset_sha256":"abc","harness_url":"http://h"`
+	base := `"seed":42,"run_size":"full","dataset_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","harness_url":"http://h"`
 	for _, tc := range []struct {
 		name string
 		body string
@@ -74,7 +77,7 @@ func TestVersionedScoreRequiresSupportedBenchVersion(t *testing.T) {
 	}{
 		{name: "omitted", body: `{` + base + `}`, want: "bench_version is required"},
 		{name: "old v1", body: `{"bench_version":1,` + base + `}`, want: "unsupported bench_version"},
-		{name: "future", body: `{"bench_version":7,` + base + `}`, want: "unsupported bench_version"},
+		{name: "future", body: `{"bench_version":8,` + base + `}`, want: "unsupported bench_version"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rr := httptest.NewRecorder()
@@ -84,6 +87,19 @@ func TestVersionedScoreRequiresSupportedBenchVersion(t *testing.T) {
 				t.Fatalf("expected 400 containing %q, got %d %s", tc.want, rr.Code, rr.Body.String())
 			}
 		})
+	}
+}
+
+func TestVerifyDatasetHashFailsClosed(t *testing.T) {
+	const datasetSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	if err := verifyDatasetHash(datasetSHA, datasetSHA, nil); err != nil {
+		t.Fatalf("exact hash rejected: %v", err)
+	}
+	if err := verifyDatasetHash(datasetSHA, "", errors.New("forced hash failure")); err == nil || !strings.Contains(err.Error(), "hashing failed") {
+		t.Fatalf("hashing failure did not fail closed: %v", err)
+	}
+	if err := verifyDatasetHash(datasetSHA, strings.Repeat("b", 64), nil); err == nil || !strings.Contains(err.Error(), "mismatch") {
+		t.Fatalf("hash mismatch accepted: %v", err)
 	}
 }
 
@@ -100,6 +116,21 @@ func TestCanonicalScoreRequiresTicketInferenceWhenEnforced(t *testing.T) {
 	if rr.Code != http.StatusServiceUnavailable ||
 		!strings.Contains(rr.Body.String(), "ticket inference session is required") {
 		t.Fatalf("expected ticket inference 503, got %d %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestBenchmarkV7IntrinsicallyRequiresTicketInference(t *testing.T) {
+	s := newScoreTestServer()
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v2/score",
+		strings.NewReader(`{"bench_version":7}`),
+	)
+	s.handleVersionedScore(rr, req)
+	if rr.Code != http.StatusServiceUnavailable ||
+		!strings.Contains(rr.Body.String(), "ticket inference session is required") {
+		t.Fatalf("expected intrinsic v7 ticket inference 503, got %d %s", rr.Code, rr.Body.String())
 	}
 }
 

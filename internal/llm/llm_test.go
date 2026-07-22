@@ -11,3 +11,14 @@ func TestHarnessModelFrozen(t *testing.T) {
 		t.Fatalf("HARNESS_MODEL must not override the frozen model: got %q want %q", got, LockedHarnessModel)
 	}
 }
+
+func TestHarnessModelIsVersionBound(t *testing.T) {
+	for _, version := range []int{2, 5, 6} {
+		if got := HarnessModelForVersion(version); got != LockedHarnessModel {
+			t.Fatalf("v%d model = %q, want %q", version, got, LockedHarnessModel)
+		}
+	}
+	if got := HarnessModelForVersion(7); got != V7HarnessModel {
+		t.Fatalf("v7 model = %q, want %q", got, V7HarnessModel)
+	}
+}

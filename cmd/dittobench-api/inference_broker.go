@@ -11,6 +11,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -19,6 +20,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -27,7 +30,24 @@ import (
 	"github.com/google/uuid"
 )
 
-const brokerBodyLimit = 4 << 20
+const (
+	brokerBodyLimit            = 4 << 20
+	brokerMaximumSessionTTL    = 2 * time.Hour
+	brokerPerSourceConcurrency = 4
+	brokerReadHeaderTimeout    = 5 * time.Second
+	brokerReadTimeout          = 15 * time.Second
+	brokerWriteTimeout         = 2 * time.Minute
+	brokerIdleTimeout          = 30 * time.Second
+	brokerMaximumHeaderBytes   = 32 << 10
+	platformInferenceAPIPath   = "/api/v1/inference/chat/completions"
+)
+
+type brokerTicketIdentity struct {
+	GrantID        string
+	AgentID        string
+	SlotID         string
+	TicketDeadline time.Time
+}
 
 type brokerSession struct {
 	mu               sync.Mutex
@@ -39,13 +59,19 @@ type brokerSession struct {
 	bearer           string
 	proxyURL         string
 	legacyGateway    string
-	provider         string
-	profileRevision  string
-	model            string
 	generation       int
 	expiresAt        time.Time
 	expectedSourceIP string
+	provider         string
+	model            string
+	requestModel     string
+	profileRevision  string
 	preparedAt       time.Time
+	ticketAgentID    string
+	ticketSlotID     string
+	ticketDeadline   time.Time
+	boundRunID       string
+	inFlight         int
 	requests         uint64
 	successes        uint64
 	failures         uint64
@@ -60,17 +86,32 @@ type brokerSession struct {
 	cancels          map[string]context.CancelFunc
 }
 
+func newInferenceBrokerHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: brokerReadHeaderTimeout,
+		ReadTimeout:       brokerReadTimeout,
+		WriteTimeout:      brokerWriteTimeout,
+		IdleTimeout:       brokerIdleTimeout,
+		MaxHeaderBytes:    brokerMaximumHeaderBytes,
+	}
+}
+
 type inferenceBroker struct {
-	mu          sync.RWMutex
-	sessions    map[string]*brokerSession
-	tools       map[string]toolRoute
-	client      *http.Client
-	maxSessions int
+	mu               sync.RWMutex
+	sessions         map[string]*brokerSession
+	tools            map[string]toolRoute
+	client           *http.Client
+	maxSessions      int
+	controlToken     string
+	platformProxyURL string
 }
 
 type toolRoute struct {
 	expectedSourceIP string
 	handler          http.Handler
+	slots            chan struct{}
 }
 
 func newInferenceBroker(maxSessions int) *inferenceBroker {
@@ -78,19 +119,68 @@ func newInferenceBroker(maxSessions int) *inferenceBroker {
 		maxSessions = 1
 	}
 	return &inferenceBroker{
-		sessions:    make(map[string]*brokerSession),
-		tools:       make(map[string]toolRoute),
-		client:      &http.Client{Timeout: 100 * time.Second},
-		maxSessions: maxSessions * 2,
+		sessions: make(map[string]*brokerSession),
+		tools:    make(map[string]toolRoute),
+		client: &http.Client{
+			Timeout: 100 * time.Second,
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
+		maxSessions:  maxSessions * 2,
+		controlToken: strings.TrimSpace(os.Getenv("DITTOBENCH_BROKER_CONTROL_TOKEN")),
+		platformProxyURL: configuredPlatformProxyURL(
+			os.Getenv("DITTOBENCH_PLATFORM_INFERENCE_PROXY_URL"),
+		),
 	}
 }
 
-// prepareLegacy creates a memory-only, source-bound session in front of a
-// reviewed validator-owned compatibility relay. It lets concurrent v6 runs keep independent
-// accounting windows without putting the provider credential or a bearer in a
-// harness. V7 never enters this path: it arrives with a platform capability.
-func (b *inferenceBroker) prepareLegacy(gateway string, relay relayHealthSnapshot) (string, error) {
+func configuredPlatformProxyURL(raw string) string {
+	value := strings.TrimSpace(raw)
+	parsed, err := url.Parse(value)
+	if err != nil || value == "" || parsed.Scheme != "https" || parsed.Host == "" ||
+		parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" ||
+		parsed.Path != platformInferenceAPIPath {
+		return ""
+	}
+	return value
+}
+
+func (b *inferenceBroker) controlAuthorized(r *http.Request) bool {
+	ip := net.ParseIP(sourceIP(r.RemoteAddr))
+	if ip != nil && ip.IsLoopback() {
+		return true
+	}
+	if b.controlToken == "" {
+		return false
+	}
+	provided, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	return ok && subtle.ConstantTimeCompare([]byte(provided), []byte(b.controlToken)) == 1
+}
+
+func (b *inferenceBroker) requireControl(w http.ResponseWriter, r *http.Request) bool {
+	if b.controlAuthorized(r) {
+		return true
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeError(w, http.StatusUnauthorized, "inference control plane unavailable")
+	return false
+}
+
+// prepareLegacy creates a memory-only, run-bound session in front of a
+// reviewed validator-owned compatibility relay. It gives concurrent v2-v6 sandboxes
+// independent trusted accounting without putting the provider credential or a
+// bearer in the harness. V7 is rejected here and requires a platform grant.
+func (b *inferenceBroker) prepareLegacy(
+	runID string,
+	benchVersion int,
+	gateway string,
+	relay relayHealthSnapshot,
+) (string, error) {
 	b.pruneExpired(time.Now())
+	if _, err := uuid.Parse(runID); err != nil || benchVersion < 2 || benchVersion > 6 {
+		return "", fmt.Errorf("invalid legacy inference run")
+	}
 	if _, err := relayURL(gateway, "/v1/chat/completions"); err != nil {
 		return "", err
 	}
@@ -107,8 +197,10 @@ func (b *inferenceBroker) prepareLegacy(gateway string, relay relayHealthSnapsho
 		provider:        relay.Provider,
 		profileRevision: relay.ProfileRevision,
 		model:           relay.Model,
-		expiresAt:       time.Now().Add(2 * time.Hour),
+		requestModel:    llm.HarnessModelForVersion(benchVersion),
+		expiresAt:       time.Now().Add(brokerMaximumSessionTTL),
 		preparedAt:      time.Now(),
+		boundRunID:      runID,
 		cancels:         make(map[string]context.CancelFunc),
 	}
 	b.mu.Lock()
@@ -139,7 +231,11 @@ func (b *inferenceBroker) registerTool(h http.Handler, expectedSourceIP string) 
 		return "", func() {}, err
 	}
 	b.mu.Lock()
-	b.tools[id] = toolRoute{expectedSourceIP: expectedSourceIP, handler: h}
+	b.tools[id] = toolRoute{
+		expectedSourceIP: expectedSourceIP,
+		handler:          h,
+		slots:            make(chan struct{}, brokerPerSourceConcurrency),
+	}
 	b.mu.Unlock()
 	stop := func() {
 		b.mu.Lock()
@@ -161,6 +257,14 @@ func (b *inferenceBroker) handleTool(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "tool route unavailable")
 		return
 	}
+	select {
+	case route.slots <- struct{}{}:
+		defer func() { <-route.slots }()
+	default:
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusTooManyRequests, "tool source is at capacity")
+		return
+	}
 	forwarded := r.Clone(r.Context())
 	forwarded.URL.Path = "/tool"
 	route.handler.ServeHTTP(w, forwarded)
@@ -174,7 +278,10 @@ func randomToken(n int) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(raw), nil
 }
 
-func (b *inferenceBroker) prepare(w http.ResponseWriter, _ *http.Request) {
+func (b *inferenceBroker) prepare(w http.ResponseWriter, r *http.Request) {
+	if !b.requireControl(w, r) {
+		return
+	}
 	b.pruneExpired(time.Now())
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -203,6 +310,7 @@ func (b *inferenceBroker) prepare(w http.ResponseWriter, _ *http.Request) {
 	}
 	b.sessions[id] = session
 	b.mu.Unlock()
+	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"session_id":        id,
 		"activation_secret": activation,
@@ -213,13 +321,22 @@ func (b *inferenceBroker) prepare(w http.ResponseWriter, _ *http.Request) {
 type brokerActivation struct {
 	ActivationSecret string    `json:"activation_secret"`
 	GrantID          string    `json:"grant_id"`
+	AgentID          string    `json:"agent_id,omitempty"`
+	SlotID           string    `json:"slot_id,omitempty"`
+	TicketDeadline   time.Time `json:"ticket_deadline,omitempty"`
 	Bearer           string    `json:"bearer"`
 	ProxyURL         string    `json:"proxy_url"`
 	Generation       int       `json:"generation"`
 	ExpiresAt        time.Time `json:"expires_at"`
+	Provider         string    `json:"provider"`
+	ProfileRevision  string    `json:"profile_revision"`
+	Model            string    `json:"model"`
 }
 
 func (b *inferenceBroker) activate(w http.ResponseWriter, r *http.Request) {
+	if !b.requireControl(w, r) {
+		return
+	}
 	id := r.PathValue("id")
 	b.mu.RLock()
 	session := b.sessions[id]
@@ -235,9 +352,23 @@ func (b *inferenceBroker) activate(w http.ResponseWriter, r *http.Request) {
 	}
 	session.mu.Lock()
 	defer session.mu.Unlock()
-	if activation.ActivationSecret != session.activationSecret || activation.Bearer == "" ||
-		activation.GrantID == "" || activation.Generation < 1 ||
-		activation.ExpiresAt.Before(time.Now()) || !strings.HasPrefix(activation.ProxyURL, "https://") {
+	now := time.Now()
+	_, grantErr := uuid.Parse(activation.GrantID)
+	ticketIdentity := brokerTicketIdentity{
+		GrantID: activation.GrantID, AgentID: activation.AgentID,
+		SlotID: activation.SlotID, TicketDeadline: activation.TicketDeadline,
+	}
+	hasRouteIdentity := activation.Provider != "" || activation.ProfileRevision != "" || activation.Model != ""
+	secretMatches := subtle.ConstantTimeCompare(
+		[]byte(activation.ActivationSecret), []byte(session.activationSecret),
+	) == 1
+	if !secretMatches || activation.Bearer == "" ||
+		len(activation.Bearer) > 4096 || grantErr != nil || activation.Generation < 1 ||
+		!activation.ExpiresAt.After(now) || activation.ExpiresAt.After(now.Add(brokerMaximumSessionTTL)) ||
+		b.platformProxyURL == "" || activation.ProxyURL != b.platformProxyURL ||
+		(hasRouteIdentity && (!validBrokerTicketIdentity(ticketIdentity, now) ||
+			activation.ExpiresAt.After(activation.TicketDeadline) || activation.Provider == "" ||
+			activation.ProfileRevision == "" || activation.Model == "")) {
 		writeError(w, http.StatusUnauthorized, "invalid inference activation")
 		return
 	}
@@ -247,11 +378,70 @@ func (b *inferenceBroker) activate(w http.ResponseWriter, r *http.Request) {
 	session.proxyURL = activation.ProxyURL
 	session.generation = activation.Generation
 	session.expiresAt = activation.ExpiresAt
+	session.provider = activation.Provider
+	session.profileRevision = activation.ProfileRevision
+	session.model = activation.Model
+	session.requestModel = activation.Model
+	session.ticketAgentID = activation.AgentID
+	session.ticketSlotID = activation.SlotID
+	session.ticketDeadline = activation.TicketDeadline
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, map[string]bool{"active": true})
 }
 
-func (b *inferenceBroker) bindSource(id, sourceIP string) bool {
+func validBrokerTicketIdentity(identity brokerTicketIdentity, now time.Time) bool {
+	_, grantErr := uuid.Parse(identity.GrantID)
+	_, agentErr := uuid.Parse(identity.AgentID)
+	validSlot := len(identity.SlotID) == len("slot-0") && strings.HasPrefix(identity.SlotID, "slot-") &&
+		identity.SlotID[len(identity.SlotID)-1] >= '0' && identity.SlotID[len(identity.SlotID)-1] <= '7'
+	return grantErr == nil && agentErr == nil && validSlot && identity.TicketDeadline.After(now)
+}
+
+func (b *inferenceBroker) claimRun(id, runID string, identity brokerTicketIdentity, benchVersion int) bool {
+	b.mu.RLock()
+	session := b.sessions[id]
+	b.mu.RUnlock()
+	if session == nil {
+		return false
+	}
+	if _, err := uuid.Parse(runID); err != nil {
+		return false
+	}
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	now := time.Now()
+	if session.boundRunID != "" || session.bearer == "" || !session.expiresAt.After(now) {
+		return false
+	}
+	if benchVersion < 7 {
+		// Bounded transition compatibility: old platform/subnet clients do not
+		// carry route identity. Historical OpenRouter scoring keeps its original
+		// aggregate provider/profile key so the reviewed v5/v6 baseline remains
+		// valid even after this broker learns the v7 route fields.
+		session.provider = "openrouter"
+		session.profileRevision = llm.OpenRouterRelayProfileRevision
+		session.model = llm.LockedHarnessModel
+	}
+	if benchVersion >= 7 {
+		expected := brokerTicketIdentity{
+			GrantID: session.grantID, AgentID: session.ticketAgentID,
+			SlotID: session.ticketSlotID, TicketDeadline: session.ticketDeadline,
+		}
+		if !validV7RouteProfile(session.profileRevision) || !validBrokerTicketIdentity(identity, now) ||
+			identity.GrantID != expected.GrantID || identity.AgentID != expected.AgentID ||
+			identity.SlotID != expected.SlotID || !identity.TicketDeadline.Equal(expected.TicketDeadline) {
+			return false
+		}
+	}
+	if session.model != llm.HarnessModelForVersion(benchVersion) || session.provider == "" || session.profileRevision == "" {
+		return false
+	}
+	session.requestModel = session.model
+	session.boundRunID = runID
+	return true
+}
+
+func (b *inferenceBroker) bindSource(id, runID, sourceIP string) bool {
 	b.mu.RLock()
 	session := b.sessions[id]
 	b.mu.RUnlock()
@@ -260,15 +450,36 @@ func (b *inferenceBroker) bindSource(id, sourceIP string) bool {
 	}
 	session.mu.Lock()
 	defer session.mu.Unlock()
+	if session.boundRunID != runID || session.expectedSourceIP != "" ||
+		(session.bearer == "" && session.legacyGateway == "") || !session.expiresAt.After(time.Now()) {
+		return false
+	}
 	session.expectedSourceIP = sourceIP
-	return session.activeLocked(time.Now())
+	return true
 }
 
 func (session *brokerSession) activeLocked(now time.Time) bool {
-	if session.expectedSourceIP == "" || !session.expiresAt.After(now) {
-		return false
+	return session.boundRunID != "" && session.expectedSourceIP != "" &&
+		session.expiresAt.After(now) && (session.bearer != "" || session.legacyGateway != "")
+}
+
+func destroyBrokerSession(session *brokerSession) {
+	if session == nil {
+		return
 	}
-	return session.legacyGateway != "" || session.bearer != ""
+	session.mu.Lock()
+	for _, cancel := range session.cancels {
+		cancel()
+	}
+	clear(session.cancels)
+	for i := range session.privateKey {
+		session.privateKey[i] = 0
+	}
+	session.activationSecret = ""
+	session.bearer = ""
+	session.legacyGateway = ""
+	session.requestModel = ""
+	session.mu.Unlock()
 }
 
 func (b *inferenceBroker) remove(id string) {
@@ -276,20 +487,27 @@ func (b *inferenceBroker) remove(id string) {
 	session := b.sessions[id]
 	delete(b.sessions, id)
 	b.mu.Unlock()
-	if session != nil {
-		session.mu.Lock()
-		for _, cancel := range session.cancels {
-			cancel()
-		}
-		clear(session.cancels)
-		for i := range session.privateKey {
-			session.privateKey[i] = 0
-		}
-		session.activationSecret = ""
-		session.bearer = ""
-		session.legacyGateway = ""
-		session.mu.Unlock()
+	destroyBrokerSession(session)
+}
+
+func (b *inferenceBroker) removeRun(id, runID string) bool {
+	b.mu.Lock()
+	session := b.sessions[id]
+	if session == nil {
+		b.mu.Unlock()
+		return false
 	}
+	session.mu.Lock()
+	owned := session.boundRunID != "" && session.boundRunID == runID
+	session.mu.Unlock()
+	if !owned {
+		b.mu.Unlock()
+		return false
+	}
+	delete(b.sessions, id)
+	b.mu.Unlock()
+	destroyBrokerSession(session)
+	return true
 }
 
 func (b *inferenceBroker) pruneExpired(now time.Time) {
@@ -311,6 +529,9 @@ func (b *inferenceBroker) pruneExpired(now time.Time) {
 }
 
 func (b *inferenceBroker) cancel(w http.ResponseWriter, r *http.Request) {
+	if !b.requireControl(w, r) {
+		return
+	}
 	b.remove(r.PathValue("id"))
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -335,6 +556,20 @@ func (b *inferenceBroker) handle(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "inference route not found")
 		return
 	}
+	session.mu.Lock()
+	if session.inFlight >= brokerPerSourceConcurrency {
+		session.mu.Unlock()
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusTooManyRequests, "inference source is at capacity")
+		return
+	}
+	session.inFlight++
+	session.mu.Unlock()
+	defer func() {
+		session.mu.Lock()
+		session.inFlight--
+		session.mu.Unlock()
+	}()
 	b.proxy(w, r, session)
 }
 
@@ -362,7 +597,6 @@ func (b *inferenceBroker) health(w http.ResponseWriter, session *brokerSession) 
 	if !session.activeLocked(time.Now()) {
 		status = "unavailable"
 	}
-	provider, revision, model := session.identityLocked()
 	writeJSON(w, http.StatusOK, relayHealthSnapshot{
 		AccountingVersion:      2,
 		Status:                 status,
@@ -371,9 +605,9 @@ func (b *inferenceBroker) health(w http.ResponseWriter, session *brokerSession) 
 		InfrastructureFailures: session.failures,
 		CallerCancellations:    session.callerCancels,
 		UpstreamAttempts:       session.upstreamAttempts,
-		Provider:               provider,
-		ProfileRevision:        revision,
-		Model:                  model,
+		Provider:               session.provider,
+		ProfileRevision:        session.profileRevision,
+		Model:                  session.model,
 		UsageAvailable:         session.usageAvailable,
 		UsageUnavailable:       session.usageUnavailable,
 		PromptTokens:           session.promptTokens,
@@ -382,13 +616,6 @@ func (b *inferenceBroker) health(w http.ResponseWriter, session *brokerSession) 
 		ProviderLatencyMs:      session.providerLatency,
 		TTFTStatus:             "not_streamed",
 	})
-}
-
-func (session *brokerSession) identityLocked() (string, string, string) {
-	if session.provider != "" {
-		return session.provider, session.profileRevision, session.model
-	}
-	return "openrouter", llm.OpenRouterRelayProfileRevision, llm.LockedHarnessModel
 }
 
 func sourceIP(remote string) string {
@@ -405,8 +632,16 @@ func (b *inferenceBroker) proxy(w http.ResponseWriter, r *http.Request, session 
 		writeError(w, http.StatusRequestEntityTooLarge, "inference request too large")
 		return
 	}
+	var modelRequest struct {
+		Model string `json:"model"`
+	}
+	if json.Unmarshal(body, &modelRequest) != nil {
+		writeError(w, http.StatusBadRequest, "invalid inference request")
+		return
+	}
 	session.mu.Lock()
-	if sourceIP(r.RemoteAddr) != session.expectedSourceIP || !session.activeLocked(time.Now()) {
+	if sourceIP(r.RemoteAddr) != session.expectedSourceIP || !session.activeLocked(time.Now()) ||
+		modelRequest.Model != session.requestModel {
 		session.mu.Unlock()
 		writeError(w, http.StatusUnauthorized, "inference session unavailable")
 		return
@@ -485,6 +720,10 @@ func (b *inferenceBroker) proxy(w http.ResponseWriter, r *http.Request, session 
 		return
 	}
 	if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+		session.mu.Lock()
+		session.usageUnavailable++
+		session.providerLatency += latency
+		session.mu.Unlock()
 		writeError(w, resp.StatusCode, "inference request denied")
 		return
 	}
@@ -528,7 +767,7 @@ func (b *inferenceBroker) trustedProbe(ctx context.Context, id string) error {
 		return fmt.Errorf("inference session unavailable")
 	}
 	body, _ := json.Marshal(map[string]any{
-		"model":      llm.HarnessModel(),
+		"model":      session.requestModel,
 		"messages":   []map[string]string{{"role": "user", "content": "Reply OK."}},
 		"max_tokens": 1, "temperature": 0, "stream": false,
 	})
@@ -559,13 +798,12 @@ func (b *inferenceBroker) snapshot(id string) (relayHealthSnapshot, error) {
 	}
 	session.mu.Lock()
 	defer session.mu.Unlock()
-	provider, revision, model := session.identityLocked()
 	return relayHealthSnapshot{
 		AccountingVersion: 2, Status: "ok", Requests: session.requests,
 		Successes: session.successes, InfrastructureFailures: session.failures,
 		CallerCancellations: session.callerCancels, UpstreamAttempts: session.upstreamAttempts,
-		Provider: provider, ProfileRevision: revision,
-		Model: model, UsageAvailable: session.usageAvailable,
+		Provider: session.provider, ProfileRevision: session.profileRevision,
+		Model: session.model, UsageAvailable: session.usageAvailable,
 		UsageUnavailable: session.usageUnavailable, PromptTokens: session.promptTokens,
 		PromptBytes: session.promptBytes, CompletionTokens: session.completionTokens,
 		ProviderLatencyMs: session.providerLatency, TTFTStatus: "not_streamed",
