@@ -12,6 +12,11 @@ The adapter is under [`integrations/openclaw`](../../integrations/openclaw/READM
 These are reference-only practice results. They are not miner submissions,
 leaderboard entries, KOTH candidates, validator weights, or payout inputs.
 
+The later same-model, pinned-provider v2-v6 matrix is recorded separately in
+[`docs/third-party-benchmark-timeline`](../third-party-benchmark-timeline/README.md).
+It preserves both v6 results above and adds historical-contract measurements
+rather than replacing the original evidence.
+
 ## Paired result
 
 | Metric | Native (10 results) | Favorable (20 results) | Delta |

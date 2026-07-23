@@ -189,6 +189,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(response["final_text"], "remembered")
         self.assertEqual(searches[0]["limit"], 10)
         self.assertEqual(FakeAgent.last_instance.kwargs["max_iterations"], 90)
+        self.assertEqual(FakeAgent.last_instance.kwargs["max_tokens"], 8192)
         prompt = FakeAgent.last_instance.kwargs["ephemeral_system_prompt"]
         self.assertIn("benchmark system", prompt)
         self.assertIn("past conversation", prompt)
@@ -231,10 +232,28 @@ class RuntimeTests(unittest.TestCase):
         ])
         kwargs = NativeFakeAgent.last_instance.kwargs
         self.assertEqual(kwargs["enabled_toolsets"], ["dittobench-wire", "session_search"])
+        self.assertEqual(kwargs["max_tokens"], 8192)
         self.assertFalse(kwargs["skip_memory"])
         self.assertEqual(NativeFakeAgent.last_instance.valid_tool_names, {"session_search"})
         self.assertNotIn("search_memories", registry.entries)
         self.assertIn("search_web", registry.entries)
+
+    def test_max_tokens_must_be_positive(self):
+        runner = HermesRunner(
+            FakeState(),
+            agent_factory=FakeAgent,
+            registry=FakeRegistry(),
+            session_search=lambda **kwargs: "memory",
+        )
+        with patch.dict(
+            "os.environ", {"HERMES_DITTOBENCH_MAX_TOKENS": "0"}, clear=False
+        ):
+            with self.assertRaisesRegex(ValueError, "must be positive"):
+                runner.run(
+                    RunRequest.from_json(
+                        {"case_id": "case", "user_input": "hello", "tools": []}
+                    )
+                )
 
     def test_unknown_profile_fails_closed(self):
         runner = HermesRunner(

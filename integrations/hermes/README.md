@@ -121,9 +121,11 @@ The alias profiles use the same Hermes agent loop, validator tool catalog, nativ
 SQLite FTS5 retrieval, model lock, and observed tool endpoint. The favorable
 profile does not contain benchmark category names, expected answers, routing
 examples, query rewriting, embeddings, reranking, or a benchmark-specific
-skill. `HERMES_DITTOBENCH_MAX_ITERATIONS` and
-`HERMES_DITTOBENCH_SEARCH_LIMIT` remain available as explicit positive-integer
-overrides for controlled experiments.
+skill. `HERMES_DITTOBENCH_MAX_ITERATIONS`,
+`HERMES_DITTOBENCH_SEARCH_LIMIT`, and `HERMES_DITTOBENCH_MAX_TOKENS` remain
+available as explicit positive-integer overrides for controlled experiments.
+The output cap defaults to `8192`, matching the OpenClaw adapter and keeping
+requests inside the pinned OpenRouter/Nebius context window.
 
 Build and run locally:
 
