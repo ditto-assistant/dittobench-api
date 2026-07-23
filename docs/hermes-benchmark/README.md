@@ -15,6 +15,11 @@ Research Hermes Agent on the same seed and generated dataset:
 The adapter is under [`integrations/hermes`](../../integrations/hermes/README.md).
 The first result remains unchanged.
 
+The later same-model, pinned-provider v2-v6 matrix is recorded separately in
+[`docs/third-party-benchmark-timeline`](../third-party-benchmark-timeline/README.md).
+It preserves every result above and adds historical-contract measurements
+rather than replacing the original v6 evidence.
+
 ## Native Hermes follow-up
 
 The original profiles expose DittoBench's memory tool names as aliases over

@@ -116,6 +116,14 @@ class HermesRunner:
         default = 90 if self._profile() in {FAVORABLE_PROFILE, NATIVE_SESSION_PROFILE} else 8
         return self._positive_int("HERMES_DITTOBENCH_MAX_ITERATIONS", default)
 
+    def _max_tokens(self) -> int:
+        # Hermes defaults to a 65,536-token output cap. That exceeds the pinned
+        # OpenRouter/Nebius route's 40,960-token context before ordinary prompt
+        # and tool-schema tokens are counted, producing avoidable HTTP 400s.
+        # Match the other reference adapter's generous 8,192-token cap while
+        # retaining enough room for every benchmark response and tool loop.
+        return self._positive_int("HERMES_DITTOBENCH_MAX_TOKENS", 8192)
+
     def _system_prompt(self, request: RunRequest) -> str:
         if self._profile() != FAVORABLE_PROFILE:
             return request.system_prompt
@@ -266,6 +274,7 @@ class HermesRunner:
                 api_mode="chat_completions",
                 model=os.environ.get("DITTOBENCH_MODEL", "qwen/qwen3-32b"),
                 max_iterations=self._max_iterations(),
+                max_tokens=self._max_tokens(),
                 tool_delay=0,
                 enabled_toolsets=(
                     ["dittobench-wire", "session_search"] if native_session else []
