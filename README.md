@@ -227,6 +227,12 @@ Config for the `run_size` path (all optional):
 | `HARNESS_GATEWAY_URL` env | `http://host.docker.internal:11434` | the chat gateway serving the locked model |
 | `HARNESS_EMBED_URL` env | `http://host.docker.internal:11434` | trusted scorer-to-Ollama upstream; scored harnesses receive the source-bound broker instead |
 | `DITTOBENCH_EMBEDDING_UPSTREAM_URL` env | `http://host.docker.internal:11434/api/embed` | broker-only embedding upstream; only locked `embeddinggemma` `/api/embed` calls are exposed |
+| `DITTOBENCH_V8_EMBEDDING_UPSTREAM_URL` env | empty | dark v8-only hosted embedding proxy route; ignored unless the exact reviewed profile revision is also configured |
+| `DITTOBENCH_V8_EMBEDDING_PROFILE_REVISION` env | empty | must equal `dittobench-v8-openrouter-pplx-embed-v1-0.6b-768-v1`; any other value fails closed |
+
+The `embedding-proxy` image target accepts `OPENROUTER_EMBED_PROFILE=v8` for
+that exact profile. The only other accepted mode is the separately labeled
+`longmemeval` research condition; arbitrary profile names fail at startup.
 
 The locked model is scored against every harness; its id and provider are frozen
 in code (`internal/llm`, `cmd/dittobench-api`), not env-tunable

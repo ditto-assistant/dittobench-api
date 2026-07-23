@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "recorded_at": "2026-07-23T21:04:47Z",
+  "condition": "dittobench-v8-openrouter-pplx-embed-v1-0.6b-768-v1",
+  "image_id": "sha256:58696ac92df9683d6676ff027e525635ed4dfbeaeda1db421c3c0242e7e02531",
+  "request": {
+    "miner_facing_path": "/api/embed",
+    "miner_facing_model": "embeddinggemma",
+    "input_count": 1
+  },
+  "response": {
+    "vector_count": 1,
+    "dimensions": 768,
+    "prompt_eval_count": 11
+  },
+  "proxy_health_delta": {
+    "requests": 1,
+    "upstream_requests": 1,
+    "failures": 0,
+    "cache_write_failures": 0,
+    "prompt_tokens": 11,
+    "estimated_cost_usd": 4.4e-8
+  },
+  "credential_boundary": "provider key remained in the trusted proxy container"
+}

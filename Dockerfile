@@ -55,6 +55,20 @@ COPY --from=relay-build /out/model-relay /model-relay
 EXPOSE 11435
 ENTRYPOINT ["/model-relay"]
 
+# ---- OpenRouter embedding compatibility proxy ----
+# This is a separate trusted process: the provider key never enters the scorer
+# or miner sandbox. V2-v7 keep their frozen local embedding route; a future v8
+# deployment opts into this target with the exact reviewed profile revision.
+FROM build AS embedding-proxy-build
+RUN CGO_ENABLED=0 GOOS=linux go build \
+    -ldflags="-s -w" \
+    -o /out/openrouter-embedding-proxy ./cmd/openrouter-embedding-proxy
+
+FROM gcr.io/distroless/static-debian12:nonroot AS embedding-proxy
+COPY --from=embedding-proxy-build /out/openrouter-embedding-proxy /openrouter-embedding-proxy
+EXPOSE 11434
+ENTRYPOINT ["/openrouter-embedding-proxy"]
+
 # ---- runtime stage ----
 FROM gcr.io/distroless/static-debian12:nonroot AS runtime
 ARG DITTOBENCH_SOFTWARE_VERSION

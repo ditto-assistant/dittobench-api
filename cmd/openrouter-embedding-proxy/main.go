@@ -23,17 +23,32 @@ import (
 )
 
 const (
-	profileRevision      = "longmemeval-openrouter-pplx-embed-v1-0.6b-768-v1"
-	harnessModel         = "embeddinggemma"
-	openRouterModel      = "perplexity/pplx-embed-v1-0.6b"
-	openRouterProvider   = "Perplexity"
-	openRouterURL        = "https://openrouter.ai/api/v1/embeddings"
-	embeddingDimensions  = 768
-	maximumInputs        = 256
-	maximumBodyBytes     = 2 << 20
-	maximumResponseBytes = 16 << 20
-	promptUSDPerToken    = 0.000000004
+	longMemProfileRevision = "longmemeval-openrouter-pplx-embed-v1-0.6b-768-v1"
+	v8ProfileRevision      = "dittobench-v8-openrouter-pplx-embed-v1-0.6b-768-v1"
+	harnessModel           = "embeddinggemma"
+	openRouterModel        = "perplexity/pplx-embed-v1-0.6b"
+	openRouterProvider     = "Perplexity"
+	openRouterURL          = "https://openrouter.ai/api/v1/embeddings"
+	embeddingDimensions    = 768
+	maximumInputs          = 256
+	maximumBodyBytes       = 2 << 20
+	maximumResponseBytes   = 16 << 20
+	promptUSDPerToken      = 0.000000004
+	providerAttempts       = 3
 )
+
+var profileRevision = longMemProfileRevision
+
+func profileRevisionForMode(mode string) (string, error) {
+	switch strings.TrimSpace(mode) {
+	case "", "longmemeval":
+		return longMemProfileRevision, nil
+	case "v8":
+		return v8ProfileRevision, nil
+	default:
+		return "", errors.New("OPENROUTER_EMBED_PROFILE must be longmemeval or v8")
+	}
+}
 
 type ollamaRequest struct {
 	Model string          `json:"model"`
@@ -231,28 +246,9 @@ func (p *proxy) resolve(ctx context.Context, request openRouterRequest) ([]byte,
 		p.mu.Unlock()
 	}()
 
-	upstream, err := http.NewRequestWithContext(ctx, http.MethodPost, p.upstreamURL, bytes.NewReader(lockedBody))
+	responseBody, err := p.callProvider(ctx, lockedBody)
 	if err != nil {
 		return nil, err
-	}
-	upstream.Header.Set("Authorization", "Bearer "+p.apiKey)
-	upstream.Header.Set("Content-Type", "application/json")
-	upstream.Header.Set("HTTP-Referer", "https://dittobench.com")
-	upstream.Header.Set("X-Title", "DittoBench LongMemEval embedding calibration")
-	p.stats.UpstreamCalls.Add(1)
-	started := time.Now()
-	response, err := p.client.Do(upstream)
-	p.stats.LatencyMS.Add(uint64(time.Since(started).Milliseconds()))
-	if err != nil {
-		return nil, fmt.Errorf("embedding provider unavailable: %w", err)
-	}
-	defer response.Body.Close()
-	responseBody, err := io.ReadAll(io.LimitReader(response.Body, maximumResponseBytes+1))
-	if err != nil || len(responseBody) > maximumResponseBytes {
-		return nil, errors.New("embedding provider returned an unreadable response")
-	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return nil, fmt.Errorf("embedding provider returned status %d", response.StatusCode)
 	}
 	var decoded openRouterResponse
 	if json.Unmarshal(responseBody, &decoded) != nil || len(decoded.Data) != len(request.Input) {
@@ -289,6 +285,65 @@ func (p *proxy) resolve(ctx context.Context, request openRouterRequest) ([]byte,
 		p.stats.CacheWriteFailures.Add(1)
 	}
 	return ollamaBody, nil
+}
+
+func retryableProviderStatus(status int) bool {
+	return status == http.StatusRequestTimeout || status == http.StatusTooManyRequests ||
+		status == http.StatusInternalServerError || status == http.StatusBadGateway ||
+		status == http.StatusServiceUnavailable || status == http.StatusGatewayTimeout
+}
+
+func waitForProviderRetry(ctx context.Context, attempt int) error {
+	timer := time.NewTimer(time.Duration(attempt) * 250 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (p *proxy) callProvider(ctx context.Context, lockedBody []byte) ([]byte, error) {
+	for attempt := 1; attempt <= providerAttempts; attempt++ {
+		upstream, err := http.NewRequestWithContext(ctx, http.MethodPost, p.upstreamURL, bytes.NewReader(lockedBody))
+		if err != nil {
+			return nil, err
+		}
+		upstream.Header.Set("Authorization", "Bearer "+p.apiKey)
+		upstream.Header.Set("Content-Type", "application/json")
+		upstream.Header.Set("HTTP-Referer", "https://dittobench.com")
+		upstream.Header.Set("X-Title", "DittoBench embedding profile")
+		p.stats.UpstreamCalls.Add(1)
+		started := time.Now()
+		response, requestErr := p.client.Do(upstream)
+		p.stats.LatencyMS.Add(uint64(time.Since(started).Milliseconds()))
+		if requestErr != nil {
+			if attempt < providerAttempts {
+				if err := waitForProviderRetry(ctx, attempt); err != nil {
+					return nil, err
+				}
+				continue
+			}
+			return nil, fmt.Errorf("embedding provider unavailable: %w", requestErr)
+		}
+		responseBody, readErr := io.ReadAll(io.LimitReader(response.Body, maximumResponseBytes+1))
+		_ = response.Body.Close()
+		if readErr != nil || len(responseBody) > maximumResponseBytes {
+			return nil, errors.New("embedding provider returned an unreadable response")
+		}
+		if response.StatusCode >= 200 && response.StatusCode < 300 {
+			return responseBody, nil
+		}
+		if attempt < providerAttempts && retryableProviderStatus(response.StatusCode) {
+			if err := waitForProviderRetry(ctx, attempt); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		return nil, fmt.Errorf("embedding provider returned status %d", response.StatusCode)
+	}
+	return nil, errors.New("embedding provider unavailable")
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {
@@ -358,6 +413,11 @@ func envOr(name, fallback string) string {
 }
 
 func main() {
+	selectedProfile, err := profileRevisionForMode(os.Getenv("OPENROUTER_EMBED_PROFILE"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	profileRevision = selectedProfile
 	apiKey := strings.TrimSpace(os.Getenv("OPENROUTER_API_KEY"))
 	if apiKey == "" {
 		// The benchmark reader relay already uses this secret name. Supporting it

@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "profile_revision": "dittobench-v8-openrouter-pplx-embed-v1-0.6b-768-v1",
+  "activation_status": "dark",
+  "catalog_snapshot_sha256": "a6fff568e4f8c9d17e54739e6da2cdd76006d2a486124c5c43b12e94099d3348",
+  "harness_contract": {
+    "path": "/api/embed",
+    "model": "embeddinggemma",
+    "response_dimensions": 768
+  },
+  "openrouter_request": {
+    "url": "https://openrouter.ai/api/v1/embeddings",
+    "model": "perplexity/pplx-embed-v1-0.6b",
+    "dimensions": 768,
+    "encoding_format": "float",
+    "provider": {
+      "order": ["Perplexity"],
+      "allow_fallbacks": false,
+      "data_collection": "deny"
+    }
+  },
+  "historical_versions": {
+    "bench_versions": [2, 3, 4, 5, 6, 7],
+    "embedding_profile": "local-embeddinggemma-768",
+    "migration_allowed": false
+  },
+  "activation_gates": [
+    "v8 generator and scorer contract pinned",
+    "fusion MLP retrained with candidate features regenerated in this embedding space",
+    "starter retrieval calibration rerun with the retrained artifact",
+    "full v8 multi-seed and run-size calibration complete",
+    "functional hosted-route preflight and per-run accounting enforced",
+    "provider key remains outside the miner sandbox"
+  ]
+}

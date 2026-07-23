@@ -202,3 +202,64 @@ func TestHealthContainsAggregateProvenanceOnly(t *testing.T) {
 		t.Fatalf("health=%#v", health)
 	}
 }
+
+func TestProfileModeIsClosedOverReviewedConditions(t *testing.T) {
+	tests := []struct {
+		mode string
+		want string
+	}{
+		{"", longMemProfileRevision},
+		{"longmemeval", longMemProfileRevision},
+		{"v8", v8ProfileRevision},
+	}
+	for _, test := range tests {
+		got, err := profileRevisionForMode(test.mode)
+		if err != nil || got != test.want {
+			t.Fatalf("mode %q profile=%q err=%v", test.mode, got, err)
+		}
+	}
+	if _, err := profileRevisionForMode("custom"); err == nil {
+		t.Fatal("unreviewed profile mode was accepted")
+	}
+}
+
+func TestTransientProviderFailuresAreRetriedInsideTrustedProxy(t *testing.T) {
+	var calls atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		call := calls.Add(1)
+		if call == 1 {
+			http.Error(w, "rate limited", http.StatusTooManyRequests)
+			return
+		}
+		if call == 2 {
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"data": []map[string]any{
+				{"index": 0, "embedding": testVector(1, embeddingDimensions)},
+			},
+			"usage": map[string]int{"prompt_tokens": 4, "total_tokens": 4},
+		})
+	}))
+	defer upstream.Close()
+	proxy := newProxy("secret", upstream.URL, "", upstream.Client())
+	recorder := callProxy(proxy, `{"model":"embeddinggemma","input":["retry me"]}`)
+	if recorder.Code != http.StatusOK || calls.Load() != providerAttempts {
+		t.Fatalf("status=%d calls=%d body=%s", recorder.Code, calls.Load(), recorder.Body.String())
+	}
+}
+
+func TestPermanentProviderFailureIsNotRetried(t *testing.T) {
+	var calls atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		http.Error(w, "bad request", http.StatusBadRequest)
+	}))
+	defer upstream.Close()
+	proxy := newProxy("secret", upstream.URL, "", upstream.Client())
+	recorder := callProxy(proxy, `{"model":"embeddinggemma","input":["invalid upstream"]}`)
+	if recorder.Code != http.StatusServiceUnavailable || calls.Load() != 1 {
+		t.Fatalf("status=%d calls=%d body=%s", recorder.Code, calls.Load(), recorder.Body.String())
+	}
+}

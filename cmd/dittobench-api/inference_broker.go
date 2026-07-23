@@ -50,6 +50,8 @@ const (
 	embeddingSessionRequests   = 8192
 	embeddingSessionInputs     = 131072
 	embeddingSessionInputBytes = 64 << 20
+	v8EmbeddingBenchVersion    = 8
+	v8EmbeddingProfileRevision = "dittobench-v8-openrouter-pplx-embed-v1-0.6b-768-v1"
 )
 
 type brokerTicketIdentity struct {
@@ -81,6 +83,7 @@ type brokerSession struct {
 	ticketSlotID          string
 	ticketDeadline        time.Time
 	boundRunID            string
+	benchVersion          int
 	inFlight              int
 	embeddingPhaseStarted bool
 	embeddingPhaseActive  bool
@@ -125,6 +128,7 @@ type inferenceBroker struct {
 	controlToken     string
 	platformProxyURL string
 	embeddingURL     string
+	v8EmbeddingURL   string
 	embeddingSlots   chan struct{}
 }
 
@@ -159,6 +163,10 @@ func newInferenceBroker(maxSessions int, embeddingCapacity ...int) *inferenceBro
 		),
 		embeddingURL: configuredEmbeddingURL(
 			envOr("DITTOBENCH_EMBEDDING_UPSTREAM_URL", "http://host.docker.internal:11434/api/embed"),
+		),
+		v8EmbeddingURL: configuredV8EmbeddingURL(
+			os.Getenv("DITTOBENCH_V8_EMBEDDING_UPSTREAM_URL"),
+			os.Getenv("DITTOBENCH_V8_EMBEDDING_PROFILE_REVISION"),
 		),
 	}
 }
@@ -224,6 +232,13 @@ func configuredEmbeddingURL(raw string) string {
 	return parsed.String()
 }
 
+func configuredV8EmbeddingURL(raw, profileRevision string) string {
+	if strings.TrimSpace(profileRevision) != v8EmbeddingProfileRevision {
+		return ""
+	}
+	return configuredEmbeddingURL(raw)
+}
+
 func configuredPlatformProxyURL(raw string) string {
 	value := strings.TrimSpace(raw)
 	parsed, err := url.Parse(value)
@@ -287,6 +302,7 @@ func (b *inferenceBroker) prepareLegacy(
 		profileRevision: relay.ProfileRevision,
 		model:           relay.Model,
 		requestModel:    llm.HarnessModelForVersion(benchVersion),
+		benchVersion:    benchVersion,
 		expiresAt:       time.Now().Add(brokerMaximumSessionTTL),
 		preparedAt:      time.Now(),
 		boundRunID:      runID,
@@ -526,6 +542,7 @@ func (b *inferenceBroker) claimRun(id, runID string, identity brokerTicketIdenti
 		return false
 	}
 	session.requestModel = session.model
+	session.benchVersion = benchVersion
 	session.boundRunID = runID
 	return true
 }
@@ -695,7 +712,13 @@ func (b *inferenceBroker) handleEmbedding(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusUnauthorized, "embedding session unavailable")
 		return
 	}
-	if b.embeddingURL == "" {
+	embeddingURL := b.embeddingURL
+	session.mu.Lock()
+	if session.benchVersion == v8EmbeddingBenchVersion {
+		embeddingURL = b.v8EmbeddingURL
+	}
+	session.mu.Unlock()
+	if embeddingURL == "" {
 		writeError(w, http.StatusServiceUnavailable, "embedding service unavailable")
 		return
 	}
@@ -802,7 +825,7 @@ func (b *inferenceBroker) handleEmbedding(w http.ResponseWriter, r *http.Request
 		return
 	}
 	upstream, err := http.NewRequestWithContext(
-		requestContext, http.MethodPost, b.embeddingURL, bytes.NewReader(lockedBody),
+		requestContext, http.MethodPost, embeddingURL, bytes.NewReader(lockedBody),
 	)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "embedding service unavailable")

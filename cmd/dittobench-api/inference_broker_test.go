@@ -213,6 +213,59 @@ func TestEmbeddingBrokerCapacityOneForwardsOnlyLockedOperation(t *testing.T) {
 	}
 }
 
+func TestEmbeddingBrokerRoutesOnlyV8ToPinnedHostedProfile(t *testing.T) {
+	var localCalls atomic.Int64
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		localCalls.Add(1)
+		writeTestEmbedding(w, 1)
+	}))
+	defer local.Close()
+	var hostedCalls atomic.Int64
+	hosted := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hostedCalls.Add(1)
+		writeTestEmbedding(w, 1)
+	}))
+	defer hosted.Close()
+
+	broker := newInferenceBroker(1)
+	broker.embeddingURL = local.URL + embeddingAPIPath
+	broker.v8EmbeddingURL = hosted.URL + embeddingAPIPath
+	broker.client.Transport = local.Client().Transport
+
+	id, _ := admittedEmbeddingBrokerSession(t, broker, "192.0.2.80")
+	if got := callEmbedding(broker, "192.0.2.80", "historical").Code; got != http.StatusOK {
+		t.Fatalf("historical embedding status = %d", got)
+	}
+	broker.mu.RLock()
+	session := broker.sessions[id]
+	broker.mu.RUnlock()
+	session.mu.Lock()
+	session.benchVersion = v8EmbeddingBenchVersion
+	session.mu.Unlock()
+	if got := callEmbedding(broker, "192.0.2.80", "v8").Code; got != http.StatusOK {
+		t.Fatalf("v8 embedding status = %d", got)
+	}
+	session.mu.Lock()
+	session.benchVersion = v8EmbeddingBenchVersion + 1
+	session.mu.Unlock()
+	if got := callEmbedding(broker, "192.0.2.80", "future").Code; got != http.StatusOK {
+		t.Fatalf("future embedding status = %d", got)
+	}
+	if localCalls.Load() != 2 || hostedCalls.Load() != 1 {
+		t.Fatalf("route calls local=%d hosted=%d", localCalls.Load(), hostedCalls.Load())
+	}
+}
+
+func TestV8EmbeddingRouteRequiresExactProfileRevision(t *testing.T) {
+	const endpoint = "https://embedding.example/api/embed"
+	if got := configuredV8EmbeddingURL(endpoint, "mutable"); got != "" {
+		t.Fatalf("unreviewed profile enabled v8 route: %q", got)
+	}
+	if got := configuredV8EmbeddingURL(endpoint, v8EmbeddingProfileRevision); got != endpoint {
+		t.Fatalf("reviewed profile route = %q", got)
+	}
+}
+
 func TestEmbeddingBrokerRejectsSiblingModelAndManagementProbes(t *testing.T) {
 	var upstreamCalls atomic.Int64
 	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
