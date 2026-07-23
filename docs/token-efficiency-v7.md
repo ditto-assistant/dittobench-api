@@ -9,7 +9,8 @@ run uses that logical profile from start to finish. The actual upstream provider
 is platform telemetry and never changes the calibration identity reported by
 the trusted broker. GPT-OSS requires reasoning; the campaign observed
 OpenRouter's default medium effort, and the platform proxy explicitly pins that
-same behavior under the reviewed v1 profile.
+same behavior under the reviewed aggregate profile
+`openrouter-route-a471cd87ae7df5b9-v1`.
 
 For the aggregate profile:
 
@@ -60,10 +61,10 @@ go run ./cmd/tokenbaseline \
 The audited candidate is versioned at `docs/baselines-v7-candidate.json` with
 `scoring_enabled: false`. Its nearest-rank p90 totals are 66,475 tokens for
 `small`, 414,008 for `medium`, and 936,353 for `full`. Candidate SHA-256:
-`b6b8b9397164b14910ee707a91609f54a671af702bffb79735e7e27258750a58`.
+`1519da09c3a68566079b04762019dcffeceae29a2038313497ce862c9c2514ac`.
 The separately reviewable production copy is embedded at
 `internal/efficiency/baselines_v7.json` with `scoring_enabled: true` and SHA-256
-`8a5af55f04c4483224b4749dd0cf2151eb5b97b2446931f7b49cb55087e12cc5`.
+`c95408f913657b2a50b6a276a455de48b68d54876ea9065f7bc976318288df42`.
 It allows this binary to advertise the exact aggregate route and apply the v7
 token transform. Platform rollout authority remains independent and inactive;
 merging this calibration does not select v7 for any ticket.

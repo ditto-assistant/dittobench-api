@@ -57,7 +57,7 @@ func TestV7CalibrationReadinessRejectsProviderSpecificManifest(t *testing.T) {
 }
 
 func TestAggregateV7ManifestRequiresExactTwentyByThreeContract(t *testing.T) {
-	const profile = "openrouter-route-8efde5ce9f5a4e58-v1"
+	const profile = "openrouter-route-a471cd87ae7df5b9-v1"
 	manifest := Manifest{
 		BenchVersion: protocol.BenchVersionV7, ScoringEnabled: true,
 		StarterKitRevision: v7StarterKitRevision,

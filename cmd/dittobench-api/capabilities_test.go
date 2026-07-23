@@ -37,7 +37,7 @@ func TestCapabilitiesReportBoundReleaseIdentity(t *testing.T) {
 	if !efficiency.ValidV7CalibrationReadiness(got.V7Calibration) {
 		t.Fatalf("reviewed v7 calibration missing: %+v", got.V7Calibration)
 	}
-	if !strings.Contains(rr.Body.String(), `"profile_revision":"openrouter-route-8efde5ce9f5a4e58-v1"`) {
+	if !strings.Contains(rr.Body.String(), `"profile_revision":"openrouter-route-a471cd87ae7df5b9-v1"`) {
 		t.Fatalf("v7 calibration wire shape missing from capabilities: %s", rr.Body.String())
 	}
 	// v2-v4 are always advertised; v5 is negotiated only once reviewed token
@@ -75,13 +75,18 @@ func TestV7CalibrationReadinessRequiresManifestAndExactRoutes(t *testing.T) {
 	readiness := efficiency.CalibrationReadiness{
 		ManifestSHA256: strings.Repeat("a", 64),
 		SupportedRoutes: []efficiency.CalibrationRouteIdentity{{
-			Provider: "openrouter", ProfileRevision: "openrouter-route-8efde5ce9f5a4e58-v1",
+			Provider: "openrouter", ProfileRevision: "openrouter-route-a471cd87ae7df5b9-v1",
 			Model: llm.V7HarnessModel,
 		}},
 	}
 	if !efficiency.ValidV7CalibrationReadiness(readiness) {
 		t.Fatal("complete v7 calibration identity rejected")
 	}
+	readiness.SupportedRoutes[0].ProfileRevision = "openrouter-route-8efde5ce9f5a4e58-v1"
+	if efficiency.ValidV7CalibrationReadiness(readiness) {
+		t.Fatal("v7 calibration identity accepted superseded aggregate route")
+	}
+	readiness.SupportedRoutes[0].ProfileRevision = "openrouter-route-a471cd87ae7df5b9-v1"
 	readiness.ManifestSHA256 = ""
 	if efficiency.ValidV7CalibrationReadiness(readiness) {
 		t.Fatal("v7 calibration identity accepted without reviewed manifest digest")
