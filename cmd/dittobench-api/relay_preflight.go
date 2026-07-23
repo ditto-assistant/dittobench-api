@@ -181,7 +181,7 @@ func validV7RouteProfile(profile string) bool {
 	return true
 }
 
-func requireTokenAccounting(snapshot relayHealthSnapshot, benchVersion int, runSize string) error {
+func requireTokenAccounting(snapshot relayHealthSnapshot, benchVersion int, runSize string, v7TokenCalibration bool) error {
 	if snapshot.AccountingVersion != 2 {
 		return fmt.Errorf("relay health lacks trusted token accounting")
 	}
@@ -200,7 +200,7 @@ func requireTokenAccounting(snapshot relayHealthSnapshot, benchVersion int, runS
 			ProfileRevision: snapshot.ProfileRevision,
 			Model:           snapshot.Model,
 		}
-		if _, ok := efficiency.LookupForVersion(benchVersion, runSize, identity); !ok {
+		if _, ok := efficiency.LookupForVersion(benchVersion, runSize, identity); !ok && !v7TokenCalibration {
 			return fmt.Errorf("relay profile lacks a reviewed benchmark v7 token baseline")
 		}
 	}
@@ -306,7 +306,7 @@ func (s *server) relayRunStart(ctx context.Context, runID string, benchVersion i
 		return relayHealthSnapshot{}, false
 	}
 	if benchVersion >= protocol.BenchVersionV5 {
-		if err := requireTokenAccounting(snapshot, benchVersion, runSize); err != nil {
+		if err := requireTokenAccounting(snapshot, benchVersion, runSize, s.v7TokenCalibration); err != nil {
 			s.failRelayUnavailable(runID, err)
 			return relayHealthSnapshot{}, false
 		}

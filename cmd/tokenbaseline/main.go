@@ -127,10 +127,30 @@ func main() {
 			TotalTokens: budget.TotalTokens, Samples: len(reports), Aggregation: "nearest_rank_p90",
 			StarterKitRevision: manifest.StarterKitRevision,
 		}
+		if *benchVersion == protocol.BenchVersionV7 {
+			baseline.RawReferencePromptTokens = budget.PromptTokens
+			baseline.RawReferenceCompletionTokens = budget.CompletionTokens
+			baseline.RawReferenceTotalTokens = budget.TotalTokens
+			baseline.AllowanceMultiplierBPS = 7500
+			baseline.AllowanceTotalTokens = budget.TotalTokens * baseline.AllowanceMultiplierBPS / 10_000
+			baseline.AllowancePromptTokens = budget.PromptTokens * baseline.AllowanceMultiplierBPS / 10_000
+			baseline.AllowanceCompletionTokens = baseline.AllowanceTotalTokens - baseline.AllowancePromptTokens
+			baseline.AllowancePolicy = "starter_raw_p90_floor_75_percent_v1"
+			baseline.PromptTokens = 0
+			baseline.CompletionTokens = 0
+			baseline.TotalTokens = 0
+		}
 		baseline.ID = baselineID(*benchVersion, baseline)
 		manifest.Baselines = append(manifest.Baselines, baseline)
 	}
 	sortBaselines(manifest.Baselines)
+	if *benchVersion == protocol.BenchVersionV7 {
+		reviewed := manifest
+		reviewed.ScoringEnabled = true
+		if !efficiency.ReadyForV7Production(reviewed) {
+			fatalf("refusing candidate: raw evidence or derived allowance contract is incomplete")
+		}
+	}
 	if *enableScoring {
 		manifest.ScoringEnabled = true
 		ready := efficiency.ReadyForProduction(manifest)
@@ -162,6 +182,11 @@ func calibrationManifest(benchVersion int, starterKitRevision string) (efficienc
 	}
 	manifest.BenchVersion = benchVersion
 	manifest.StarterKitRevision = starterKitRevision
+	manifest.Embedding = &efficiency.EmbeddingContract{
+		Provider: "Perplexity", Model: "perplexity/pplx-embed-v1-0.6b",
+		Profile: "dittobench-v7-openrouter-pplx-embed-v1-0.6b-768-v1", Dimensions: 768,
+		CatalogSHA256: "a6fff568e4f8c9d17e54739e6da2cdd76006d2a486124c5c43b12e94099d3348",
+	}
 	manifest.DatasetKnownVector = ""
 	manifest.ScoringEnabled = false
 	manifest.Baselines = nil
@@ -268,6 +293,14 @@ func datasetKey(runSize string, seed int64, datasetSHA string) string {
 }
 
 func baselineID(benchVersion int, b efficiency.Baseline) string {
+	if benchVersion == protocol.BenchVersionV7 {
+		canonical := fmt.Sprintf("%s:%s:%s:%s:%s:%d:%d:%d:%d:%d:%d:%d:%s:%s", efficiency.FormulaVersion, b.RunSize, b.Provider,
+			b.ProfileRevision, b.Model, b.RawReferencePromptTokens, b.RawReferenceCompletionTokens,
+			b.RawReferenceTotalTokens, b.AllowanceMultiplierBPS, b.AllowancePromptTokens,
+			b.AllowanceCompletionTokens, b.AllowanceTotalTokens, b.AllowancePolicy, b.StarterKitRevision)
+		sum := sha256.Sum256([]byte(canonical))
+		return fmt.Sprintf("v%d-starter-p90-%s", benchVersion, hex.EncodeToString(sum[:8]))
+	}
 	canonical := fmt.Sprintf("%s:%s:%s:%s:%s:%d:%d:%d:%s", efficiency.FormulaVersion, b.RunSize, b.Provider,
 		b.ProfileRevision, b.Model, b.PromptTokens, b.CompletionTokens, b.TotalTokens, b.StarterKitRevision)
 	sum := sha256.Sum256([]byte(canonical))

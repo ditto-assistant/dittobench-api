@@ -7,6 +7,19 @@ import (
 	"testing"
 )
 
+func TestCaseConcurrencyForVersionSerializesHostedV7Embeddings(t *testing.T) {
+	original := caseConcurrency
+	caseConcurrency = 4
+	t.Cleanup(func() { caseConcurrency = original })
+
+	if got := caseConcurrencyForVersion(6); got != 4 {
+		t.Fatalf("v6 case concurrency = %d, want 4", got)
+	}
+	if got := caseConcurrencyForVersion(7); got != 1 {
+		t.Fatalf("v7 case concurrency = %d, want 1", got)
+	}
+}
+
 func TestRunBoundedRunsEveryIndexOnce(t *testing.T) {
 	const n = 200
 	var seen [n]int32

@@ -123,6 +123,17 @@ func runBounded(ctx context.Context, n, concurrency int, fn func(i int)) {
 	wg.Wait()
 }
 
+func caseConcurrencyForVersion(benchVersion int) int {
+	// Hosted v7 embeddings are intentionally admitted one request at a time per
+	// ticket. The reference harness retrieves before every model turn, so running
+	// cases in parallel would manufacture 429s rather than measure the agent.
+	// Historical versions retain their frozen provider-tuned concurrency.
+	if benchVersion >= protocol.BenchVersionV7 {
+		return 1
+	}
+	return caseConcurrency
+}
+
 type server struct {
 	store   *store.Store
 	sandbox sandbox.Sandbox
@@ -131,6 +142,7 @@ type server struct {
 	allowPrivate           bool
 	allowScreenedImages    bool
 	requireTicketInference bool
+	v7TokenCalibration     bool
 	softwareVersion        string
 	sourceRevision         string
 	limiter                *ratelimit.Limiter
@@ -167,6 +179,10 @@ func main() {
 	allowPrivate := envBool("DITTOBENCH_ALLOW_PRIVATE_HARNESS")
 	allowScreenedImages := envBool("DITTOBENCH_ALLOW_SCREENED_IMAGES")
 	requireTicketInference := envBool("DITTOBENCH_REQUIRE_TICKET_INFERENCE")
+	v7TokenCalibration := envBool("DITTOBENCH_V7_TOKEN_CALIBRATION")
+	if v7TokenCalibration && !(allowPrivate && allowScreenedImages && requireTicketInference) {
+		log.Fatal("DITTOBENCH_V7_TOKEN_CALIBRATION requires private harness, screened image, and ticket inference modes")
+	}
 	softwareVersion := strings.TrimSpace(os.Getenv("DITTOBENCH_SOFTWARE_VERSION"))
 	sourceRevision := strings.TrimSpace(os.Getenv("DITTOBENCH_SOURCE_SHA"))
 	runner.Configure(allowPrivate)
@@ -175,6 +191,9 @@ func main() {
 	}
 	if allowScreenedImages {
 		log.Printf("DITTOBENCH_ALLOW_SCREENED_IMAGES set — trusted validator image path enabled")
+	}
+	if v7TokenCalibration {
+		log.Printf("WARNING: DITTOBENCH_V7_TOKEN_CALIBRATION set — unreviewed v7 baseline collection enabled (local/dev only)")
 	}
 
 	sandboxRuntime := sandbox.NewLocalDocker()
@@ -194,6 +213,7 @@ func main() {
 		allowPrivate:           allowPrivate,
 		allowScreenedImages:    allowScreenedImages,
 		requireTicketInference: requireTicketInference,
+		v7TokenCalibration:     v7TokenCalibration,
 		softwareVersion:        softwareVersion,
 		sourceRevision:         sourceRevision,
 		limiter:                ratelimit.New(submitsPerWindow, submitWindow),
@@ -1336,6 +1356,23 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		}
 	}
 
+	// V7 harnesses may embed before any model turn, including tool-only cases.
+	// Admit the ticket-bound embedding lane for the whole scored case sequence;
+	// the old post-tool boundary made native retrieval fail before chat began.
+	endEmbeddingPhase := func() {}
+	if req.BenchVersion >= protocol.BenchVersionV7 {
+		endMemoryPhase, admitted := s.beginMemoryPhase(ctx, inferenceSessionID, runID)
+		if !admitted {
+			if ctx.Err() == nil {
+				s.store.Fail(runID, "embedding phase admission failed")
+			}
+			return
+		}
+		endEmbeddingPhase = endMemoryPhase
+		defer endEmbeddingPhase()
+	}
+	effectiveCaseConcurrency := caseConcurrencyForVersion(req.BenchVersion)
+
 	// 4. tool cases — independent of the memory haystack and of each other, so
 	//    run before seeding and with bounded per-case concurrency. Results are
 	//    written per index so the report order is identical to sequential
@@ -1346,7 +1383,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	toolWasObserved := make([]bool, len(toolCases))
 	toolWasCapped := make([]bool, len(toolCases))
 	toolTranscripts := make([]transcriptCase, len(toolCases))
-	runBounded(ctx, len(toolCases), caseConcurrency, func(i int) {
+	runBounded(ctx, len(toolCases), effectiveCaseConcurrency, func(i int) {
 		c := toolCases[i]
 		resp, execution, runErr := runner.RunCaseWithTelemetry(ctx, harnessURL, c.ID, c.Prompt, tools, runner.CaseOptions{ToolEndpoint: toolEndpoint, BenchVersion: req.BenchVersion})
 		observed := toolSrv.Observed(c.ID)
@@ -1390,18 +1427,19 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	}
 	transcripts := append(make([]transcriptCase, 0, total), toolTranscripts...)
 
-	// Seed and memory-query embedding requests share the validator's local
-	// Ollama. Admit this whole phase independently from hosted chat inference:
-	// two healthy Chutes runs can overlap their tool cases while a single-CPU
-	// embedding service remains protected from an unbounded seed burst.
-	endMemoryPhase, admitted := s.beginMemoryPhase(ctx, inferenceSessionID, runID)
-	if !admitted {
-		if ctx.Err() == nil {
-			s.store.Fail(runID, "embedding phase admission failed")
+	// Historical local-embedding versions retain their frozen boundary: tool
+	// cases may overlap, then the embedding-heavy seed/query phase is admitted.
+	if req.BenchVersion < protocol.BenchVersionV7 {
+		endMemoryPhase, admitted := s.beginMemoryPhase(ctx, inferenceSessionID, runID)
+		if !admitted {
+			if ctx.Err() == nil {
+				s.store.Fail(runID, "embedding phase admission failed")
+			}
+			return
 		}
-		return
+		endEmbeddingPhase = endMemoryPhase
+		defer endEmbeddingPhase()
 	}
-	defer endMemoryPhase()
 
 	// 5. memory cases — staged Tier-C ingestion: seed a wave,
 	//    then run the cases it unlocks (all their evidence is now seeded), then
@@ -1443,7 +1481,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		waveCases := casesByWave[w]
 		waveResults := make([]protocol.CaseScore, len(waveCases))
 		waveTranscripts := make([]transcriptCase, len(waveCases))
-		runBounded(ctx, len(waveCases), caseConcurrency, func(i int) {
+		runBounded(ctx, len(waveCases), effectiveCaseConcurrency, func(i int) {
 			sc := waveCases[i]
 			mc := sc.Case
 			// Scope the query to the case's memory graph: isolation cases carry an
@@ -1487,7 +1525,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	}
 	// Close broker access before scoring/accounting. The once-guarded deferred
 	// cleanup still handles every early return, cancel, and panic above.
-	endMemoryPhase()
+	endEmbeddingPhase()
 
 	// The relay owns authoritative provider-delivery evidence. Check it before
 	// scoring or persistence: any upstream infrastructure failure during this

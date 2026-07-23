@@ -213,6 +213,52 @@ func TestEmbeddingBrokerCapacityOneForwardsOnlyLockedOperation(t *testing.T) {
 	}
 }
 
+func TestV7EmbeddingBrokerUsesSignedLockedPlatformRoute(t *testing.T) {
+	vector := make([]float64, embeddingDimensions)
+	var calls atomic.Int64
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if r.Method != http.MethodPost || r.URL.Path != platformEmbeddingAPIPath {
+			t.Fatalf("unexpected hosted embedding route %s %s", r.Method, r.URL.Path)
+		}
+		for _, header := range []string{"Authorization", "X-Ditto-Grant", "X-Ditto-Generation", "X-Ditto-Nonce", "X-Ditto-Requested-At", "X-Ditto-Proof"} {
+			if r.Header.Get(header) == "" {
+				t.Fatalf("missing signed embedding header %s", header)
+			}
+		}
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		if len(payload) != 4 || payload["model"] != hostedEmbeddingModel || payload["dimensions"] != float64(embeddingDimensions) || payload["encoding_format"] != "float" {
+			t.Fatalf("unlocked hosted embedding payload: %#v", payload)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"object": "list", "model": hostedEmbeddingModel,
+			"data":  []map[string]any{{"object": "embedding", "index": 0, "embedding": vector}},
+			"usage": map[string]int{"prompt_tokens": 4, "total_tokens": 4},
+		})
+	}))
+	defer upstream.Close()
+
+	broker := newInferenceBroker(1)
+	proxyURL := configureBrokerUpstream(broker, upstream)
+	prepared := prepareBrokerSession(t, broker)
+	activateBrokerSessionFor(t, broker, prepared, proxyURL, "openrouter", "openrouter-route-0123456789abcdef-v1", llm.V7HarnessModel)
+	runID := claimAndBindBrokerSession(t, broker, prepared["session_id"], "192.0.2.70", protocol.BenchVersionV7)
+	if !broker.beginEmbeddingPhase(prepared["session_id"], runID) {
+		t.Fatal("failed to admit v7 embedding phase")
+	}
+	defer broker.endEmbeddingPhase(prepared["session_id"], runID)
+	response := callEmbedding(broker, "192.0.2.70", "hosted text")
+	if response.Code != http.StatusOK {
+		t.Fatalf("hosted embedding status=%d body=%s", response.Code, response.Body.String())
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("hosted embedding calls=%d, want 1", calls.Load())
+	}
+}
+
 func TestEmbeddingBrokerRejectsSiblingModelAndManagementProbes(t *testing.T) {
 	var upstreamCalls atomic.Int64
 	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
@@ -792,8 +838,19 @@ func TestInferenceBrokerAddsProofWithoutExposingBearerToHarness(t *testing.T) {
 
 func TestInferenceBrokerTrustedProbeUsesControlPlaneSession(t *testing.T) {
 	const profile = "openrouter-route-0123456789abcdef-v1"
-	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	embeddingCalls := 0
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == platformEmbeddingAPIPath {
+			embeddingCalls++
+			vector := make([]float64, embeddingDimensions)
+			writeJSON(w, http.StatusOK, map[string]any{
+				"object": "list", "model": hostedEmbeddingModel,
+				"data":  []map[string]any{{"object": "embedding", "index": 0, "embedding": vector}},
+				"usage": map[string]int{"prompt_tokens": 3, "total_tokens": 3},
+			})
+			return
+		}
 		_, _ = w.Write([]byte(`{"usage":{"prompt_tokens":2,"completion_tokens":1},"choices":[{"message":{"content":"OK"}}]}`))
 	}))
 	defer upstream.Close()
@@ -812,6 +869,9 @@ func TestInferenceBrokerTrustedProbeUsesControlPlaneSession(t *testing.T) {
 	}
 	if snapshot.Requests != 1 || snapshot.Successes != 1 || snapshot.UsageAvailable != 1 {
 		t.Fatalf("unexpected trusted probe accounting: %+v", snapshot)
+	}
+	if embeddingCalls != 1 {
+		t.Fatalf("trusted v7 probe made %d embedding calls, want 1", embeddingCalls)
 	}
 	if snapshot.Model != llm.V7HarnessModel || snapshot.ProfileRevision != profile || snapshot.Provider != "amazon-bedrock" {
 		t.Fatalf("v7 relay identity = %+v", snapshot)

@@ -16,17 +16,10 @@ func testReport(composite float64) protocol.ScoreReport {
 	return protocol.ScoreReport{Composite: composite, ToolMean: 0.8, MemoryMean: 0.8}
 }
 
-func TestV7CalibrationReadinessIsBoundToEmbeddedManifest(t *testing.T) {
+func TestV7CalibrationReadinessStaysDarkUntilHostedCampaign(t *testing.T) {
 	got := V7CalibrationReadiness()
-	if !ValidV7CalibrationReadiness(got) || len(got.SupportedRoutes) != 1 {
-		t.Fatalf("reviewed v7 readiness = %+v", got)
-	}
-	want := CalibrationRouteIdentity{
-		Provider: v7AggregateProvider, ProfileRevision: v7AggregateProfile,
-		Model: llm.V7HarnessModel,
-	}
-	if got.SupportedRoutes[0] != want {
-		t.Fatalf("reviewed v7 route = %+v, want %+v", got.SupportedRoutes[0], want)
+	if ValidV7CalibrationReadiness(got) || got.ManifestSHA256 != "" || len(got.SupportedRoutes) != 0 {
+		t.Fatalf("pre-calibration v7 readiness escaped dark gate = %+v", got)
 	}
 }
 
@@ -35,6 +28,10 @@ func TestV7CalibrationReadinessRejectsProviderSpecificManifest(t *testing.T) {
 		BenchVersion: protocol.BenchVersionV7, ScoringEnabled: true,
 		StarterKitRevision: "60aab4e5e2839ddb0fe8c80492bd7b76ba2668fd",
 		Calibration:        validV7Datasets(),
+		Embedding: &EmbeddingContract{
+			Provider: v7EmbeddingProvider, Model: v7EmbeddingModel, Profile: v7EmbeddingProfile,
+			Dimensions: v7EmbeddingDimensions, CatalogSHA256: v7EmbeddingCatalogSHA256,
+		},
 	}
 	for _, provider := range []struct{ name, profile string }{
 		{"groq", "openrouter-route-bbbbbbbbbbbbbbbb-v1"},
@@ -63,13 +60,21 @@ func TestAggregateV7ManifestRequiresExactTwentyByThreeContract(t *testing.T) {
 		StarterKitRevision: v7StarterKitRevision,
 		DatasetKnownVector: v7DatasetKnownVector,
 		Calibration:        append([]CalibrationDataset(nil), productionV7Manifest.Calibration...),
+		Embedding: &EmbeddingContract{
+			Provider: v7EmbeddingProvider, Model: v7EmbeddingModel, Profile: v7EmbeddingProfile,
+			Dimensions: v7EmbeddingDimensions, CatalogSHA256: v7EmbeddingCatalogSHA256,
+		},
 	}
 	for _, runSize := range []string{"small", "medium", "full"} {
 		baseline := Baseline{
 			BenchVersion: protocol.BenchVersionV7,
 			RunSize:      runSize, Provider: "openrouter", ProfileRevision: profile,
-			Model: llm.V7HarnessModel, PromptTokens: 900, CompletionTokens: 100,
-			TotalTokens: 1_000, Samples: 20, Aggregation: "nearest_rank_p90",
+			Model:                    llm.V7HarnessModel,
+			RawReferencePromptTokens: 900, RawReferenceCompletionTokens: 100,
+			RawReferenceTotalTokens: 1_000, AllowanceMultiplierBPS: 7500,
+			AllowancePromptTokens: 675, AllowanceCompletionTokens: 75,
+			AllowanceTotalTokens: 750, AllowancePolicy: v7AllowancePolicy,
+			Samples: 20, Aggregation: "nearest_rank_p90",
 			StarterKitRevision: manifest.StarterKitRevision,
 		}
 		baseline.ID = baselineID(protocol.BenchVersionV7, baseline)
@@ -95,6 +100,23 @@ func TestAggregateV7ManifestRequiresExactTwentyByThreeContract(t *testing.T) {
 		t.Fatal("v7 accepted a baseline whose content-derived id was forged")
 	}
 	manifest.Baselines[0].ID = baselineID(protocol.BenchVersionV7, manifest.Baselines[0])
+	for _, mutate := range []func(*Baseline){
+		func(b *Baseline) { b.RawReferenceTotalTokens++ },
+		func(b *Baseline) { b.AllowanceMultiplierBPS = 7499 },
+		func(b *Baseline) { b.AllowanceTotalTokens++ },
+		func(b *Baseline) { b.AllowanceCompletionTokens++ },
+		func(b *Baseline) { b.AllowancePolicy = "unreviewed" },
+	} {
+		baseline := manifest.Baselines[0]
+		mutate(&baseline)
+		baseline.ID = baselineID(protocol.BenchVersionV7, baseline)
+		candidate := manifest
+		candidate.Baselines = append([]Baseline(nil), manifest.Baselines...)
+		candidate.Baselines[0] = baseline
+		if ReadyForV7Production(candidate) {
+			t.Fatal("v7 accepted malformed raw-reference allowance derivation")
+		}
+	}
 	manifest.Calibration[20].RunSize = manifest.Calibration[0].RunSize
 	manifest.Calibration[20].Seed = manifest.Calibration[0].Seed
 	if ReadyForV7Production(manifest) {
@@ -107,8 +129,10 @@ func TestV7ManifestPinsReviewedGeneratorAndStarterIdentity(t *testing.T) {
 		func(m *Manifest) { m.StarterKitRevision = "60aab4e5e2839ddb0fe8c80492bd7b76ba2668fd" },
 		func(m *Manifest) { m.DatasetKnownVector = fmt.Sprintf("%064x", 1) },
 		func(m *Manifest) { m.Calibration[0], m.Calibration[1] = m.Calibration[1], m.Calibration[0] },
+		func(m *Manifest) { m.Embedding.Profile = "unreviewed" },
 	} {
 		manifest := V7ManifestSnapshot()
+		manifest.ScoringEnabled = true
 		mutate(&manifest)
 		if ReadyForV7Production(manifest) {
 			t.Fatal("v7 accepted drift from the reviewed starter/generator contract")
@@ -116,7 +140,7 @@ func TestV7ManifestPinsReviewedGeneratorAndStarterIdentity(t *testing.T) {
 	}
 }
 
-func TestEmbeddedV7ManifestDiffersFromCandidateOnlyByApprovalFlag(t *testing.T) {
+func TestEmbeddedV7ManifestMatchesFailClosedCandidateBeforeCampaign(t *testing.T) {
 	body, err := os.ReadFile("../../docs/baselines-v7-candidate.json")
 	if err != nil {
 		t.Fatal(err)
@@ -128,9 +152,13 @@ func TestEmbeddedV7ManifestDiffersFromCandidateOnlyByApprovalFlag(t *testing.T) 
 	if candidate.ScoringEnabled {
 		t.Fatal("candidate calibration artifact must remain fail-closed")
 	}
-	candidate.ScoringEnabled = true
 	if !reflect.DeepEqual(candidate, V7ManifestSnapshot()) {
-		t.Fatal("embedded production manifest drifted from the reviewed candidate beyond the approval flag")
+		t.Fatal("embedded fail-closed manifest drifted from the hosted calibration candidate")
+	}
+	reviewed := candidate
+	reviewed.ScoringEnabled = true
+	if !ReadyForV7Production(reviewed) {
+		t.Fatal("completed disabled candidate cannot pass the exact readiness contract when explicitly enabled")
 	}
 }
 
@@ -202,6 +230,27 @@ func TestPromptAndCompletionTokensBothCountTowardWaste(t *testing.T) {
 	}
 }
 
+func TestV7RawStarterUsageUsesDerivedSeventyFivePercentAllowance(t *testing.T) {
+	baseline := Baseline{
+		ID: "v7-test", BenchVersion: protocol.BenchVersionV7, RunSize: "full",
+		Provider: "openrouter", ProfileRevision: v7AggregateProfile, Model: llm.V7HarnessModel,
+		RawReferencePromptTokens: 900, RawReferenceCompletionTokens: 100, RawReferenceTotalTokens: 1_000,
+		AllowanceMultiplierBPS: 7500, AllowancePromptTokens: 675,
+		AllowanceCompletionTokens: 75, AllowanceTotalTokens: 750,
+		AllowancePolicy: v7AllowancePolicy, Samples: 20, Aggregation: "nearest_rank_p90",
+		StarterKitRevision: v7StarterKitRevision,
+	}
+	got := Apply(testReport(0.8), completeUsage(900, 100), &baseline)
+	if math.Abs(got.Multiplier-0.975) > 1e-9 || got.AdjustedComposite != 0.78 ||
+		got.BaselineTotalTokens != 750 || !got.PenaltyApplied {
+		t.Fatalf("raw starter usage did not receive the audited 2.5%% penalty: %#v", got)
+	}
+	neutral := Apply(testReport(0.8), completeUsage(675, 75), &baseline)
+	if neutral.Multiplier != 1 || neutral.AdjustedComposite != 0.8 || neutral.PenaltyApplied {
+		t.Fatalf("75%% allowance was not neutral: %#v", neutral)
+	}
+}
+
 func TestCheapAnswersNeverReceiveAReward(t *testing.T) {
 	baseline := testBaseline()
 	for _, composite := range []float64{0, 0.1, 0.9, 1} {
@@ -243,12 +292,12 @@ func TestEmbeddedManifestIsMeasuredAndPhaseBApproved(t *testing.T) {
 	}
 }
 
-func TestEmbeddedV7ManifestIsMeasuredAndPhaseBApproved(t *testing.T) {
-	if !ProductionReadyForVersion(protocol.BenchVersionV7) {
-		t.Fatal("reviewed aggregate v7 manifest must be production ready")
+func TestEmbeddedV7ManifestIsDarkBeforeHostedCampaign(t *testing.T) {
+	if ProductionReadyForVersion(protocol.BenchVersionV7) {
+		t.Fatal("pre-calibration hosted v7 manifest must remain dark")
 	}
 	manifest := V7ManifestSnapshot()
-	if !manifest.ScoringEnabled || manifest.StarterKitRevision == "" || len(manifest.Calibration) != 60 || len(manifest.Baselines) != 3 {
+	if manifest.ScoringEnabled || manifest.StarterKitRevision == "" || len(manifest.Calibration) != 60 || len(manifest.Baselines) != 3 {
 		t.Fatalf("v7 manifest = %#v", manifest)
 	}
 	usage := protocol.TokenUsage{
@@ -256,7 +305,7 @@ func TestEmbeddedV7ManifestIsMeasuredAndPhaseBApproved(t *testing.T) {
 		Model: llm.V7HarnessModel,
 	}
 	baseline, ok := LookupForVersion(protocol.BenchVersionV7, "full", usage)
-	if !ok || baseline.TotalTokens != 936_353 {
+	if ok || baseline.TotalTokens != 0 {
 		t.Fatalf("v7 full baseline = %#v, ok=%v", baseline, ok)
 	}
 }
