@@ -85,8 +85,18 @@ func TestTicketInferenceEnvContainsNoSessionCapability(t *testing.T) {
 	if env["DITTOBENCH_MODEL"] != llm.V7HarnessModel {
 		t.Fatalf("v7 model = %q, want %q", env["DITTOBENCH_MODEL"], llm.V7HarnessModel)
 	}
-	if got := env["OLLAMA_BASE_URL"]; got != "http://host.docker.internal:11434" {
-		t.Fatalf("v7 embeddings must remain on the isolated embedding service, got %q", got)
+	if got := env["OLLAMA_BASE_URL"]; got != "http://host.docker.internal:11436" {
+		t.Fatalf("v7 embeddings must use the source-bound operation broker, got %q", got)
+	}
+}
+
+func TestLegacyScoredSessionAlsoBrokersEmbeddingOperations(t *testing.T) {
+	env := harnessSandboxEnv(nil, protocol.BenchVersionV6, "legacy-session")
+	if got := env["OLLAMA_BASE_URL"]; got != "http://host.docker.internal:11436" {
+		t.Fatalf("v6 scored embeddings bypassed the source-bound broker: %q", got)
+	}
+	if got := env["CHUTES_BASE_URL"]; got != "http://host.docker.internal:11436/v1/inference" {
+		t.Fatalf("v6 scored chat did not use the source-bound broker: %q", got)
 	}
 }
 

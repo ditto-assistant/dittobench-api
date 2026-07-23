@@ -117,6 +117,105 @@ func TestLegacyBrokerRejectsUnreviewedRelayIdentity(t *testing.T) {
 	}
 }
 
+func embeddingBrokerSession(t *testing.T, broker *inferenceBroker, source string) {
+	t.Helper()
+	runID := uuid.NewString()
+	id, err := broker.prepareLegacy(runID, protocol.BenchVersionV6, "http://127.0.0.1:11435", relayHealthSnapshot{
+		Provider: "openrouter", ProfileRevision: llm.OpenRouterRelayProfileRevision,
+		Model: llm.LockedHarnessModel,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !broker.bindSource(id, runID, source) {
+		t.Fatal("failed to bind embedding broker source")
+	}
+}
+
+func TestEmbeddingBrokerForwardsOnlyLockedOperation(t *testing.T) {
+	vector := make([]float64, embeddingDimensions)
+	for index := range vector {
+		vector[index] = float64(index) / embeddingDimensions
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != embeddingAPIPath {
+			t.Fatalf("unexpected embedding upstream route %s %s", r.Method, r.URL.Path)
+		}
+		var request map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		if len(request) != 2 || request["model"] != embeddingModel {
+			t.Fatalf("unlocked embedding request: %#v", request)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"model":             embeddingModel,
+			"embeddings":        [][]float64{vector},
+			"prompt_eval_count": 3,
+		})
+	}))
+	defer upstream.Close()
+
+	broker := newInferenceBroker(1)
+	broker.embeddingURL = upstream.URL + embeddingAPIPath
+	broker.client.Transport = upstream.Client().Transport
+	embeddingBrokerSession(t, broker, "192.0.2.60")
+	request := httptest.NewRequest(http.MethodPost, embeddingAPIPath, bytes.NewBufferString(
+		`{"model":"embeddinggemma","input":["bounded text"]}`,
+	))
+	request.RemoteAddr = "192.0.2.60:4321"
+	recorder := httptest.NewRecorder()
+	broker.handleEmbedding(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("embedding status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response map[string]json.RawMessage
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response) != 2 || response["model"] != nil {
+		t.Fatalf("embedding response leaked upstream metadata: %s", recorder.Body.String())
+	}
+}
+
+func TestEmbeddingBrokerRejectsSiblingModelAndManagementProbes(t *testing.T) {
+	var upstreamCalls atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		upstreamCalls.Add(1)
+	}))
+	defer upstream.Close()
+	broker := newInferenceBroker(1)
+	broker.embeddingURL = upstream.URL + embeddingAPIPath
+	broker.client.Transport = upstream.Client().Transport
+	embeddingBrokerSession(t, broker, "192.0.2.61")
+
+	tests := []struct {
+		method string
+		path   string
+		body   string
+		ip     string
+		status int
+	}{
+		{http.MethodPost, embeddingAPIPath, `{"model":"other","input":["x"]}`, "192.0.2.61", http.StatusBadRequest},
+		{http.MethodPost, embeddingAPIPath, `{"model":"embeddinggemma","input":["x"],"keep_alive":"24h"}`, "192.0.2.61", http.StatusBadRequest},
+		{http.MethodPost, "/api/pull", `{"model":"embeddinggemma"}`, "192.0.2.61", http.StatusNotFound},
+		{http.MethodGet, embeddingAPIPath, "", "192.0.2.61", http.StatusNotFound},
+		{http.MethodPost, embeddingAPIPath, `{"model":"embeddinggemma","input":["x"]}`, "192.0.2.62", http.StatusUnauthorized},
+	}
+	for _, test := range tests {
+		request := httptest.NewRequest(test.method, test.path, bytes.NewBufferString(test.body))
+		request.RemoteAddr = test.ip + ":4321"
+		recorder := httptest.NewRecorder()
+		broker.handleEmbedding(recorder, request)
+		if recorder.Code != test.status {
+			t.Fatalf("%s %s status=%d want=%d body=%s", test.method, test.path, recorder.Code, test.status, recorder.Body.String())
+		}
+	}
+	if upstreamCalls.Load() != 0 {
+		t.Fatalf("rejected embedding probes reached upstream %d time(s)", upstreamCalls.Load())
+	}
+}
+
 func prepareBrokerSession(t *testing.T, broker *inferenceBroker) map[string]string {
 	t.Helper()
 	recorder := httptest.NewRecorder()

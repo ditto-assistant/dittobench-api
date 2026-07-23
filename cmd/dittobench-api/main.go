@@ -225,6 +225,7 @@ func main() {
 	brokerMux := http.NewServeMux()
 	brokerMux.HandleFunc("GET /v1/inference/{rest...}", s.broker.handle)
 	brokerMux.HandleFunc("POST /v1/inference/{rest...}", s.broker.handle)
+	brokerMux.HandleFunc("POST /api/embed", s.broker.handleEmbedding)
 	brokerMux.HandleFunc("POST /v1/tools/{id}/tool", s.broker.handleTool)
 	brokerPort := envIntDefault("DITTOBENCH_BROKER_PORT", 11436)
 	if brokerPort < 1024 || brokerPort > 65535 || brokerPort == *port {
@@ -1941,6 +1942,8 @@ func harnessSandboxEnv(reqEnv map[string]string, benchVersion int, inferenceSess
 	gateway := envOr("HARNESS_GATEWAY_URL", "http://host.docker.internal:11434")
 	if len(inferenceSessionID) > 0 && inferenceSessionID[0] != "" {
 		gateway = harnessGateway(inferenceSessionID[0])
+		brokerPort := envIntDefault("DITTOBENCH_BROKER_PORT", 11436)
+		embeddingGateway = "http://host.docker.internal:" + strconv.Itoa(brokerPort)
 	}
 	env := map[string]string{}
 	for k, v := range sandboxRuntimeEnv(reqEnv) {

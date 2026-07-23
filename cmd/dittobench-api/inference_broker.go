@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -40,6 +41,12 @@ const (
 	brokerIdleTimeout          = 30 * time.Second
 	brokerMaximumHeaderBytes   = 32 << 10
 	platformInferenceAPIPath   = "/api/v1/inference/chat/completions"
+	embeddingAPIPath           = "/api/embed"
+	embeddingModel             = "embeddinggemma"
+	embeddingDimensions        = 768
+	embeddingMaximumInputs     = 256
+	embeddingBodyLimit         = 1 << 20
+	embeddingResponseLimit     = 16 << 20
 )
 
 type brokerTicketIdentity struct {
@@ -106,6 +113,7 @@ type inferenceBroker struct {
 	maxSessions      int
 	controlToken     string
 	platformProxyURL string
+	embeddingURL     string
 }
 
 type toolRoute struct {
@@ -132,7 +140,21 @@ func newInferenceBroker(maxSessions int) *inferenceBroker {
 		platformProxyURL: configuredPlatformProxyURL(
 			os.Getenv("DITTOBENCH_PLATFORM_INFERENCE_PROXY_URL"),
 		),
+		embeddingURL: configuredEmbeddingURL(
+			envOr("DITTOBENCH_EMBEDDING_UPSTREAM_URL", "http://host.docker.internal:11434/api/embed"),
+		),
 	}
+}
+
+func configuredEmbeddingURL(raw string) string {
+	value := strings.TrimSpace(raw)
+	parsed, err := url.Parse(value)
+	if err != nil || value == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") ||
+		parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" ||
+		parsed.Fragment != "" || parsed.Path != embeddingAPIPath {
+		return ""
+	}
+	return parsed.String()
 }
 
 func configuredPlatformProxyURL(raw string) string {
@@ -571,6 +593,119 @@ func (b *inferenceBroker) handle(w http.ResponseWriter, r *http.Request) {
 		session.mu.Unlock()
 	}()
 	b.proxy(w, r, session)
+}
+
+type embeddingRequest struct {
+	Model string   `json:"model"`
+	Input []string `json:"input"`
+}
+
+type embeddingResponse struct {
+	Embeddings      [][]float64 `json:"embeddings"`
+	PromptEvalCount int         `json:"prompt_eval_count,omitempty"`
+}
+
+// handleEmbedding exposes only the deterministic embedding operation to the
+// source-bound harness. Ollama's model-management, generation, discovery, and
+// administrative APIs remain unreachable from the sandbox.
+func (b *inferenceBroker) handleEmbedding(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost || r.URL.Path != embeddingAPIPath {
+		writeError(w, http.StatusNotFound, "embedding route not found")
+		return
+	}
+	b.pruneExpired(time.Now())
+	session := b.sessionForSource(sourceIP(r.RemoteAddr))
+	if session == nil {
+		writeError(w, http.StatusUnauthorized, "embedding session unavailable")
+		return
+	}
+	if b.embeddingURL == "" {
+		writeError(w, http.StatusServiceUnavailable, "embedding service unavailable")
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, embeddingBodyLimit+1))
+	if err != nil || len(body) > embeddingBodyLimit {
+		writeError(w, http.StatusRequestEntityTooLarge, "embedding request too large")
+		return
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	var payload embeddingRequest
+	if decoder.Decode(&payload) != nil || decoder.Decode(&struct{}{}) != io.EOF ||
+		payload.Model != embeddingModel || len(payload.Input) == 0 ||
+		len(payload.Input) > embeddingMaximumInputs {
+		writeError(w, http.StatusBadRequest, "invalid embedding request")
+		return
+	}
+	for _, input := range payload.Input {
+		if input == "" || len(input) > embeddingBodyLimit {
+			writeError(w, http.StatusBadRequest, "invalid embedding request")
+			return
+		}
+	}
+
+	session.mu.Lock()
+	if session.inFlight >= brokerPerSourceConcurrency {
+		session.mu.Unlock()
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusTooManyRequests, "embedding source is at capacity")
+		return
+	}
+	session.inFlight++
+	session.mu.Unlock()
+	defer func() {
+		session.mu.Lock()
+		session.inFlight--
+		session.mu.Unlock()
+	}()
+
+	lockedBody, err := json.Marshal(embeddingRequest{
+		Model: embeddingModel,
+		Input: payload.Input,
+	})
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid embedding request")
+		return
+	}
+	requestContext, cancel := context.WithTimeout(r.Context(), 65*time.Second)
+	defer cancel()
+	upstream, err := http.NewRequestWithContext(
+		requestContext, http.MethodPost, b.embeddingURL, bytes.NewReader(lockedBody),
+	)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "embedding service unavailable")
+		return
+	}
+	upstream.Header.Set("Content-Type", "application/json")
+	response, err := b.client.Do(upstream)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "embedding service unavailable")
+		return
+	}
+	defer response.Body.Close()
+	responseBody, err := io.ReadAll(io.LimitReader(response.Body, embeddingResponseLimit+1))
+	if err != nil || len(responseBody) > embeddingResponseLimit || response.StatusCode < 200 || response.StatusCode >= 300 {
+		writeError(w, http.StatusBadGateway, "embedding service unavailable")
+		return
+	}
+	var decoded embeddingResponse
+	if json.Unmarshal(responseBody, &decoded) != nil || len(decoded.Embeddings) != len(payload.Input) || decoded.PromptEvalCount < 0 {
+		writeError(w, http.StatusBadGateway, "invalid embedding response")
+		return
+	}
+	for _, vector := range decoded.Embeddings {
+		if len(vector) != embeddingDimensions {
+			writeError(w, http.StatusBadGateway, "invalid embedding response")
+			return
+		}
+		for _, value := range vector {
+			if math.IsNaN(value) || math.IsInf(value, 0) {
+				writeError(w, http.StatusBadGateway, "invalid embedding response")
+				return
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, decoded)
 }
 
 func (b *inferenceBroker) sessionForSource(ip string) *brokerSession {
