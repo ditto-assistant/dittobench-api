@@ -1,11 +1,13 @@
 # Top five DittoBench miners on LongMemEval-S
 
-This directory records two LongMemEval-S measurements of the five
+This directory records three LongMemEval-S measurements of the five
 highest-ranked finalized DittoBench v6 submissions in the public leaderboard
 snapshot at `2026-07-23T05:37:19.615917Z`:
 
 - the preferred fair condition is frozen in
   [`results/2026-07-23-top-five-longmemeval-s-native-tools-gpt41.json`](results/2026-07-23-top-five-longmemeval-s-native-tools-gpt41.json);
+- the controlled OpenRouter-embedding condition is frozen separately in
+  [`results/2026-07-23-top-five-longmemeval-s-native-tools-gpt41-openrouter-pplx-embed.json`](results/2026-07-23-top-five-longmemeval-s-native-tools-gpt41-openrouter-pplx-embed.json);
 - the first-pass Qwen/no-tool ablation remains frozen in
   [`results/2026-07-23-top-five-longmemeval-s.json`](results/2026-07-23-top-five-longmemeval-s.json).
 
@@ -32,6 +34,27 @@ submission's memory implementation, native retrieval policy, and shared reader
 model together. The improvement cannot be attributed causally to either the
 tool catalog or reader change alone because the fair condition intentionally
 fixes both first-pass disadvantages.
+
+## Hosted embedding comparison
+
+The follow-up changes only the embedding model and transport. It keeps the fair
+adapter, native memory tools, GPT-4.1 reader, official judge, frozen agent
+images, dataset, and 768-dimensional harness contract unchanged.
+
+| DittoBench v6 rank | Agent | Local `embeddinggemma` | OpenRouter `pplx-embed-v1-0.6b` | Change |
+| ---: | --- | ---: | ---: | ---: |
+| 1 | whitycatboss v1 | 166/500 (0.332) | 172/500 (0.344) | +0.012 |
+| 2 | killer-4 v2 | 338/500 (0.676) | 337/500 (0.674) | -0.002 |
+| 3 | ditto-max-v1 v1 | 350/500 (0.700) | 347/500 (0.694) | -0.006 |
+| 4 | avadakedavra v1 | 347/500 (0.694) | **359/500 (0.718)** | +0.024 |
+| 5 | zeus_v12 v1 | 188/500 (0.376) | 192/500 (0.384) | +0.008 |
+
+The mean agent accuracy moves from 0.5556 to 0.5628 (+0.0072). Individual
+changes are small and mixed, so this run does not support the claim that hosted
+embeddings mechanically inflate every score. It does show that the native
+harnesses can seed, retrieve, and complete all 500 questions through the hosted
+route without a sidecar memory system. This is a separate experimental
+condition and does not replace the local native baseline.
 
 ## Why the first pass was too harsh
 
@@ -83,10 +106,21 @@ proxy. It permits only OpenRouter's OpenAI provider, disables fallbacks and
 provider data collection, and rejects any other model or endpoint. Only the
 public LongMemEval dataset was sent to this reader.
 
-The fair condition retains each harness's native 768-dimensional
-`embeddinggemma` path. An OpenRouter-backed embedding experiment is tracked
-separately in [issue #77](https://github.com/ditto-assistant/dittobench-api/issues/77)
-because changing the embedding model or transport would be a distinct condition.
+The preferred fair condition retains each harness's native 768-dimensional
+`embeddinggemma` path. The hosted experiment preserves the harness-facing
+`embeddinggemma` `/api/embed` operation but translates it in a trusted proxy to
+OpenRouter model `perplexity/pplx-embed-v1-0.6b`, pinned to Perplexity-only
+routing, fallbacks disabled, provider data collection denied, 768 float
+dimensions, and ordered inputs. The proxy does not change storage, query
+construction, retrieval, reranking, or answer generation.
+
+The hosted run observed 383,627 proxy requests, of which 283,035 were cache
+hits and 100,592 reached OpenRouter. Those process-lifetime totals include
+interrupted and resumed work, so the recorded $0.367306688 is an observed
+transport total rather than a minimal per-case estimate. Eight embedding and
+48 reader attempts failed transiently; retry and resume completed exactly 500
+unique hypotheses per agent before judging. All 2,500 official judge requests
+succeeded. Only aggregate counters are committed.
 
 ## Official evaluation
 
@@ -115,6 +149,10 @@ transcripts remain local.
 - public tool-catalog dependency revision: `ef3af0387b46`
 - preferred condition: `longmemeval-s-cleaned-native-memory-tools-v2`
 - preferred answer model profile: `longmemeval-openrouter-gpt41-reader-v1`
+- hosted-embedding condition:
+  `longmemeval-s-cleaned-native-memory-tools-v2-openrouter-pplx-embed-v1`
+- hosted-embedding profile:
+  `longmemeval-openrouter-pplx-embed-v1-0.6b-768-v1`
 - first-pass condition: `longmemeval-s-cleaned-native-dittobench-memory-v1`
 - first-pass answer model profile: `openrouter-nebius-qwen3-32b-no-think-v1`
 - official judge profile: `longmemeval-official-gpt4o-openrouter-v1`
