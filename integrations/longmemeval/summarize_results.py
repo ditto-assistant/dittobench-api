@@ -127,6 +127,14 @@ def main() -> None:
         "--answer-model-profile",
         default="openrouter-nebius-qwen3-32b-no-think-v1",
     )
+    parser.add_argument("--embedding-model-id", default="embeddinggemma")
+    parser.add_argument("--embedding-model-provider", default="ollama")
+    parser.add_argument("--embedding-model-profile", default="local-embeddinggemma-768")
+    parser.add_argument("--embedding-dimensions", type=int, default=768)
+    parser.add_argument(
+        "--run-telemetry",
+        help="optional aggregate-only JSON captured from the trusted proxies",
+    )
     args = parser.parse_args()
 
     dataset_path = Path(args.dataset)
@@ -165,6 +173,12 @@ def main() -> None:
             "provider": args.answer_model_provider,
             "profile_revision": args.answer_model_profile,
         },
+        "embedding_model": {
+            "id": args.embedding_model_id,
+            "provider": args.embedding_model_provider,
+            "profile_revision": args.embedding_model_profile,
+            "dimensions": args.embedding_dimensions,
+        },
         "public_harness_revision": "c3caa8e2c19f8a41a0610b9f7db774f97643dd9c",
         "judge": {
             "official_model": JUDGE_MODEL,
@@ -173,6 +187,8 @@ def main() -> None:
         },
         "agents": agents,
     }
+    if args.run_telemetry:
+        output["run_telemetry"] = json.loads(Path(args.run_telemetry).read_text())
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(output, indent=2, sort_keys=True) + "\n")

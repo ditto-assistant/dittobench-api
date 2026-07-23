@@ -73,6 +73,37 @@ coalesces identical in-flight requests. It never receives user IDs, questions,
 answers, retrievals, or agent responses, so it changes compute cost but not any
 memory contents or retrieval behavior.
 
+### OpenRouter embedding condition
+
+`cmd/openrouter-embedding-proxy` is the separately labeled hosted-embedding
+condition. It leaves the miner-facing Ollama contract unchanged and translates
+only `POST /api/embed` to OpenRouter's embeddings endpoint. The locked profile
+is recorded in
+`docs/longmemeval-benchmark/openrouter-embedding-profile.json`:
+
+- `perplexity/pplx-embed-v1-0.6b`, the smallest currently listed long-context
+  retrieval model in OpenRouter's embedding catalog;
+- 768 output dimensions, matching the public harness database and MLP shape;
+- Perplexity-only routing, fallbacks disabled, and provider data collection
+  denied;
+- float encoding and exact input order; and
+- content-addressed caching over the complete profile/options/ordered-input
+  tuple, with no raw memory text in cache filenames, health output, or logs.
+
+The proxy rejects missing/reordered vectors, dimensions other than 768,
+non-finite values, unreviewed models/options, and provider errors. `/health`
+reports aggregate requests, cache behavior, latency, token usage, and estimated
+cost. A cache write failure is counted but does not discard a valid provider
+response.
+
+```bash
+go run ./cmd/openrouter-embedding-proxy
+```
+
+Set `OPENROUTER_API_KEY`, then point otherwise-unmodified harnesses at the
+proxy with `OLLAMA_BASE_URL=http://<trusted-proxy>:11434`. The key remains in
+the trusted proxy process and never enters a miner container.
+
 ## Shared reader model
 
 `openrouter_reader_proxy.py` pins the answering model to `openai/gpt-4.1`,
@@ -82,6 +113,12 @@ reader used by each otherwise-unmodified submitted harness. GPT-4.1's larger
 context window avoids treating a harness's long native retrieval context as an
 empty memory answer, which occurred with the original Qwen reader condition.
 The proxy changes no prompts, memories, retrieval results, or tool calls.
+
+`cmd/longmemeval-openrouter-proxy` provides the same locked reader and judge
+profiles as a static Go binary for scratch or minimal trusted containers. Set
+`LONGMEMEVAL_PROXY_PROFILE=reader` (default port 18437) or `judge` (default
+port 18436); both modes accept `OPENROUTER_API_KEY` and expose only aggregate
+health/provenance counters.
 
 ## Official judging
 
