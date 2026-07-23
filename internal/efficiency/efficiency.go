@@ -209,7 +209,7 @@ func ReadyForProduction(manifest Manifest) bool {
 
 const (
 	v7AggregateProvider        = "openrouter"
-	v7AggregateProfile         = "openrouter-route-8efde5ce9f5a4e58-v1"
+	v7AggregateProfile         = "openrouter-route-a471cd87ae7df5b9-v1"
 	v7StarterKitRevision       = "2ec9029568f20015562193a378eb8bce51191470"
 	v7DatasetKnownVector       = "1cfc6e3b9f3f4c04afe04b058a6851f9357f6463170b879867e2cf4588f58fcf"
 	v7CalibrationDatasetDigest = "11067ee51dd87582af939f26631cfc075588a13f708a726a3ebae1199dcabfa8"
