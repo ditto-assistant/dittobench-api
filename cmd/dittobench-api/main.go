@@ -187,6 +187,7 @@ func main() {
 		log.Printf("optional practice sandbox cleanup skipped: %v", err)
 	}
 
+	memorySlots := make(chan struct{}, maxConcurrentMemoryPhases)
 	s := &server{
 		store:                  store.New(),
 		sandbox:                sandboxRuntime,
@@ -197,8 +198,8 @@ func main() {
 		sourceRevision:         sourceRevision,
 		limiter:                ratelimit.New(submitsPerWindow, submitWindow),
 		runSlots:               make(chan struct{}, maxConcurrentRuns),
-		memorySlots:            make(chan struct{}, maxConcurrentMemoryPhases),
-		broker:                 newInferenceBroker(maxConcurrentRuns),
+		memorySlots:            memorySlots,
+		broker:                 newInferenceBroker(maxConcurrentRuns, cap(memorySlots)),
 		runCancels:             make(map[string]context.CancelFunc),
 	}
 
@@ -225,6 +226,7 @@ func main() {
 	brokerMux := http.NewServeMux()
 	brokerMux.HandleFunc("GET /v1/inference/{rest...}", s.broker.handle)
 	brokerMux.HandleFunc("POST /v1/inference/{rest...}", s.broker.handle)
+	brokerMux.HandleFunc("POST /api/embed", s.broker.handleEmbedding)
 	brokerMux.HandleFunc("POST /v1/tools/{id}/tool", s.broker.handleTool)
 	brokerPort := envIntDefault("DITTOBENCH_BROKER_PORT", 11436)
 	if brokerPort < 1024 || brokerPort > 65535 || brokerPort == *port {
@@ -1016,6 +1018,43 @@ func (s *server) acquireRunSlot(w http.ResponseWriter) bool {
 	}
 }
 
+// beginMemoryPhase is the single admission boundary for validator-owned
+// embedding capacity. Practice runs share the same global slot. Scored sandbox
+// runs additionally open only their source-bound broker session, and only for
+// the lifetime of this admitted phase.
+func (s *server) beginMemoryPhase(
+	ctx context.Context,
+	inferenceSessionID string,
+	runID string,
+) (func(), bool) {
+	if s.memorySlots != nil {
+		select {
+		case s.memorySlots <- struct{}{}:
+		case <-ctx.Done():
+			return func() {}, false
+		}
+	}
+	releaseSlot := func() {
+		if s.memorySlots != nil {
+			<-s.memorySlots
+		}
+	}
+	if inferenceSessionID != "" &&
+		(s.broker == nil || !s.broker.beginEmbeddingPhase(inferenceSessionID, runID)) {
+		releaseSlot()
+		return func() {}, false
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			if inferenceSessionID != "" {
+				s.broker.endEmbeddingPhase(inferenceSessionID, runID)
+			}
+			releaseSlot()
+		})
+	}, true
+}
+
 // runScope classifies a run_size request as SCORED or PRACTICE. The canonical
 // on-chain path (POST /v1/score) pins the exact dataset the platform issued with
 // its ticket (dataset_sha256), so its report feeds the KOTH ledger and scoring is
@@ -1355,14 +1394,14 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	// Ollama. Admit this whole phase independently from hosted chat inference:
 	// two healthy Chutes runs can overlap their tool cases while a single-CPU
 	// embedding service remains protected from an unbounded seed burst.
-	if s.memorySlots != nil {
-		select {
-		case s.memorySlots <- struct{}{}:
-			defer func() { <-s.memorySlots }()
-		case <-ctx.Done():
-			return
+	endMemoryPhase, admitted := s.beginMemoryPhase(ctx, inferenceSessionID, runID)
+	if !admitted {
+		if ctx.Err() == nil {
+			s.store.Fail(runID, "embedding phase admission failed")
 		}
+		return
 	}
+	defer endMemoryPhase()
 
 	// 5. memory cases — staged Tier-C ingestion: seed a wave,
 	//    then run the cases it unlocks (all their evidence is now seeded), then
@@ -1446,6 +1485,9 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		perCase = append(perCase, waveResults...)
 		transcripts = append(transcripts, waveTranscripts...)
 	}
+	// Close broker access before scoring/accounting. The once-guarded deferred
+	// cleanup still handles every early return, cancel, and panic above.
+	endMemoryPhase()
 
 	// The relay owns authoritative provider-delivery evidence. Check it before
 	// scoring or persistence: any upstream infrastructure failure during this
@@ -1941,6 +1983,8 @@ func harnessSandboxEnv(reqEnv map[string]string, benchVersion int, inferenceSess
 	gateway := envOr("HARNESS_GATEWAY_URL", "http://host.docker.internal:11434")
 	if len(inferenceSessionID) > 0 && inferenceSessionID[0] != "" {
 		gateway = harnessGateway(inferenceSessionID[0])
+		brokerPort := envIntDefault("DITTOBENCH_BROKER_PORT", 11436)
+		embeddingGateway = "http://host.docker.internal:" + strconv.Itoa(brokerPort)
 	}
 	env := map[string]string{}
 	for k, v := range sandboxRuntimeEnv(reqEnv) {

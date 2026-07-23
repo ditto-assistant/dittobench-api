@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -40,6 +41,15 @@ const (
 	brokerIdleTimeout          = 30 * time.Second
 	brokerMaximumHeaderBytes   = 32 << 10
 	platformInferenceAPIPath   = "/api/v1/inference/chat/completions"
+	embeddingAPIPath           = "/api/embed"
+	embeddingModel             = "embeddinggemma"
+	embeddingDimensions        = 768
+	embeddingMaximumInputs     = 256
+	embeddingBodyLimit         = 1 << 20
+	embeddingResponseLimit     = 16 << 20
+	embeddingSessionRequests   = 8192
+	embeddingSessionInputs     = 131072
+	embeddingSessionInputBytes = 64 << 20
 )
 
 type brokerTicketIdentity struct {
@@ -50,40 +60,48 @@ type brokerTicketIdentity struct {
 }
 
 type brokerSession struct {
-	mu               sync.Mutex
-	id               string
-	activationSecret string
-	privateKey       ed25519.PrivateKey
-	publicKey        ed25519.PublicKey
-	grantID          string
-	bearer           string
-	proxyURL         string
-	legacyGateway    string
-	generation       int
-	expiresAt        time.Time
-	expectedSourceIP string
-	provider         string
-	model            string
-	requestModel     string
-	profileRevision  string
-	preparedAt       time.Time
-	ticketAgentID    string
-	ticketSlotID     string
-	ticketDeadline   time.Time
-	boundRunID       string
-	inFlight         int
-	requests         uint64
-	successes        uint64
-	failures         uint64
-	usageAvailable   uint64
-	usageUnavailable uint64
-	promptTokens     uint64
-	promptBytes      uint64
-	completionTokens uint64
-	providerLatency  uint64
-	callerCancels    uint64
-	upstreamAttempts uint64
-	cancels          map[string]context.CancelFunc
+	mu                    sync.Mutex
+	id                    string
+	activationSecret      string
+	privateKey            ed25519.PrivateKey
+	publicKey             ed25519.PublicKey
+	grantID               string
+	bearer                string
+	proxyURL              string
+	legacyGateway         string
+	generation            int
+	expiresAt             time.Time
+	expectedSourceIP      string
+	provider              string
+	model                 string
+	requestModel          string
+	profileRevision       string
+	preparedAt            time.Time
+	ticketAgentID         string
+	ticketSlotID          string
+	ticketDeadline        time.Time
+	boundRunID            string
+	inFlight              int
+	embeddingPhaseStarted bool
+	embeddingPhaseActive  bool
+	embeddingInFlight     bool
+	embeddingCancel       context.CancelFunc
+	embeddingDone         chan struct{}
+	embeddingRequests     uint64
+	embeddingInputs       uint64
+	embeddingInputBytes   uint64
+	requests              uint64
+	successes             uint64
+	failures              uint64
+	usageAvailable        uint64
+	usageUnavailable      uint64
+	promptTokens          uint64
+	promptBytes           uint64
+	completionTokens      uint64
+	providerLatency       uint64
+	callerCancels         uint64
+	upstreamAttempts      uint64
+	cancels               map[string]context.CancelFunc
 }
 
 func newInferenceBrokerHTTPServer(addr string, handler http.Handler) *http.Server {
@@ -106,6 +124,8 @@ type inferenceBroker struct {
 	maxSessions      int
 	controlToken     string
 	platformProxyURL string
+	embeddingURL     string
+	embeddingSlots   chan struct{}
 }
 
 type toolRoute struct {
@@ -114,9 +134,13 @@ type toolRoute struct {
 	slots            chan struct{}
 }
 
-func newInferenceBroker(maxSessions int) *inferenceBroker {
+func newInferenceBroker(maxSessions int, embeddingCapacity ...int) *inferenceBroker {
 	if maxSessions < 1 {
 		maxSessions = 1
+	}
+	capacity := 1
+	if len(embeddingCapacity) > 0 && embeddingCapacity[0] > 0 {
+		capacity = embeddingCapacity[0]
 	}
 	return &inferenceBroker{
 		sessions: make(map[string]*brokerSession),
@@ -127,12 +151,77 @@ func newInferenceBroker(maxSessions int) *inferenceBroker {
 				return http.ErrUseLastResponse
 			},
 		},
-		maxSessions:  maxSessions * 2,
-		controlToken: strings.TrimSpace(os.Getenv("DITTOBENCH_BROKER_CONTROL_TOKEN")),
+		maxSessions:    maxSessions * 2,
+		embeddingSlots: make(chan struct{}, capacity),
+		controlToken:   strings.TrimSpace(os.Getenv("DITTOBENCH_BROKER_CONTROL_TOKEN")),
 		platformProxyURL: configuredPlatformProxyURL(
 			os.Getenv("DITTOBENCH_PLATFORM_INFERENCE_PROXY_URL"),
 		),
+		embeddingURL: configuredEmbeddingURL(
+			envOr("DITTOBENCH_EMBEDDING_UPSTREAM_URL", "http://host.docker.internal:11434/api/embed"),
+		),
 	}
+}
+
+// beginEmbeddingPhase opens the locked embedding operation only after the
+// scorer has admitted this exact run into its bounded memory phase. A session
+// receives one phase for its lifetime; ending it is final, so a late harness
+// request cannot reopen validator-owned embedding capacity.
+func (b *inferenceBroker) beginEmbeddingPhase(id, runID string) bool {
+	b.mu.RLock()
+	session := b.sessions[id]
+	b.mu.RUnlock()
+	if session == nil {
+		return false
+	}
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	if session.boundRunID != runID || !session.activeLocked(time.Now()) ||
+		session.embeddingPhaseStarted {
+		return false
+	}
+	session.embeddingPhaseStarted = true
+	session.embeddingPhaseActive = true
+	return true
+}
+
+func (b *inferenceBroker) endEmbeddingPhase(id, runID string) {
+	b.mu.RLock()
+	session := b.sessions[id]
+	b.mu.RUnlock()
+	if session == nil {
+		return
+	}
+	session.mu.Lock()
+	var cancel context.CancelFunc
+	var done chan struct{}
+	if session.boundRunID == runID {
+		session.embeddingPhaseActive = false
+		cancel = session.embeddingCancel
+		done = session.embeddingDone
+	}
+	session.mu.Unlock()
+	// A hostile harness may return from its scored request while leaving a
+	// background embedding call open. Revoke that exact call and wait for its
+	// cleanup to release embeddingSlots before the scorer releases memory-phase
+	// admission to a sibling.
+	if cancel != nil {
+		cancel()
+	}
+	if done != nil {
+		<-done
+	}
+}
+
+func configuredEmbeddingURL(raw string) string {
+	value := strings.TrimSpace(raw)
+	parsed, err := url.Parse(value)
+	if err != nil || value == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") ||
+		parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" ||
+		parsed.Fragment != "" || parsed.Path != embeddingAPIPath {
+		return ""
+	}
+	return parsed.String()
 }
 
 func configuredPlatformProxyURL(raw string) string {
@@ -468,6 +557,8 @@ func destroyBrokerSession(session *brokerSession) {
 		return
 	}
 	session.mu.Lock()
+	embeddingCancel := session.embeddingCancel
+	embeddingDone := session.embeddingDone
 	for _, cancel := range session.cancels {
 		cancel()
 	}
@@ -479,7 +570,14 @@ func destroyBrokerSession(session *brokerSession) {
 	session.bearer = ""
 	session.legacyGateway = ""
 	session.requestModel = ""
+	session.embeddingPhaseActive = false
 	session.mu.Unlock()
+	if embeddingCancel != nil {
+		embeddingCancel()
+	}
+	if embeddingDone != nil {
+		<-embeddingDone
+	}
 }
 
 func (b *inferenceBroker) remove(id string) {
@@ -571,6 +669,175 @@ func (b *inferenceBroker) handle(w http.ResponseWriter, r *http.Request) {
 		session.mu.Unlock()
 	}()
 	b.proxy(w, r, session)
+}
+
+type embeddingRequest struct {
+	Model string   `json:"model"`
+	Input []string `json:"input"`
+}
+
+type embeddingResponse struct {
+	Embeddings      [][]float64 `json:"embeddings"`
+	PromptEvalCount int         `json:"prompt_eval_count,omitempty"`
+}
+
+// handleEmbedding exposes only the deterministic embedding operation to the
+// source-bound harness. Ollama's model-management, generation, discovery, and
+// administrative APIs remain unreachable from the sandbox.
+func (b *inferenceBroker) handleEmbedding(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost || r.URL.Path != embeddingAPIPath {
+		writeError(w, http.StatusNotFound, "embedding route not found")
+		return
+	}
+	b.pruneExpired(time.Now())
+	session := b.sessionForSource(sourceIP(r.RemoteAddr))
+	if session == nil {
+		writeError(w, http.StatusUnauthorized, "embedding session unavailable")
+		return
+	}
+	if b.embeddingURL == "" {
+		writeError(w, http.StatusServiceUnavailable, "embedding service unavailable")
+		return
+	}
+	requestContext, cancelRequest := context.WithTimeout(r.Context(), 65*time.Second)
+	var cancelOnce sync.Once
+	cancel := func() {
+		cancelOnce.Do(func() {
+			cancelRequest()
+			_ = r.Body.Close()
+		})
+	}
+	session.mu.Lock()
+	if !session.embeddingPhaseActive {
+		session.mu.Unlock()
+		cancel()
+		writeError(w, http.StatusConflict, "embedding phase unavailable")
+		return
+	}
+	if session.embeddingInFlight {
+		session.mu.Unlock()
+		cancel()
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusTooManyRequests, "embedding source is at capacity")
+		return
+	}
+	done := make(chan struct{})
+	session.embeddingInFlight = true
+	session.embeddingCancel = cancel
+	session.embeddingDone = done
+	session.mu.Unlock()
+	slotAcquired := false
+	defer func() {
+		if slotAcquired {
+			<-b.embeddingSlots
+		}
+		session.mu.Lock()
+		if session.embeddingDone == done {
+			session.embeddingInFlight = false
+			session.embeddingCancel = nil
+			session.embeddingDone = nil
+		}
+		session.mu.Unlock()
+		cancel()
+		close(done)
+	}()
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, embeddingBodyLimit+1))
+	if err != nil || len(body) > embeddingBodyLimit {
+		writeError(w, http.StatusRequestEntityTooLarge, "embedding request too large")
+		return
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	var payload embeddingRequest
+	if decoder.Decode(&payload) != nil || decoder.Decode(&struct{}{}) != io.EOF ||
+		payload.Model != embeddingModel || len(payload.Input) == 0 ||
+		len(payload.Input) > embeddingMaximumInputs {
+		writeError(w, http.StatusBadRequest, "invalid embedding request")
+		return
+	}
+	for _, input := range payload.Input {
+		if input == "" || len(input) > embeddingBodyLimit {
+			writeError(w, http.StatusBadRequest, "invalid embedding request")
+			return
+		}
+	}
+	inputBytes := 0
+	for _, input := range payload.Input {
+		inputBytes += len(input)
+	}
+	session.mu.Lock()
+	if !session.embeddingPhaseActive {
+		session.mu.Unlock()
+		writeError(w, http.StatusConflict, "embedding phase unavailable")
+		return
+	}
+	if session.embeddingRequests+1 > embeddingSessionRequests ||
+		session.embeddingInputs+uint64(len(payload.Input)) > embeddingSessionInputs ||
+		session.embeddingInputBytes+uint64(inputBytes) > embeddingSessionInputBytes {
+		session.mu.Unlock()
+		writeError(w, http.StatusTooManyRequests, "embedding session budget exhausted")
+		return
+	}
+	session.embeddingRequests++
+	session.embeddingInputs += uint64(len(payload.Input))
+	session.embeddingInputBytes += uint64(inputBytes)
+	session.mu.Unlock()
+
+	select {
+	case b.embeddingSlots <- struct{}{}:
+		slotAcquired = true
+	default:
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusTooManyRequests, "embedding service is at capacity")
+		return
+	}
+
+	lockedBody, err := json.Marshal(embeddingRequest{
+		Model: embeddingModel,
+		Input: payload.Input,
+	})
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid embedding request")
+		return
+	}
+	upstream, err := http.NewRequestWithContext(
+		requestContext, http.MethodPost, b.embeddingURL, bytes.NewReader(lockedBody),
+	)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "embedding service unavailable")
+		return
+	}
+	upstream.Header.Set("Content-Type", "application/json")
+	response, err := b.client.Do(upstream)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "embedding service unavailable")
+		return
+	}
+	defer response.Body.Close()
+	responseBody, err := io.ReadAll(io.LimitReader(response.Body, embeddingResponseLimit+1))
+	if err != nil || len(responseBody) > embeddingResponseLimit || response.StatusCode < 200 || response.StatusCode >= 300 {
+		writeError(w, http.StatusBadGateway, "embedding service unavailable")
+		return
+	}
+	var decoded embeddingResponse
+	if json.Unmarshal(responseBody, &decoded) != nil || len(decoded.Embeddings) != len(payload.Input) || decoded.PromptEvalCount < 0 {
+		writeError(w, http.StatusBadGateway, "invalid embedding response")
+		return
+	}
+	for _, vector := range decoded.Embeddings {
+		if len(vector) != embeddingDimensions {
+			writeError(w, http.StatusBadGateway, "invalid embedding response")
+			return
+		}
+		for _, value := range vector {
+			if math.IsNaN(value) || math.IsInf(value, 0) {
+				writeError(w, http.StatusBadGateway, "invalid embedding response")
+				return
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, decoded)
 }
 
 func (b *inferenceBroker) sessionForSource(ip string) *brokerSession {

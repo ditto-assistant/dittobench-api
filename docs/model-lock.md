@@ -99,7 +99,8 @@ remaining env is deployment config: where the gateway serves that model.
 | Env | Default | Effect |
 |-----|---------|--------|
 | `HARNESS_GATEWAY_URL` | `http://host.docker.internal:11434` | the CHAT gateway base URL |
-| `HARNESS_EMBED_URL` | _(the gateway URL)_ | the embeddings Ollama, when it differs from the chat gateway (relay setups) |
+| `HARNESS_EMBED_URL` | `http://host.docker.internal:11434` | trusted scorer-to-Ollama upstream; scored harnesses receive the source-bound operation broker |
+| `DITTOBENCH_EMBEDDING_UPSTREAM_URL` | `http://host.docker.internal:11434/api/embed` | broker-only upstream for locked `embeddinggemma` embedding calls |
 
 Scoring is judge-free (see `docs/judge-determinism.md`), so the locked model is
 the ONLY model in a run. The locked keys also cover the Chutes and OpenAI

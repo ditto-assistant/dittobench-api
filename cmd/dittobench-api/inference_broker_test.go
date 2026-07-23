@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -114,6 +116,393 @@ func TestLegacyBrokerRejectsUnreviewedRelayIdentity(t *testing.T) {
 		Provider: "openrouter", ProfileRevision: "mutable-route", Model: llm.LockedHarnessModel,
 	}); err == nil {
 		t.Fatal("unreviewed legacy relay identity was accepted")
+	}
+}
+
+func embeddingBrokerSession(t *testing.T, broker *inferenceBroker, source string) (string, string) {
+	t.Helper()
+	runID := uuid.NewString()
+	id, err := broker.prepareLegacy(runID, protocol.BenchVersionV6, "http://127.0.0.1:11435", relayHealthSnapshot{
+		Provider: "openrouter", ProfileRevision: llm.OpenRouterRelayProfileRevision,
+		Model: llm.LockedHarnessModel,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !broker.bindSource(id, runID, source) {
+		t.Fatal("failed to bind embedding broker source")
+	}
+	return id, runID
+}
+
+func admittedEmbeddingBrokerSession(t *testing.T, broker *inferenceBroker, source string) (string, string) {
+	t.Helper()
+	id, runID := embeddingBrokerSession(t, broker, source)
+	if !broker.beginEmbeddingPhase(id, runID) {
+		t.Fatal("failed to admit embedding phase")
+	}
+	t.Cleanup(func() { broker.endEmbeddingPhase(id, runID) })
+	return id, runID
+}
+
+func writeTestEmbedding(w http.ResponseWriter, inputs int) {
+	vector := make([]float64, embeddingDimensions)
+	vectors := make([][]float64, inputs)
+	for index := range vectors {
+		vectors[index] = vector
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"embeddings":        vectors,
+		"prompt_eval_count": inputs,
+	})
+}
+
+func callEmbedding(broker *inferenceBroker, source, input string) *httptest.ResponseRecorder {
+	request := httptest.NewRequest(http.MethodPost, embeddingAPIPath, bytes.NewBufferString(
+		`{"model":"embeddinggemma","input":[`+strconv.Quote(input)+`]}`,
+	))
+	request.RemoteAddr = source + ":4321"
+	recorder := httptest.NewRecorder()
+	broker.handleEmbedding(recorder, request)
+	return recorder
+}
+
+func TestEmbeddingBrokerCapacityOneForwardsOnlyLockedOperation(t *testing.T) {
+	vector := make([]float64, embeddingDimensions)
+	for index := range vector {
+		vector[index] = float64(index) / embeddingDimensions
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != embeddingAPIPath {
+			t.Fatalf("unexpected embedding upstream route %s %s", r.Method, r.URL.Path)
+		}
+		var request map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		if len(request) != 2 || request["model"] != embeddingModel {
+			t.Fatalf("unlocked embedding request: %#v", request)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"model":             embeddingModel,
+			"embeddings":        [][]float64{vector},
+			"prompt_eval_count": 3,
+		})
+	}))
+	defer upstream.Close()
+
+	broker := newInferenceBroker(1)
+	broker.embeddingURL = upstream.URL + embeddingAPIPath
+	broker.client.Transport = upstream.Client().Transport
+	admittedEmbeddingBrokerSession(t, broker, "192.0.2.60")
+	request := httptest.NewRequest(http.MethodPost, embeddingAPIPath, bytes.NewBufferString(
+		`{"model":"embeddinggemma","input":["bounded text"]}`,
+	))
+	request.RemoteAddr = "192.0.2.60:4321"
+	recorder := httptest.NewRecorder()
+	broker.handleEmbedding(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("embedding status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response map[string]json.RawMessage
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response) != 2 || response["model"] != nil {
+		t.Fatalf("embedding response leaked upstream metadata: %s", recorder.Body.String())
+	}
+}
+
+func TestEmbeddingBrokerRejectsSiblingModelAndManagementProbes(t *testing.T) {
+	var upstreamCalls atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		upstreamCalls.Add(1)
+	}))
+	defer upstream.Close()
+	broker := newInferenceBroker(1)
+	broker.embeddingURL = upstream.URL + embeddingAPIPath
+	broker.client.Transport = upstream.Client().Transport
+	admittedEmbeddingBrokerSession(t, broker, "192.0.2.61")
+
+	tests := []struct {
+		method string
+		path   string
+		body   string
+		ip     string
+		status int
+	}{
+		{http.MethodPost, embeddingAPIPath, `{"model":"other","input":["x"]}`, "192.0.2.61", http.StatusBadRequest},
+		{http.MethodPost, embeddingAPIPath, `{"model":"embeddinggemma","input":["x"],"keep_alive":"24h"}`, "192.0.2.61", http.StatusBadRequest},
+		{http.MethodPost, "/api/pull", `{"model":"embeddinggemma"}`, "192.0.2.61", http.StatusNotFound},
+		{http.MethodGet, embeddingAPIPath, "", "192.0.2.61", http.StatusNotFound},
+		{http.MethodPost, embeddingAPIPath, `{"model":"embeddinggemma","input":["x"]}`, "192.0.2.62", http.StatusUnauthorized},
+	}
+	for _, test := range tests {
+		request := httptest.NewRequest(test.method, test.path, bytes.NewBufferString(test.body))
+		request.RemoteAddr = test.ip + ":4321"
+		recorder := httptest.NewRecorder()
+		broker.handleEmbedding(recorder, request)
+		if recorder.Code != test.status {
+			t.Fatalf("%s %s status=%d want=%d body=%s", test.method, test.path, recorder.Code, test.status, recorder.Body.String())
+		}
+	}
+	if upstreamCalls.Load() != 0 {
+		t.Fatalf("rejected embedding probes reached upstream %d time(s)", upstreamCalls.Load())
+	}
+}
+
+func TestEmbeddingBrokerRejectsPrePhaseAndLateUse(t *testing.T) {
+	var upstreamCalls atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		upstreamCalls.Add(1)
+		writeTestEmbedding(w, 1)
+	}))
+	defer upstream.Close()
+	broker := newInferenceBroker(1)
+	broker.embeddingURL = upstream.URL + embeddingAPIPath
+	broker.client.Transport = upstream.Client().Transport
+	id, runID := embeddingBrokerSession(t, broker, "192.0.2.62")
+
+	if got := callEmbedding(broker, "192.0.2.62", "before").Code; got != http.StatusConflict {
+		t.Fatalf("pre-phase embedding status = %d", got)
+	}
+	if !broker.beginEmbeddingPhase(id, runID) {
+		t.Fatal("failed to begin embedding phase")
+	}
+	if got := callEmbedding(broker, "192.0.2.62", "during").Code; got != http.StatusOK {
+		t.Fatalf("admitted embedding status = %d", got)
+	}
+	broker.endEmbeddingPhase(id, runID)
+	if got := callEmbedding(broker, "192.0.2.62", "after").Code; got != http.StatusConflict {
+		t.Fatalf("late embedding status = %d", got)
+	}
+	if broker.beginEmbeddingPhase(id, runID) {
+		t.Fatal("ended embedding phase reopened")
+	}
+	if upstreamCalls.Load() != 1 {
+		t.Fatalf("pre/late probes reached upstream %d time(s)", upstreamCalls.Load())
+	}
+}
+
+func TestEmbeddingBrokerOneRequestPerSessionDoesNotStarveSibling(t *testing.T) {
+	firstArrived := make(chan struct{}, 1)
+	releaseFirst := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload embeddingRequest
+		if json.NewDecoder(r.Body).Decode(&payload) != nil || len(payload.Input) != 1 {
+			http.Error(w, "bad test request", http.StatusBadRequest)
+			return
+		}
+		if payload.Input[0] == "hold" {
+			firstArrived <- struct{}{}
+			<-releaseFirst
+		}
+		writeTestEmbedding(w, 1)
+	}))
+	defer upstream.Close()
+	broker := newInferenceBroker(2, 2)
+	broker.embeddingURL = upstream.URL + embeddingAPIPath
+	broker.client.Transport = upstream.Client().Transport
+	admittedEmbeddingBrokerSession(t, broker, "192.0.2.63")
+	admittedEmbeddingBrokerSession(t, broker, "192.0.2.64")
+
+	firstDone := make(chan int, 1)
+	go func() {
+		firstDone <- callEmbedding(broker, "192.0.2.63", "hold").Code
+	}()
+	select {
+	case <-firstArrived:
+	case <-time.After(time.Second):
+		close(releaseFirst)
+		t.Fatal("first embedding request did not reach upstream")
+	}
+	if got := callEmbedding(broker, "192.0.2.63", "same-session").Code; got != http.StatusTooManyRequests {
+		close(releaseFirst)
+		t.Fatalf("same-session concurrent embedding status = %d", got)
+	}
+	if got := callEmbedding(broker, "192.0.2.64", "sibling").Code; got != http.StatusOK {
+		close(releaseFirst)
+		t.Fatalf("sibling embedding status = %d", got)
+	}
+	close(releaseFirst)
+	if got := <-firstDone; got != http.StatusOK {
+		t.Fatalf("first embedding status = %d", got)
+	}
+}
+
+func TestEmbeddingBrokerFailsClosedAtEverySessionBudget(t *testing.T) {
+	var upstreamCalls atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		upstreamCalls.Add(1)
+		writeTestEmbedding(w, 1)
+	}))
+	defer upstream.Close()
+	broker := newInferenceBroker(1)
+	broker.embeddingURL = upstream.URL + embeddingAPIPath
+	broker.client.Transport = upstream.Client().Transport
+	id, _ := admittedEmbeddingBrokerSession(t, broker, "192.0.2.65")
+	broker.mu.RLock()
+	session := broker.sessions[id]
+	broker.mu.RUnlock()
+
+	tests := []struct {
+		name string
+		set  func()
+	}{
+		{"requests", func() { session.embeddingRequests = embeddingSessionRequests }},
+		{"inputs", func() { session.embeddingInputs = embeddingSessionInputs }},
+		{"input-bytes", func() { session.embeddingInputBytes = embeddingSessionInputBytes }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			session.mu.Lock()
+			session.embeddingRequests = 0
+			session.embeddingInputs = 0
+			session.embeddingInputBytes = 0
+			test.set()
+			session.mu.Unlock()
+			recorder := callEmbedding(broker, "192.0.2.65", "x")
+			if recorder.Code != http.StatusTooManyRequests ||
+				!strings.Contains(recorder.Body.String(), "budget exhausted") {
+				t.Fatalf("budget status=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+		})
+	}
+	if upstreamCalls.Load() != 0 {
+		t.Fatalf("budget-exhausted requests reached upstream %d time(s)", upstreamCalls.Load())
+	}
+}
+
+func TestMemoryAdmissionCapacityOneQueuesThenAdmitsSibling(t *testing.T) {
+	broker := newInferenceBroker(2, 1)
+	firstID, firstRun := embeddingBrokerSession(t, broker, "192.0.2.66")
+	secondID, secondRun := embeddingBrokerSession(t, broker, "192.0.2.67")
+	server := &server{memorySlots: make(chan struct{}, 1), broker: broker}
+	endFirst, ok := server.beginMemoryPhase(context.Background(), firstID, firstRun)
+	if !ok {
+		t.Fatal("capacity-one first phase was not admitted")
+	}
+
+	type admission struct {
+		end func()
+		ok  bool
+	}
+	admitted := make(chan admission, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	go func() {
+		end, admittedOK := server.beginMemoryPhase(ctx, secondID, secondRun)
+		admitted <- admission{end: end, ok: admittedOK}
+	}()
+	select {
+	case <-admitted:
+		endFirst()
+		t.Fatal("sibling bypassed capacity-one memory admission")
+	case <-time.After(25 * time.Millisecond):
+	}
+	endFirst()
+	select {
+	case result := <-admitted:
+		if !result.ok {
+			t.Fatal("sibling was starved after the first phase released capacity")
+		}
+		result.end()
+	case <-time.After(time.Second):
+		t.Fatal("sibling did not acquire released memory capacity")
+	}
+}
+
+func TestMemoryAdmissionDrainsHostileInFlightEmbeddingBeforeSibling(t *testing.T) {
+	firstArrived := make(chan struct{})
+	firstCanceled := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload embeddingRequest
+		if json.NewDecoder(r.Body).Decode(&payload) != nil || len(payload.Input) != 1 {
+			http.Error(w, "bad test request", http.StatusBadRequest)
+			return
+		}
+		if payload.Input[0] == "hostile-background" {
+			close(firstArrived)
+			select {
+			case <-r.Context().Done():
+				close(firstCanceled)
+			case <-releaseFirst:
+			}
+			return
+		}
+		writeTestEmbedding(w, 1)
+	}))
+	defer upstream.Close()
+	defer close(releaseFirst)
+
+	broker := newInferenceBroker(2, 1)
+	broker.embeddingURL = upstream.URL + embeddingAPIPath
+	broker.client.Transport = upstream.Client().Transport
+	firstID, firstRun := embeddingBrokerSession(t, broker, "192.0.2.68")
+	secondID, secondRun := embeddingBrokerSession(t, broker, "192.0.2.69")
+	server := &server{memorySlots: make(chan struct{}, 1), broker: broker}
+	endFirst, ok := server.beginMemoryPhase(context.Background(), firstID, firstRun)
+	if !ok {
+		t.Fatal("capacity-one first phase was not admitted")
+	}
+
+	firstDone := make(chan int, 1)
+	go func() {
+		firstDone <- callEmbedding(broker, "192.0.2.68", "hostile-background").Code
+	}()
+	select {
+	case <-firstArrived:
+	case <-time.After(time.Second):
+		t.Fatal("hostile embedding request did not reach upstream")
+	}
+
+	type admission struct {
+		end func()
+		ok  bool
+	}
+	admitted := make(chan admission, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	go func() {
+		end, admittedOK := server.beginMemoryPhase(ctx, secondID, secondRun)
+		admitted <- admission{end: end, ok: admittedOK}
+	}()
+	select {
+	case <-admitted:
+		t.Fatal("sibling bypassed the first memory-phase admission")
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	endFirst()
+	var sibling admission
+	select {
+	case sibling = <-admitted:
+		if !sibling.ok {
+			t.Fatal("sibling was not admitted after predecessor drain")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("sibling was starved after predecessor drain")
+	}
+	defer sibling.end()
+	if got := len(broker.embeddingSlots); got != 0 {
+		t.Fatalf("memory admission released with %d predecessor embedding slot(s) held", got)
+	}
+	select {
+	case status := <-firstDone:
+		if status != http.StatusBadGateway {
+			t.Fatalf("canceled predecessor embedding status = %d", status)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled predecessor embedding request did not drain")
+	}
+	select {
+	case <-firstCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("predecessor embedding cancellation did not reach upstream")
+	}
+	if got := callEmbedding(broker, "192.0.2.69", "sibling").Code; got != http.StatusOK {
+		t.Fatalf("sibling embedding inherited predecessor capacity: status=%d", got)
 	}
 }
 
