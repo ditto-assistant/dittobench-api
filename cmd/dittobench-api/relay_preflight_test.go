@@ -252,14 +252,14 @@ func TestReadRelayHealthRejectsStaticLegacyHealth(t *testing.T) {
 
 func TestV5RequiresTrustedTokenAccountingWhileLegacyAccountingRemainsReadable(t *testing.T) {
 	legacy := relayHealthSnapshot{AccountingVersion: 1, Status: "ok"}
-	if err := requireTokenAccounting(legacy, protocol.BenchVersionV5, "full"); err == nil {
+	if err := requireTokenAccounting(legacy, protocol.BenchVersionV5, "full", false); err == nil {
 		t.Fatal("v5 accepted relay accounting v1")
 	}
 	metered := relayHealthSnapshot{
 		AccountingVersion: 2, Status: "ok", Provider: "p",
 		ProfileRevision: "r", Model: "m",
 	}
-	if err := requireTokenAccounting(metered, protocol.BenchVersionV5, "full"); err != nil {
+	if err := requireTokenAccounting(metered, protocol.BenchVersionV5, "full", false); err != nil {
 		t.Fatalf("v5 rejected trusted accounting: %v", err)
 	}
 
@@ -283,18 +283,24 @@ func TestV7RequiresExactModelProfileAndReviewedBaseline(t *testing.T) {
 
 	wrongModel := snapshot
 	wrongModel.Model = llm.LockedHarnessModel
-	if err := requireTokenAccounting(wrongModel, protocol.BenchVersionV7, "full"); err == nil || !strings.Contains(err.Error(), "model") {
+	if err := requireTokenAccounting(wrongModel, protocol.BenchVersionV7, "full", false); err == nil || !strings.Contains(err.Error(), "model") {
 		t.Fatalf("v7 accepted wrong model: %v", err)
 	}
 
 	wrongProfile := snapshot
 	wrongProfile.ProfileRevision = "profile-v1"
-	if err := requireTokenAccounting(wrongProfile, protocol.BenchVersionV7, "full"); err == nil || !strings.Contains(err.Error(), "profile") {
+	if err := requireTokenAccounting(wrongProfile, protocol.BenchVersionV7, "full", false); err == nil || !strings.Contains(err.Error(), "profile") {
 		t.Fatalf("v7 accepted unversioned profile: %v", err)
 	}
 
-	if err := requireTokenAccounting(snapshot, protocol.BenchVersionV7, "full"); err == nil || !strings.Contains(err.Error(), "reviewed") {
+	if err := requireTokenAccounting(snapshot, protocol.BenchVersionV7, "full", false); err == nil || !strings.Contains(err.Error(), "reviewed") {
 		t.Fatalf("v7 must remain dark without a reviewed baseline: %v", err)
+	}
+	if err := requireTokenAccounting(snapshot, protocol.BenchVersionV7, "full", true); err != nil {
+		t.Fatalf("v7 calibration rejected exact unreviewed route identity: %v", err)
+	}
+	if err := requireTokenAccounting(wrongModel, protocol.BenchVersionV7, "full", true); err == nil || !strings.Contains(err.Error(), "model") {
+		t.Fatalf("v7 calibration accepted wrong model: %v", err)
 	}
 }
 

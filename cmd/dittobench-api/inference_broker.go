@@ -41,15 +41,17 @@ const (
 	brokerIdleTimeout          = 30 * time.Second
 	brokerMaximumHeaderBytes   = 32 << 10
 	platformInferenceAPIPath   = "/api/v1/inference/chat/completions"
+	platformEmbeddingAPIPath   = "/api/v1/inference/embeddings"
 	embeddingAPIPath           = "/api/embed"
 	embeddingModel             = "embeddinggemma"
+	hostedEmbeddingModel       = "perplexity/pplx-embed-v1-0.6b"
 	embeddingDimensions        = 768
 	embeddingMaximumInputs     = 256
 	embeddingBodyLimit         = 1 << 20
 	embeddingResponseLimit     = 16 << 20
-	embeddingSessionRequests   = 8192
-	embeddingSessionInputs     = 131072
-	embeddingSessionInputBytes = 64 << 20
+	embeddingSessionRequests   = 100000
+	embeddingSessionInputs     = 1000000
+	embeddingSessionInputBytes = 1 << 30
 )
 
 type brokerTicketIdentity struct {
@@ -81,6 +83,7 @@ type brokerSession struct {
 	ticketSlotID          string
 	ticketDeadline        time.Time
 	boundRunID            string
+	benchVersion          int
 	inFlight              int
 	embeddingPhaseStarted bool
 	embeddingPhaseActive  bool
@@ -527,6 +530,7 @@ func (b *inferenceBroker) claimRun(id, runID string, identity brokerTicketIdenti
 	}
 	session.requestModel = session.model
 	session.boundRunID = runID
+	session.benchVersion = benchVersion
 	return true
 }
 
@@ -695,7 +699,10 @@ func (b *inferenceBroker) handleEmbedding(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusUnauthorized, "embedding session unavailable")
 		return
 	}
-	if b.embeddingURL == "" {
+	session.mu.Lock()
+	benchVersion := session.benchVersion
+	session.mu.Unlock()
+	if benchVersion < 7 && b.embeddingURL == "" {
 		writeError(w, http.StatusServiceUnavailable, "embedding service unavailable")
 		return
 	}
@@ -793,36 +800,14 @@ func (b *inferenceBroker) handleEmbedding(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	lockedBody, err := json.Marshal(embeddingRequest{
-		Model: embeddingModel,
-		Input: payload.Input,
-	})
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid embedding request")
-		return
-	}
-	upstream, err := http.NewRequestWithContext(
-		requestContext, http.MethodPost, b.embeddingURL, bytes.NewReader(lockedBody),
-	)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "embedding service unavailable")
-		return
-	}
-	upstream.Header.Set("Content-Type", "application/json")
-	response, err := b.client.Do(upstream)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "embedding service unavailable")
-		return
-	}
-	defer response.Body.Close()
-	responseBody, err := io.ReadAll(io.LimitReader(response.Body, embeddingResponseLimit+1))
-	if err != nil || len(responseBody) > embeddingResponseLimit || response.StatusCode < 200 || response.StatusCode >= 300 {
-		writeError(w, http.StatusBadGateway, "embedding service unavailable")
-		return
-	}
 	var decoded embeddingResponse
-	if json.Unmarshal(responseBody, &decoded) != nil || len(decoded.Embeddings) != len(payload.Input) || decoded.PromptEvalCount < 0 {
-		writeError(w, http.StatusBadGateway, "invalid embedding response")
+	if benchVersion >= 7 {
+		decoded, err = b.forwardPlatformEmbedding(requestContext, session, payload.Input)
+	} else {
+		decoded, err = b.forwardLocalEmbedding(requestContext, payload.Input)
+	}
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "embedding service unavailable")
 		return
 	}
 	for _, vector := range decoded.Embeddings {
@@ -838,6 +823,129 @@ func (b *inferenceBroker) handleEmbedding(w http.ResponseWriter, r *http.Request
 		}
 	}
 	writeJSON(w, http.StatusOK, decoded)
+}
+
+func (b *inferenceBroker) forwardLocalEmbedding(ctx context.Context, inputs []string) (embeddingResponse, error) {
+	lockedBody, err := json.Marshal(embeddingRequest{Model: embeddingModel, Input: inputs})
+	if err != nil {
+		return embeddingResponse{}, err
+	}
+	upstream, err := http.NewRequestWithContext(ctx, http.MethodPost, b.embeddingURL, bytes.NewReader(lockedBody))
+	if err != nil {
+		return embeddingResponse{}, err
+	}
+	upstream.Header.Set("Content-Type", "application/json")
+	response, err := b.client.Do(upstream)
+	if err != nil {
+		return embeddingResponse{}, err
+	}
+	defer response.Body.Close()
+	responseBody, err := io.ReadAll(io.LimitReader(response.Body, embeddingResponseLimit+1))
+	if err != nil || len(responseBody) > embeddingResponseLimit || response.StatusCode < 200 || response.StatusCode >= 300 {
+		return embeddingResponse{}, fmt.Errorf("embedding upstream returned %d", response.StatusCode)
+	}
+	var decoded embeddingResponse
+	if json.Unmarshal(responseBody, &decoded) != nil || len(decoded.Embeddings) != len(inputs) || decoded.PromptEvalCount < 0 {
+		return embeddingResponse{}, fmt.Errorf("invalid embedding response")
+	}
+	return decoded, nil
+}
+
+type platformEmbeddingRequest struct {
+	Model          string   `json:"model"`
+	Input          []string `json:"input"`
+	Dimensions     int      `json:"dimensions"`
+	EncodingFormat string   `json:"encoding_format"`
+}
+
+type platformEmbeddingResponse struct {
+	Model string `json:"model"`
+	Data  []struct {
+		Index     int       `json:"index"`
+		Embedding []float64 `json:"embedding"`
+	} `json:"data"`
+	Usage struct {
+		PromptTokens int `json:"prompt_tokens"`
+		TotalTokens  int `json:"total_tokens"`
+	} `json:"usage"`
+}
+
+func platformEmbeddingURL(chatProxyURL string) (string, error) {
+	parsed, err := url.Parse(chatProxyURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.RawQuery != "" || parsed.Fragment != "" ||
+		parsed.Path != platformInferenceAPIPath {
+		return "", fmt.Errorf("invalid platform inference route")
+	}
+	parsed.Path = platformEmbeddingAPIPath
+	return parsed.String(), nil
+}
+
+func (b *inferenceBroker) forwardPlatformEmbedding(ctx context.Context, session *brokerSession, inputs []string) (embeddingResponse, error) {
+	body, err := json.Marshal(platformEmbeddingRequest{
+		Model: hostedEmbeddingModel, Input: inputs,
+		Dimensions: embeddingDimensions, EncodingFormat: "float",
+	})
+	if err != nil {
+		return embeddingResponse{}, err
+	}
+	session.mu.Lock()
+	if session.benchVersion != 7 || !session.activeLocked(time.Now()) {
+		session.mu.Unlock()
+		return embeddingResponse{}, fmt.Errorf("embedding session unavailable")
+	}
+	grantID, bearer, proxyURL, generation := session.grantID, session.bearer, session.proxyURL, session.generation
+	privateKey := append(ed25519.PrivateKey(nil), session.privateKey...)
+	session.mu.Unlock()
+	endpoint, err := platformEmbeddingURL(proxyURL)
+	if err != nil {
+		return embeddingResponse{}, err
+	}
+	nonce := uuid.NewString()
+	requested := time.Now().UTC().Format("2006-01-02T15:04:05.000000+00:00")
+	digest := sha256.Sum256(body)
+	message := fmt.Sprintf("ditto-inference:v1:%s:%d:%s:%s:%s", grantID, generation, nonce, requested, hex.EncodeToString(digest[:]))
+	proof := base64.RawURLEncoding.EncodeToString(ed25519.Sign(privateKey, []byte(message)))
+	upstream, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return embeddingResponse{}, err
+	}
+	upstream.Header.Set("Content-Type", "application/json")
+	upstream.Header.Set("Authorization", "Bearer "+bearer)
+	upstream.Header.Set("X-Ditto-Grant", grantID)
+	upstream.Header.Set("X-Ditto-Generation", fmt.Sprint(generation))
+	upstream.Header.Set("X-Ditto-Nonce", nonce)
+	upstream.Header.Set("X-Ditto-Requested-At", requested)
+	upstream.Header.Set("X-Ditto-Proof", proof)
+	response, err := b.client.Do(upstream)
+	if err != nil {
+		return embeddingResponse{}, err
+	}
+	defer response.Body.Close()
+	responseBody, err := io.ReadAll(io.LimitReader(response.Body, embeddingResponseLimit+1))
+	if err != nil || len(responseBody) > embeddingResponseLimit || response.StatusCode < 200 || response.StatusCode >= 300 {
+		return embeddingResponse{}, fmt.Errorf("embedding platform returned %d", response.StatusCode)
+	}
+	var platformResponse platformEmbeddingResponse
+	if json.Unmarshal(responseBody, &platformResponse) != nil || platformResponse.Model != hostedEmbeddingModel ||
+		len(platformResponse.Data) != len(inputs) || platformResponse.Usage.PromptTokens < 0 ||
+		platformResponse.Usage.TotalTokens != platformResponse.Usage.PromptTokens {
+		return embeddingResponse{}, fmt.Errorf("invalid platform embedding response")
+	}
+	decoded := embeddingResponse{
+		Embeddings: make([][]float64, len(inputs)), PromptEvalCount: platformResponse.Usage.PromptTokens,
+	}
+	for index, item := range platformResponse.Data {
+		if item.Index != index || len(item.Embedding) != embeddingDimensions {
+			return embeddingResponse{}, fmt.Errorf("invalid platform embedding response")
+		}
+		for _, value := range item.Embedding {
+			if math.IsNaN(value) || math.IsInf(value, 0) {
+				return embeddingResponse{}, fmt.Errorf("invalid platform embedding response")
+			}
+		}
+		decoded.Embeddings[index] = item.Embedding
+	}
+	return decoded, nil
 }
 
 func (b *inferenceBroker) sessionForSource(ip string) *brokerSession {
@@ -1052,6 +1160,18 @@ func (b *inferenceBroker) trustedProbe(ctx context.Context, id string) error {
 	}
 	if json.Unmarshal(recorder.Body.Bytes(), &decoded) != nil || len(decoded.Choices) == 0 {
 		return fmt.Errorf("ticket inference probe returned no completion")
+	}
+	session.mu.Lock()
+	benchVersion := session.benchVersion
+	session.mu.Unlock()
+	if benchVersion == 7 {
+		embedding, err := b.forwardPlatformEmbedding(ctx, session, []string{"validator embedding preflight"})
+		if err != nil {
+			return fmt.Errorf("ticket embedding probe failed: %w", err)
+		}
+		if len(embedding.Embeddings) != 1 || len(embedding.Embeddings[0]) != embeddingDimensions {
+			return fmt.Errorf("ticket embedding probe returned no vector")
+		}
 	}
 	return nil
 }

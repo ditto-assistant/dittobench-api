@@ -34,11 +34,11 @@ func TestCapabilitiesReportBoundReleaseIdentity(t *testing.T) {
 	if got.MemoryPhaseCapacity != maxConcurrentMemoryPhases {
 		t.Fatalf("memory-phase capacity = %d, want %d", got.MemoryPhaseCapacity, maxConcurrentMemoryPhases)
 	}
-	if !efficiency.ValidV7CalibrationReadiness(got.V7Calibration) {
-		t.Fatalf("reviewed v7 calibration missing: %+v", got.V7Calibration)
+	if efficiency.ValidV7CalibrationReadiness(got.V7Calibration) || got.V7Calibration.ManifestSHA256 != "" {
+		t.Fatalf("hosted v7 calibration escaped dark gate: %+v", got.V7Calibration)
 	}
-	if !strings.Contains(rr.Body.String(), `"profile_revision":"openrouter-route-a471cd87ae7df5b9-v1"`) {
-		t.Fatalf("v7 calibration wire shape missing from capabilities: %s", rr.Body.String())
+	if strings.Contains(rr.Body.String(), `"profile_revision":"openrouter-route-a471cd87ae7df5b9-v1"`) {
+		t.Fatalf("pre-campaign v7 route leaked into capabilities: %s", rr.Body.String())
 	}
 	// v2-v4 are always advertised; v5 is negotiated only once reviewed token
 	// baselines make efficiency.ProductionReady() true (the #54 release gate).
@@ -65,9 +65,9 @@ func TestCapabilitiesReportBoundReleaseIdentity(t *testing.T) {
 	}
 }
 
-func TestV7CapabilityAdvertisesAfterGPTOSSCalibrationLands(t *testing.T) {
-	if !efficiency.ProductionReadyForVersion(7) {
-		t.Fatal("v7 must advertise after its reviewed GPT-OSS baseline manifest lands")
+func TestV7CapabilityStaysDarkBeforeHostedEmbeddingCampaign(t *testing.T) {
+	if efficiency.ProductionReadyForVersion(7) {
+		t.Fatal("v7 must stay dark before its hosted-embedding campaign lands")
 	}
 }
 
