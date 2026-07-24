@@ -34,20 +34,20 @@ grepped out of the wrong tool's payload (the served decoy).
 End-to-end companion on REAL generated suites
 (`TestV7DifficultyOnGeneratedToolSuites`, `cmd/dittobench-api`), medium tool
 suites from the hardened datagen (seed 123456789), measured at datagen
-`e1dfbbb` (`v0.11.3-0.20260724074314-e1dfbbb5c2bc`, the pinned final deepened
-head — earlier drafts of the suite measured 3.4x at `a91fc9b`):
+`fe1835e` (`v0.11.3-0.20260724115621-fe1835e69bff`, the pinned iteration-2
+deepened head — the profilesV7 full suite is now Tools 84 / Mem 185, ~282
+cases; earlier drafts measured 2.8x at `e1dfbbb` and 3.4x at `a91fc9b`):
 
 | strategy | v6 suite + v6 scoring | v7-hard suite + v7 scoring | ratio |
 | --- | --- | --- | --- |
-| naive parser (best-case self-reports, fails the negation trap) | 0.600 | 0.215 | **2.8x lower** |
+| naive parser (best-case self-reports, fails the negation trap) | 0.600 | 0.190 | **3.2x lower** |
 | oracle | 1.000 | 1.000 | 1.0x |
 
 The suite-level ratio is smaller than the lever-level 12.7x because
 abstention/no-tool and memory-routing cases legitimately reward inaction in
-both contracts (the final mix hands the parser more observable-capped 0.05
-cases plus more no-tool credit than the earlier drafts did); on the
-observable slice — where the parser's free credit lived — the collapse is
-the full 10x (0.5 → 0.05 per case, traps at 0). The
+both contracts (the exact ratio drifts with the datagen mix as the suite is
+deepened); on the observable slice — where the parser's free credit lived —
+the collapse is the full 10x (0.5 → 0.05 per case, traps at 0). The
 memory-axis hardening is measured in the datagen module's own v7 difficulty
 tests.
 

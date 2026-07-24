@@ -52,7 +52,7 @@ func TestV7StarterKitRevisionMustBeCanonicalGitSHA(t *testing.T) {
 	// merge). The pre-hardening vector was 1cfc6e3b…f58fcf and lives on in
 	// the embedded reviewed manifest as the identity anchor
 	// (docs/token-efficiency-v7.md).
-	if manifest.DatasetKnownVector != "b4269bc834530465775177605c9566d97034c8db798b33193a82d6e8cf989322" {
+	if manifest.DatasetKnownVector != "f5f42f7a550e0bfef8ef2b14f810cbbd4b140ca5985e9f0cceaa509689d9e218" {
 		t.Fatalf("v7 known vector = %s", manifest.DatasetKnownVector)
 	}
 	for _, dataset := range manifest.Calibration {
@@ -98,7 +98,7 @@ func TestRefreshedDatasetManifestUsesCanonicalV7Profile(t *testing.T) {
 	}
 	// v7-hard vector; see the pin comment in
 	// TestV7StarterKitRevisionMustBeCanonicalGitSHA.
-	if manifest.DatasetKnownVector != "b4269bc834530465775177605c9566d97034c8db798b33193a82d6e8cf989322" {
+	if manifest.DatasetKnownVector != "f5f42f7a550e0bfef8ef2b14f810cbbd4b140ca5985e9f0cceaa509689d9e218" {
 		t.Fatalf("v7 known vector = %s", manifest.DatasetKnownVector)
 	}
 	if len(manifest.Calibration) != 60 {
