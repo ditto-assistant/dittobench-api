@@ -18,21 +18,23 @@ which is what the numbers below measure.
 
 ## The model
 
-Fit corpus: the 2026-07 v7 aggregate calibration campaign — 59 clean runs of
-the unmodified starter kit (20 small / 20 medium / 19 full at the time of
-fitting; failed and rejected attempts excluded; every run's `dataset_sha256`
-reproduced offline from (seed, run_size, bench_version) before its features
-entered the fit). Identity: `openai/gpt-oss-20b` via
-`openrouter-route-a471cd87ae7df5b9-v1`, embeddings
-`dittobench-v7-openrouter-pplx-embed-v1-0.6b-768-v1`. Corpus digest (sorted
-`size:seed:sha:prompt:compl:total` lines): `97cdfbef4d35…332df9f02`.
+Fit corpus: the COMPLETE 2026-07 v7 aggregate calibration campaign — all
+60/60 clean runs of the unmodified starter kit (20 per run size; failed and
+rejected attempts excluded; every run's `dataset_sha256` reproduced offline
+from (seed, run_size, bench_version) before its features entered the fit).
+This is the same corpus whose reviewed-measured manifest merged in PR #91.
+Identity: `openai/gpt-oss-20b` via `openrouter-route-a471cd87ae7df5b9-v1`,
+embeddings `dittobench-v7-openrouter-pplx-embed-v1-0.6b-768-v1`. Corpus
+digest (sorted `size:seed:sha:prompt:compl:total` lines):
+`bcd7873b07b3…c55503a8`. Model version:
+`tokenmodel-gptoss-v7corpus60-2026-07-24-v2`.
 
 Structure (ordinary least squares through the origin, pooled across sizes;
 `internal/tokenmodel`):
 
-    chat_prompt      ≈ 3921.2·tool_cases + 3473.6·memory_cases + 991.8·expected_hops
-    chat_completion  ≈  397.1·tool_cases +  286.6·memory_cases
-    embedding_prompt ≈ 0.0866·haystack_bytes + 16.39·pairs + 14.71·subjects + 42.28·memory_cases   (advisory)
+    chat_prompt      ≈ 3875.1·tool_cases + 3507.5·memory_cases + 991.9·expected_hops
+    chat_completion  ≈  387.3·tool_cases +  293.8·memory_cases
+    embedding_prompt ≈ 0.0958·haystack_bytes + 15.36·pairs + 15.17·subjects + 42.40·memory_cases   (advisory)
 
 Every feature is computable offline from the deterministic dataset artifact
 (`tokenmodel.Extract`): case counts, expected observed-execution hops
@@ -48,13 +50,13 @@ conversation state add behavioral variance). The fit captures the
 dataset-driven component; the residuals below are the honest behavioral
 remainder.
 
-Per-run |error| of the chat TOTAL (full 59-run corpus):
+Per-run |error| of the chat TOTAL (full 60-run corpus):
 
 | run_size | mean | p90 | max |
 | --- | --- | --- | --- |
-| small | 7.8% | 17.0% | 27.1% |
+| small | 7.8% | 17.1% | 27.2% |
 | medium | 5.2% | 10.2% | 10.9% |
-| full | 4.2% | 7.4% | 8.5% |
+| full | 4.2% | 7.1% | 8.6% |
 
 Held-out END-METRIC accuracy (the quantity that matters: derive the p90
 budget from predictions anchored on one half of the seeds, compare to the
@@ -64,7 +66,16 @@ actual measured p90 of the OTHER half; both parities):
 | --- | --- | --- |
 | small | 0.9% | 0.9% |
 | medium | 6.4% | 6.6% |
-| full | 5.0% | 5.2% |
+| full | 2.9% | 2.9% |
+
+Validation against the PUBLISHED campaign raw p90s (the merged PR #91
+manifest: 71,309 / 450,074 / 995,198 small/medium/full): the corpus
+reproduces them exactly (it is the campaign), and the UNANCHORED model
+prediction at the predicted-p90 rank lands at −10.6% / −8.8% / −5.8%
+respectively — the systematic under-prediction the per-size anchors absorb
+by construction. The anchored derivation therefore reproduces the published
+p90s on the fit corpus identically; its out-of-sample error is the held-out
+row above.
 
 Embedding-token model residuals: ≤ 4.4% max (advisory only; embedding usage
 never enters a chat-token manifest).

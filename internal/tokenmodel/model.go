@@ -100,48 +100,49 @@ type Model struct {
 	Envelope map[string]RatioBounds
 }
 
-// Production is the frozen fit of the 2026-07 v7 aggregate calibration
-// campaign corpus (59 clean runs of the unmodified starter kit; 20 small, 20
-// medium, 19 full; every run's dataset_sha256 reproduced offline before
-// fitting; failed/rejected attempts excluded). Fit method: ordinary least
-// squares through the origin, pooled across run sizes.
+// Production is the frozen fit of the COMPLETE 2026-07 v7 aggregate
+// calibration campaign corpus (60/60 clean runs of the unmodified starter
+// kit, 20 per run size — the same corpus whose measured manifest merged in
+// PR #91; every run's dataset_sha256 reproduced offline before fitting;
+// failed/rejected attempts excluded). Fit method: ordinary least squares
+// through the origin, pooled across run sizes.
 var Production = Model{
-	Version:          "tokenmodel-gptoss-v7corpus-2026-07-24-v1",
+	Version:          "tokenmodel-gptoss-v7corpus60-2026-07-24-v2",
 	HarnessModel:     "openai/gpt-oss-20b",
 	RouteProfile:     "openrouter-route-a471cd87ae7df5b9-v1",
 	EmbeddingProfile: "dittobench-v7-openrouter-pplx-embed-v1-0.6b-768-v1",
-	FitCorpusSHA256:  "97cdfbef4d35ad662f4fd5370b317c1139e4bb2816b5e4bc75102ea332df9f02",
-	FitRuns:          59,
+	FitCorpusSHA256:  "bcd7873b07b30c3507be05e4824f33d2271ff516dbd18b5099b81f56c55503a8",
+	FitRuns:          60,
 
 	Prompt: PromptCoefficients{
-		ToolCases:    3921.201580795692,
-		MemoryCases:  3473.627636440864,
-		ExpectedHops: 991.8413512457437,
+		ToolCases:    3875.052389344767,
+		MemoryCases:  3507.468565467684,
+		ExpectedHops: 991.9364481961085,
 	},
 	Completion: CompletionCoefficients{
-		ToolCases:   397.12368134012087,
-		MemoryCases: 286.5711925069782,
+		ToolCases:   387.2803480578101,
+		MemoryCases: 293.8021812330898,
 	},
 	Embedding: EmbeddingCoefficients{
-		HaystackBytes: 0.08655198029424352,
-		HaystackPairs: 16.393821037269248,
-		Subjects:      14.70819597104064,
-		MemoryCases:   42.28166714736028,
+		HaystackBytes: 0.09577422529816222,
+		HaystackPairs: 15.3559604946073,
+		Subjects:      15.167049408570508,
+		MemoryCases:   42.39543642285236,
 	},
 	Anchors: map[string]Anchor{
-		"small":  {Prompt: 1.1024516818806795, Completion: 1.3164357636332678},
-		"medium": {Prompt: 1.1026553807521433, Completion: 1.020893262249707},
-		"full":   {Prompt: 1.0612010040680881, Completion: 1.1210285612350495},
+		"small":  {Prompt: 1.1019255681947657, Completion: 1.3148408259433466},
+		"medium": {Prompt: 1.1026996736027816, Completion: 1.0209993980588699},
+		"full":   {Prompt: 1.0680326998803338, Completion: 0.9756115103313987},
 	},
 
 	ResidualMeanFrac: map[string]float64{
-		"small": 0.0779, "medium": 0.0516, "full": 0.0419,
+		"small": 0.0779, "medium": 0.0516, "full": 0.0420,
 	},
 	ResidualMaxFrac: map[string]float64{
-		"small": 0.2715, "medium": 0.1094, "full": 0.0849,
+		"small": 0.2722, "medium": 0.1093, "full": 0.0859,
 	},
 	TransferP90CVMaxFrac: map[string]float64{
-		"small": 0.0089, "medium": 0.0657, "full": 0.0518,
+		"small": 0.0089, "medium": 0.0657, "full": 0.0291,
 	},
 
 	// Tolerances sit above the observed per-run residual maxima with margin

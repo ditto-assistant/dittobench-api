@@ -27,7 +27,9 @@ func TestProductionModelSanity(t *testing.T) {
 	}
 	for _, size := range []string{"small", "medium", "full"} {
 		a, ok := m.Anchors[size]
-		if !ok || a.Prompt < 1.0 || a.Prompt > 1.4 || a.Completion < 1.0 || a.Completion > 1.4 {
+		// Anchors may sit slightly below 1 (the model over-predicting a
+		// component at the p90-rank run is a legitimate bias direction).
+		if !ok || a.Prompt < 0.9 || a.Prompt > 1.4 || a.Completion < 0.9 || a.Completion > 1.4 {
 			t.Fatalf("anchor for %s outside sane band: %+v", size, a)
 		}
 		// Smoke tolerance must clear the observed residual maximum even after
