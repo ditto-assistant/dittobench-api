@@ -1,0 +1,95 @@
+# Depot CI Migration
+# Source: .github/workflows/ci.yml
+#
+# Changes made:
+# - Changed GitHub runs-on labels to their Depot equivalents
+
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  IMAGE: us-central1-docker.pkg.dev/ditto-app-dev/cloud-run-source-deploy/dittobench-api
+jobs:
+  test:
+    name: build · vet · test
+    runs-on: depot-ubuntu-latest # was: ubuntu-latest. Mapped standard GitHub runner to Depot equivalent.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test ./...
+  # Build the production image on every PR — WITHOUT pushing or deploying. The
+  # test job above builds with cgo enabled (the runner default), but the deployed
+  # image builds in Docker (currently a static cgo/musl build for tree-sitter); a
+  # Dockerfile/cgo break passes `go build` yet fails the image build, which used
+  # to silently skip the deploy (deploy `needs: test`, not the image build). This
+  # reproduces the deploy's image build so that break fails the PR instead. On
+  # push to main the deploy job builds+pushes the image anyway, so this is
+  # PR-only to avoid a redundant build there.
+  docker-build:
+    name: docker image builds (${{ matrix.target }})
+    if: github.event_name == 'pull_request'
+    runs-on: depot-ubuntu-latest # was: ubuntu-latest. Mapped standard GitHub runner to Depot equivalent.
+    strategy:
+      matrix:
+        target: [runtime, sandbox]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: ${{ matrix.target }}
+          push: false
+          load: false
+  # Auto-deploy to Cloud Run on merge to main. Authenticates via the org's
+  # Workload Identity Federation (same provider/SA the backend uses); no secrets.
+  deploy:
+    name: deploy to Cloud Run
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: depot-ubuntu-latest # was: ubuntu-latest. Mapped standard GitHub runner to Depot equivalent.
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: 'projects/22790208601/locations/global/workloadIdentityPools/github/providers/github-actions'
+          service_account: 'github-actions-deploy@ditto-app-dev.iam.gserviceaccount.com'
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+      - name: Authenticate Docker to Artifact Registry
+        run: gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ github.sha }}
+            ${{ env.IMAGE }}:latest
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy dittobench-api \
+            --image ${{ env.IMAGE }}:${{ github.sha }} \
+            --project ditto-app-dev --region us-central1 \
+            --allow-unauthenticated \
+            --memory 1Gi --cpu 1 --timeout 3600 \
+            --set-env-vars GENERATOR_MODEL=google/gemini-3.1-flash-lite,SCORER_MODEL=google/gemini-3.1-flash-lite \
+            --quiet
