@@ -84,38 +84,29 @@ OpenRouter endpoint discovery is not calibration. Provider-specific baselines
 and adaptive policy selection remain dark follow-up work; they cannot make a
 route score-eligible during the initial aggregate rollout.
 
-## v7 strict transform (difficulty release)
+## v7 token contract: quality-only (usage recorded, never scored)
 
-The v7 difficulty release (`docs/v7-difficulty.md`) keeps this reviewed
-aggregate manifest as the calibration identity anchor — none of the digests,
-route identity, or readiness gates above change — and layers a version-gated
-strict transform on top (`efficiency.ApplyForVersion`, bench_version >= 7):
+While the v7 difficulty suite is moving, repeatedly recalibrating an ABSOLUTE
+token budget is the wrong contract. Bench_version 7 therefore removes the
+token penalty from the composite entirely (`efficiency.ApplyForVersion`,
+bench_version >= 7):
 
-- **Interim budget scale.** The effective budget is
-  `manifest p90 total × V7TokenBudgetScale` (currently 2). The embedded
-  baselines were measured on the pre-hardening v7 datasets; the hardened
-  suite legitimately needs more tokens, so the budget is scaled rather than
-  silently taxing every run. The scale is sized from the measured v6 →
-  v7-hard growth (datagen v7-difficulty, averaged over seeds
-  123456789/101/987654321, small/medium/full): total case count ×1.0/×1.23/
-  ×1.22, per-case prompt bytes ×1.56/×1.50/×1.38, haystack pair bytes
-  ×0.99/×1.05/×1.12, artifact bytes ×1.02/×1.15/×1.19, plus one extra tool
-  hop on the new dependent link-chain / recovery categories. Compounded
-  starter-kit p90 growth is expected well under 2x, so 2 keeps honest
-  headroom while preserving the penalty's bite. The reported
-  `baseline_*_tokens` fields stay the manifest's reviewed values, so the
-  identity remains auditable.
-- **3x deeper waste penalty.** Beyond the scaled budget the same one-sided
-  rational curve applies with `maximum_penalty` 0.30 (floor 0.70) instead of
-  0.10, reported in-band as formula `v7-relay-token-waste-p90-strict-v1`.
-  Brute-force strategies (re-reading the whole haystack per question,
-  unbounded self-consistency sampling) lose up to a third of their composite.
+- The v7 composite is a pure function of answer/trajectory quality; token
+  usage never moves it. Every v7 scored report carries a neutral
+  `token_efficiency` record (`formula_version: "v7-quality-only-v1"`,
+  `decision_reason: "v7_quality_only_contract"`, multiplier 1) as the in-band
+  proof, alongside the full audited `details.token_usage` block and the
+  broker accounting record (chat + embedding usage, request counts, route
+  identity). Usage reporting stays first-class; scoring does not consume it.
+- v5/v6 continue through the unmodified `Apply` path byte-for-byte (10% max
+  penalty, one-sided rational curve past the reviewed p90 budget;
+  `TestApplyForVersionPreV7Identity`).
+- Efficiency incentives move to the platform layer as a bounded, epoch-frozen
+  RELATIVE bonus among quality-qualified submissions:
+  `docs/relative-efficiency-bonus-spec.md`.
 
-v5/v6 continue through the unmodified `Apply` path byte-for-byte
-(`TestApplyForVersionPreV7Identity`).
-
-**Recalibration obligation:** `V7TokenBudgetScale` is an explicit interim
-constant. Before platform rollout of the hardened suite, repeat the 60-dataset
-campaign above against the tagged v7-hard datagen release, embed the reviewed
-manifest, and retire the scale (set it to 1). The scale is deliberately a
-compile-time constant so this cannot drift silently in an operator env var.
+The calibration campaign above retains full value as audited reference
+evidence (provenance class: reviewed-measured) and as the fit corpus for the
+calibration-transfer research tooling
+(`docs/token-calibration-transfer.md`) — relevant again if a stable absolute
+budget or hard abuse ceiling is reinstated once difficulty settles.

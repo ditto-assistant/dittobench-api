@@ -348,11 +348,15 @@ Composite gate depths (all still pure functions of dataset + transcript):
   (it was observational, env-gated, in v5/v6), max penalty 40%, still keyed on
   the directional base-only-minus-transform-only brittleness signal.
 
-Token efficiency (scored runs): the reviewed aggregate GPT-OSS p90 manifest
-remains the calibration identity; v7 applies an interim ×2 budget scale (the
-hardened suite legitimately needs more tokens) with a 3x deeper waste penalty
-(max 10% → 30%), reported in-band as formula
-`v7-relay-token-waste-p90-strict-v1`. See `docs/token-efficiency-v7.md`.
+Token contract (scored runs): v7 is QUALITY-ONLY — audited token usage
+(relay-metered chat + embedding, request counts, route/model identity) is
+recorded first-class in the report (`details.token_usage` plus a neutral
+`token_efficiency` record, formula `v7-quality-only-v1`) but NEVER moves the
+v7 composite, so a deterministic validator scores the same artifact
+identically regardless of when it runs. v5/v6 keep the absolute 10%-max p90
+transform byte-for-byte. Efficiency incentives live in the platform layer as
+a capped, epoch-frozen relative bonus among quality-qualified submissions
+(`docs/relative-efficiency-bonus-spec.md`). See `docs/token-efficiency-v7.md`.
 
 Operational envelopes (client-side only, no wire change): per-case `/run`
 deadline 120s → 5m (`DITTOBENCH_V7_CASE_TIMEOUT`), `/seed` deadline ≥ 15m

@@ -84,10 +84,15 @@ splits ≥ the 4-pair minimum), so symmetric honest noise still gates 1.0 — th
 2026-07-18 calibration separation argument is unchanged; v7 simply stops
 shipping the gate dark.
 
-Token efficiency: see `docs/token-efficiency-v7.md` — the reviewed aggregate
-GPT-OSS manifest stays the identity anchor; v7 applies an interim ×2 budget
-scale (sized from the measured v6 → v7-hard dataset growth) with a 3x deeper
-penalty (`v7-relay-token-waste-p90-strict-v1`, max 30%).
+Token contract: v7 is QUALITY-ONLY. Token usage is audited and reported
+first-class (`details.token_usage`, broker accounting, and a neutral
+`token_efficiency` record with formula `v7-quality-only-v1`) but never moves
+the v7 composite — a deterministic validator scores the same artifact
+identically regardless of when it runs. v5/v6 keep their absolute 10%-max
+transform byte-for-byte. Efficiency incentives live in the platform layer as
+an epoch-frozen relative bonus (`docs/relative-efficiency-bonus-spec.md`);
+the reviewed aggregate GPT-OSS manifest remains the v7 identity/readiness
+anchor and the audited reference evidence.
 
 ## Operational envelopes for the ~10x datasets
 
@@ -148,18 +153,33 @@ Remaining pre-merge steps:
 
 1. Tag the datagen `v7-difficulty` release and swap the replace for the
    tagged `require` version (`go mod edit -dropreplace …` + version bump).
-2. Run the `cmd/tokenbaseline` 60-dataset recalibration campaign against the
-   tagged release; embed the reviewed manifest; retire `V7TokenBudgetScale`
-   (set to 1) and update `v7DatasetKnownVector`.
+2. Update `v7DatasetKnownVector` / the tokenbaseline vector pins to the
+   tagged release's v7 vector (the identity anchor for readiness and
+   metering trust; no token budget depends on it under the quality-only
+   contract).
+
+## Rollout sequence (token contract)
+
+1. The in-flight 60-run v7 calibration campaign completes and is archived as
+   audited reference evidence (provenance: reviewed-measured).
+2. The v7 dataset difficulty changes land (this branch + datagen).
+3. v7 ships with the token penalty DISABLED and usage recorded
+   (`v7-quality-only-v1`).
+4. The platform adds the epoch-frozen relative efficiency bonus once enough
+   qualifying submissions exist (`docs/relative-efficiency-bonus-spec.md`).
 
 ## Reviewer watch-items
 
-- `V7TokenBudgetScale = 2` is an explicit interim constant, sized from the
-  measured v6 → v7-hard dataset growth (see the constant's comment and
-  `docs/token-efficiency-v7.md`). Before platform rollout of v7-hard, re-run
-  `cmd/tokenbaseline` against the hardened datagen release and replace the
-  scale with a genuinely recalibrated, reviewed manifest (then set the scale
-  back to 1).
 - The v7 per-case fixtures here measure the validator-side levers; the memory
   half of the ~10x target rides the datagen v7-hard suite and should be
   re-measured end-to-end once that module is tagged.
+- The v7 strict order gate is harsh (a fully reversed multi-hop scores 0);
+  if honest-model calibration shows excessive false positives, soften to a
+  floor.
+- The transform audit is contract-enforced for v7 without the
+  champion-population false-positive calibration the v5 plan wanted before
+  enabling the env flag — deliberate (new contract), worth a calibration
+  pass.
+- The calibration-transfer tooling (`docs/token-calibration-transfer.md`) is
+  research-status and NOT wired into v7 scoring; its interpolation envelope
+  currently (correctly) refuses to derive budgets for the hardened suite.
