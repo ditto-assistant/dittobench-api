@@ -1397,23 +1397,30 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		resp, execution, runErr := runner.RunCaseWithTelemetry(ctx, harnessURL, c.ID, c.Prompt, tools, runner.CaseOptions{ToolEndpoint: toolEndpoint, BenchVersion: req.BenchVersion})
 		observed := toolSrv.Observed(c.ID)
 		toolTranscripts[i] = transcriptCase{CaseID: c.ID, Kind: protocol.KindTool, Response: resp, Observed: observed, Execution: execution}
-		cs := scorer.ScoreToolCaseObservedScope(c, resp, runErr == nil, observed, scope)
+		cs := scorer.ScoreToolCaseObservedForVersion(c, resp, runErr == nil, observed, scope, req.BenchVersion)
 		if datagen.IsResultUsage(c.Category) {
 			// Result-usage: trajectory + whether the answer carried the served
 			// needle value (a fabricated value only the executed tool could
 			// reveal). An answer carrying the served DECOY (a plausible number
 			// fished from the wrong tool's result) zeros the usage half too.
-			cs = scorer.ComposeResultUsageWithDecoy(cs, resp.FinalText,
+			// Under v7 the composition is multiplicative and a decoy zeroes the
+			// whole case (ComposeResultUsageForVersion).
+			cs = scorer.ComposeResultUsageForVersion(req.BenchVersion, cs, resp.FinalText,
 				toolFixtures[i].NeedleValue(), toolFixtures[i].DecoyValue())
 		} else {
 			cs = scorer.FinishTool(cs)
 		}
+		// v7: a fabricated self-report is itself costly — a non-empty
+		// self-reported trajectory that disagrees with the observed one halves
+		// the case. No-op pre-v7 and when nothing was observed.
+		cs = scorer.ApplyTrajectoryMismatch(req.BenchVersion, cs, resp.ToolCalls, observed)
 		switch {
 		case len(observed) > 0:
 			toolWasObserved[i] = true
 		case toolexec.Observable(c):
-			// Unobserved observable case: capped at 0.5 in practice, 0 when scored.
-			cs = scorer.CapUnobservedScope(cs, scope)
+			// Unobserved observable case: capped in practice (0.5 pre-v7, 0.05
+			// under v7), 0 when scored.
+			cs = scorer.CapUnobservedForVersion(cs, scope, req.BenchVersion)
 			toolWasCapped[i] = true
 		}
 		toolResults[i] = cs
@@ -1468,7 +1475,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	// user isolation cases can run in any wave.
 	if len(iso.SecondaryWave.Pairs) > 0 {
 		s.store.SetStage(runID, store.StatusSeeding, len(perCase), total)
-		if _, err := runner.Seed(ctx, harnessURL, iso.SecondaryWave); err != nil {
+		if _, err := runner.SeedForVersion(ctx, harnessURL, iso.SecondaryWave, req.BenchVersion); err != nil {
 			if req.BenchVersion >= protocol.BenchVersionV7 {
 				s.failV7Seeding(runID, "seeding secondary isolation graph failed: ", err)
 			} else {
@@ -1480,7 +1487,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	for w, wave := range memSuite.Waves {
 		if len(wave.Pairs) > 0 {
 			s.store.SetStage(runID, store.StatusSeeding, len(perCase), total)
-			if _, err := runner.Seed(ctx, harnessURL, wave); err != nil {
+			if _, err := runner.SeedForVersion(ctx, harnessURL, wave, req.BenchVersion); err != nil {
 				if req.BenchVersion >= protocol.BenchVersionV7 {
 					s.failV7Seeding(runID, fmt.Sprintf("seeding haystack wave %d failed: ", w), err)
 				} else {
@@ -1597,7 +1604,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		CappedToolCases:   cappedTool,
 		IsolationCases:    len(iso.Cases),
 		LifecycleCases:    memSuite.LifecycleCases,
-		ToolEfficiency:    scorer.ToolEfficiencyFactor(perCase),
+		ToolEfficiency:    scorer.ToolEfficiencyFactorForVersion(perCase, req.BenchVersion),
 		// Generation and grading are both deterministic and non-LLM; the only
 		// model in a run is the locked one the harness talks to.
 		Models: &protocol.ModelInfo{
@@ -1639,7 +1646,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		if found, ok := efficiency.LookupForVersion(req.BenchVersion, req.RunSize, tokenUsage); ok {
 			baseline = &found
 		}
-		decision := efficiency.Apply(report, tokenUsage, baseline)
+		decision := efficiency.ApplyForVersion(req.BenchVersion, report, tokenUsage, baseline)
 		decision.RawCompositeStderr = rawStderr
 		decision.AdjustedCompositeStderr = math.Round(rawStderr*decision.Multiplier*1e6) / 1e6
 		report.RawComposite = rawComposite
