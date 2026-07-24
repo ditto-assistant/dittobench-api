@@ -3,7 +3,7 @@ module github.com/ditto-assistant/dittobench-api
 go 1.23
 
 require (
-	github.com/ditto-assistant/dittobench-datagen v0.11.3-0.20260724115621-fe1835e69bff
+	github.com/ditto-assistant/dittobench-datagen v0.12.0
 	github.com/google/uuid v1.6.0
 	github.com/smacker/go-tree-sitter v0.0.0-20240827094217-dd81d9e9be82
 )
