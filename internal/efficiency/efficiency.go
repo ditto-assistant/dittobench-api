@@ -22,39 +22,29 @@ const (
 	MinMultiplier    = 1 - MaximumPenalty
 )
 
-// v7 strict token transform. The v7 difficulty release (~10x harder datagen
-// suite) keeps the reviewed aggregate GPT-OSS manifest as its calibration
-// identity anchor (ReadyForV7Production and the manifest digests are
-// unchanged), and layers two version-gated changes on top:
+// v7 quality-only contract. While the v7 difficulty suite is still moving,
+// repeatedly recalibrating an ABSOLUTE token budget is the wrong contract, so
+// bench_version 7 removes the token penalty from the composite entirely:
 //
-//   - V7TokenBudgetScale multiplies the manifest's p90 total-token baseline
-//     into the effective v7 budget. The embedded baselines were measured on
-//     the pre-hardening v7 datasets; the hardened suite legitimately needs
-//     more tokens, so the budget is scaled rather than silently taxing every
-//     run. The scale is sized from the measured v6 → v7-hard dataset growth
-//     (datagen v7-difficulty, avg over seeds 123456789/101/987654321):
-//     case count ×1.0–1.25, per-case prompt bytes ×1.4–1.6, haystack pair
-//     bytes ×1.0–1.2, plus the new dependent link-chain / recovery categories
-//     adding one extra tool hop on a minority of tool cases. Compounded,
-//     expected starter-kit p90 growth is well under 2x, so 2 keeps honest
-//     headroom while preserving the penalty's bite. The scale is an explicit,
-//     documented interim constant: it MUST be replaced by a true recalibrated
-//     manifest (cmd/tokenbaseline against the hardened datagen release)
-//     before platform rollout. See docs/token-efficiency-v7.md.
-//   - Waste beyond the scaled budget is penalized three times deeper
-//     (30% max vs 10%), so brute-force strategies — re-reading the whole
-//     haystack per question, unbounded self-consistency sampling — lose
-//     roughly a third of their composite instead of shrugging off a 10% cap.
+//   - The v7 composite is a pure function of answer/trajectory QUALITY. No
+//     token multiplier is applied, so a deterministic validator produces the
+//     same score for the same artifact regardless of when it runs.
+//   - Audited usage stays FIRST-CLASS: validators keep metering and reporting
+//     trusted chat + embedding usage (details.token_usage and the broker
+//     accounting record) alongside the quality score. ApplyForVersion emits a
+//     neutral TokenEfficiency record carrying the observed totals and the
+//     explicit decision reason below, so every v7 report shows the usage and
+//     shows that it did not move the composite.
+//   - Efficiency incentives move to the PLATFORM layer as a bounded,
+//     epoch-frozen RELATIVE bonus among quality-qualified submissions — see
+//     docs/relative-efficiency-bonus-spec.md. The validator's only job is to
+//     expose the audited inputs that make that computable.
 //
-// The transform stays one-sided and saturating; cheap answers still earn no
-// reward. Reported in-band via FormulaVersion/MaximumPenalty on the
-// TokenEfficiency record, so a consumer can always tell which contract
-// produced a report.
+// v5/v6 keep the historical absolute transform byte-for-byte (10% max
+// penalty, one-sided rational curve).
 const (
-	V7FormulaVersion   = "v7-relay-token-waste-p90-strict-v1"
-	V7MaximumPenalty   = 0.30
-	V7MinMultiplier    = 1 - V7MaximumPenalty
-	V7TokenBudgetScale = 2
+	V7QualityOnlyFormula = "v7-quality-only-v1"
+	V7QualityOnlyReason  = "v7_quality_only_contract"
 )
 
 type Baseline struct {
@@ -87,6 +77,79 @@ type Manifest struct {
 	StarterKitRevision string               `json:"starter_kit_revision"`
 	Calibration        []CalibrationDataset `json:"calibration_datasets"`
 	Baselines          []Baseline           `json:"baselines"`
+	// Derived is the calibration-transfer provenance record (additive,
+	// omitted for reviewed-measured manifests). A manifest carrying it was
+	// DERIVED by the offline token model (internal/tokenmodel) rather than
+	// measured by a live campaign. No scoring or readiness gate consumes
+	// derived manifests today — the class is reserved for a later, explicit
+	// platform policy decision; ReadyForV7Production rejects them fail-closed.
+	Derived *Derivation `json:"derived,omitempty"`
+}
+
+// Derivation records how a derived manifest was produced: the model identity,
+// the fit evidence behind it, the per-size transfer factors applied, and the
+// smoke-validation outcome (nil until a smoke pass runs).
+type Derivation struct {
+	Method               string                    `json:"method"`
+	ModelVersion         string                    `json:"model_version"`
+	SourceManifestSHA256 string                    `json:"source_manifest_sha256"`
+	SourceBenchVersion   int                       `json:"source_bench_version"`
+	FitCorpusSHA256      string                    `json:"fit_corpus_sha256"`
+	FitRuns              int                       `json:"fit_runs"`
+	FitResidualMeanPct   map[string]float64        `json:"fit_residual_mean_pct"`
+	FitResidualMaxPct    map[string]float64        `json:"fit_residual_max_pct"`
+	TransferP90CVMaxPct  map[string]float64        `json:"transfer_p90_cv_max_pct"`
+	TransferFactors      map[string]TransferFactor `json:"transfer_factors"`
+	Smoke                *SmokeRecord              `json:"smoke,omitempty"`
+}
+
+// TransferFactor is the per-run-size multiplicative correction applied to the
+// model's raw predictions (the measured-vs-predicted anchor at the p90 rank
+// of the fit corpus).
+type TransferFactor struct {
+	Prompt     float64 `json:"prompt"`
+	Completion float64 `json:"completion"`
+}
+
+// SmokeRecord is the outcome of validating a derived manifest against K live
+// runs. Passed is true only when every smoke run's measured chat total landed
+// inside the acceptance band (tolerance shrunk by the border zone — a
+// near-boundary result is rejected as inconclusive, fail-closed).
+type SmokeRecord struct {
+	Runs           []SmokeRun         `json:"runs"`
+	TolerancePct   map[string]float64 `json:"tolerance_pct"`
+	BorderZoneFrac float64            `json:"border_zone_frac"`
+	Passed         bool               `json:"passed"`
+}
+
+// SmokeRun is one live run's measured-vs-predicted comparison.
+type SmokeRun struct {
+	RunSize              string  `json:"run_size"`
+	Seed                 int64   `json:"seed"`
+	MeasuredTotalTokens  uint64  `json:"measured_total_tokens"`
+	PredictedTotalTokens uint64  `json:"predicted_total_tokens"`
+	ErrorPct             float64 `json:"error_pct"`
+}
+
+// Manifest provenance classes. ReviewedMeasured is the only class any gate
+// accepts today.
+const (
+	ProvenanceReviewedMeasured     = "reviewed-measured"
+	ProvenanceDerivedSmokeVerified = "derived-smoke-validated"
+	ProvenanceDerivedUnvalidated   = "derived-unvalidated"
+)
+
+// ManifestProvenance classifies a manifest's calibration provenance. The
+// platform can use this to apply per-class rollout policy; validator-side
+// gates currently accept only ProvenanceReviewedMeasured.
+func ManifestProvenance(m Manifest) string {
+	if m.Derived == nil {
+		return ProvenanceReviewedMeasured
+	}
+	if m.Derived.Smoke != nil && m.Derived.Smoke.Passed {
+		return ProvenanceDerivedSmokeVerified
+	}
+	return ProvenanceDerivedUnvalidated
 }
 
 // CalibrationRouteIdentity is the exact provider route contract covered by a
@@ -104,6 +167,10 @@ type CalibrationRouteIdentity struct {
 type CalibrationReadiness struct {
 	ManifestSHA256  string                     `json:"manifest_sha256"`
 	SupportedRoutes []CalibrationRouteIdentity `json:"supported_routes"`
+	// Provenance is the manifest's calibration provenance class (additive;
+	// see ManifestProvenance). The embedded production manifest is always
+	// reviewed-measured today.
+	Provenance string `json:"provenance,omitempty"`
 }
 
 //go:embed baselines_v5.json
@@ -195,6 +262,7 @@ func v7CalibrationReadiness(manifest Manifest, rawManifest []byte) CalibrationRe
 	})
 	sum := sha256.Sum256(rawManifest)
 	readiness.ManifestSHA256 = fmt.Sprintf("%x", sum[:])
+	readiness.Provenance = ManifestProvenance(manifest)
 	return readiness
 }
 
@@ -252,8 +320,14 @@ const (
 
 // ReadyForV7Production validates the initial aggregate GPT-OSS calibration
 // contract. Provider-specific manifests remain dark until adaptive routing is
-// separately reviewed and enabled.
+// separately reviewed and enabled. Derived manifests (calibration-transfer
+// provenance) are rejected fail-closed: the derived+smoke-validated class is
+// reserved for a later explicit platform policy, and today only a
+// reviewed-measured campaign may enable v7 identity/readiness.
 func ReadyForV7Production(manifest Manifest) bool {
+	if manifest.Derived != nil {
+		return false
+	}
 	if !manifest.ScoringEnabled || manifest.BenchVersion != protocol.BenchVersionV7 ||
 		manifest.StarterKitRevision != v7StarterKitRevision ||
 		manifest.DatasetKnownVector != v7DatasetKnownVector ||
@@ -313,6 +387,11 @@ func baselineID(benchVersion int, b Baseline) string {
 	sum := sha256.Sum256([]byte(canonical))
 	return fmt.Sprintf("v%d-starter-p90-%x", benchVersion, sum[:8])
 }
+
+// BaselineID is the canonical content-derived baseline id (exported for the
+// calibration-transfer tooling, which must mint ids the same way the measured
+// pipeline does).
+func BaselineID(benchVersion int, b Baseline) string { return baselineID(benchVersion, b) }
 
 func validV7CalibrationDatasets(datasets []CalibrationDataset) bool {
 	if len(datasets) != 60 {
@@ -382,31 +461,14 @@ func validBaseline(b Baseline) bool {
 // Apply returns the complete audit record and mutates no report. Callers assign
 // AdjustedComposite to ScoreReport.Composite only for bench v5.
 func Apply(raw protocol.ScoreReport, usage protocol.TokenUsage, baseline *Baseline) protocol.TokenEfficiency {
-	return applyWith(raw, usage, baseline, FormulaVersion, MaximumPenalty, 1)
-}
-
-// ApplyForVersion selects the token transform for a bench version. v5/v6 are
-// byte-identical to Apply; v7 applies the strict contract (scaled interim
-// budget, 30% max penalty, its own formula version string). The budgetScale
-// multiplies only the effective budget the excess ratio is computed against;
-// the reported Baseline*Tokens fields stay the manifest's reviewed values so
-// the calibration identity remains auditable.
-func ApplyForVersion(benchVersion int, raw protocol.ScoreReport, usage protocol.TokenUsage, baseline *Baseline) protocol.TokenEfficiency {
-	if benchVersion >= protocol.BenchVersionV7 {
-		return applyWith(raw, usage, baseline, V7FormulaVersion, V7MaximumPenalty, V7TokenBudgetScale)
-	}
-	return Apply(raw, usage, baseline)
-}
-
-func applyWith(raw protocol.ScoreReport, usage protocol.TokenUsage, baseline *Baseline, formulaVersion string, maximumPenalty float64, budgetScale uint64) protocol.TokenEfficiency {
 	result := protocol.TokenEfficiency{
-		FormulaVersion:           formulaVersion,
+		FormulaVersion:           FormulaVersion,
 		BudgetPercentile:         BudgetPercentile,
 		ObservedPromptTokens:     usage.PromptTokens,
 		ObservedCompletionTokens: usage.CompletionTokens,
 		ObservedTotalTokens:      usage.TotalTokens,
-		MaximumPenalty:           maximumPenalty,
-		MinimumMultiplier:        1 - maximumPenalty,
+		MaximumPenalty:           MaximumPenalty,
+		MinimumMultiplier:        MinMultiplier,
 		Multiplier:               1,
 		RawComposite:             raw.Composite,
 		AdjustedComposite:        raw.Composite,
@@ -425,31 +487,48 @@ func applyWith(raw protocol.ScoreReport, usage protocol.TokenUsage, baseline *Ba
 	result.BaselinePromptTokens = baseline.PromptTokens
 	result.BaselineCompletionTokens = baseline.CompletionTokens
 	result.BaselineTotalTokens = baseline.TotalTokens
-	if budgetScale < 1 {
-		budgetScale = 1
-	}
-	budget := baseline.TotalTokens * budgetScale
-	if usage.TotalTokens <= budget {
+	if usage.TotalTokens <= baseline.TotalTokens {
 		return result
 	}
 
-	ratio := float64(usage.TotalTokens) / float64(budget)
+	ratio := float64(usage.TotalTokens) / float64(baseline.TotalTokens)
 	result.ExcessRatio = ratio - 1
 	// A one-sided rational curve is neutral through the generous p90 budget,
-	// then approaches (but never crosses) the minimum-multiplier floor as waste
-	// grows.
-	result.Multiplier = 1 - maximumPenalty*(result.ExcessRatio/(1+result.ExcessRatio))
+	// then approaches (but never crosses) the 0.90 floor as waste grows.
+	result.Multiplier = 1 - MaximumPenalty*(result.ExcessRatio/(1+result.ExcessRatio))
 	if math.IsNaN(result.Multiplier) || math.IsInf(result.Multiplier, 0) {
 		result.Multiplier = 1
 		result.ExcessRatio = 0
 		result.DecisionReason = "token_transform_unavailable"
 		return result
 	}
-	result.Multiplier = math.Max(result.MinimumMultiplier, result.Multiplier)
+	result.Multiplier = math.Max(MinMultiplier, result.Multiplier)
 	result.PenaltyApplied = true
 	result.DecisionReason = "above_budget"
 	result.AdjustedComposite = round6(raw.Composite * result.Multiplier)
 	return result
+}
+
+// ApplyForVersion selects the token contract for a bench version. v5/v6 are
+// byte-identical to Apply. v7 is the QUALITY-ONLY contract: the returned
+// record is always neutral (multiplier 1, composite untouched) and exists
+// purely to carry the audited observed usage and the explicit decision reason
+// into the report — token usage is recorded, never scored, for v7.
+func ApplyForVersion(benchVersion int, raw protocol.ScoreReport, usage protocol.TokenUsage, baseline *Baseline) protocol.TokenEfficiency {
+	if benchVersion >= protocol.BenchVersionV7 {
+		return protocol.TokenEfficiency{
+			FormulaVersion:           V7QualityOnlyFormula,
+			ObservedPromptTokens:     usage.PromptTokens,
+			ObservedCompletionTokens: usage.CompletionTokens,
+			ObservedTotalTokens:      usage.TotalTokens,
+			MinimumMultiplier:        1,
+			Multiplier:               1,
+			RawComposite:             raw.Composite,
+			AdjustedComposite:        raw.Composite,
+			DecisionReason:           V7QualityOnlyReason,
+		}
+	}
+	return Apply(raw, usage, baseline)
 }
 
 // ValidUsage applies the same completeness and arithmetic checks to scoring

@@ -1639,21 +1639,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		report.Details.CalibrationBrier = brier
 		report.Details.CalibrationN = cn
 	}
-	if req.BenchVersion >= protocol.BenchVersionV5 {
-		rawComposite := report.Composite
-		rawStderr := report.CompositeStderr
-		var baseline *efficiency.Baseline
-		if found, ok := efficiency.LookupForVersion(req.BenchVersion, req.RunSize, tokenUsage); ok {
-			baseline = &found
-		}
-		decision := efficiency.ApplyForVersion(req.BenchVersion, report, tokenUsage, baseline)
-		decision.RawCompositeStderr = rawStderr
-		decision.AdjustedCompositeStderr = math.Round(rawStderr*decision.Multiplier*1e6) / 1e6
-		report.RawComposite = rawComposite
-		report.Composite = decision.AdjustedComposite
-		report.CompositeStderr = decision.AdjustedCompositeStderr
-		report.Details.TokenEfficiency = &decision
-	}
+	report = applyTokenContract(report, req.BenchVersion, req.RunSize, tokenUsage)
 	if injections > 0 {
 		log.Printf("run %s: %d injection-compliance case(s) flagged", runID, injections)
 	}
@@ -1691,6 +1677,36 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	s.store.Finish(runID, report)
 	log.Printf("run %s done: bench_version=%d composite=%.3f tool_mean=%.3f memory_mean=%.3f observed=%d capped=%d",
 		runID, req.BenchVersion, report.Composite, report.ToolMean, report.MemoryMean, observedTool, cappedTool)
+}
+
+// applyTokenContract applies the bench version's token contract to a scored
+// report:
+//
+//   - v5/v6: the absolute p90 token-waste transform (efficiency.Apply) may
+//     discount the composite, exactly as historically.
+//   - v7 (quality-only contract): the composite is NEVER moved by token
+//     usage. A neutral TokenEfficiency record still lands in the report so
+//     the audited observed usage is first-class alongside the quality score
+//     (details.token_usage carries the full metered block independently).
+//   - pre-v5: untouched.
+func applyTokenContract(report protocol.ScoreReport, benchVersion int, runSize string, tokenUsage protocol.TokenUsage) protocol.ScoreReport {
+	if benchVersion < protocol.BenchVersionV5 {
+		return report
+	}
+	rawComposite := report.Composite
+	rawStderr := report.CompositeStderr
+	var baseline *efficiency.Baseline
+	if found, ok := efficiency.LookupForVersion(benchVersion, runSize, tokenUsage); ok {
+		baseline = &found
+	}
+	decision := efficiency.ApplyForVersion(benchVersion, report, tokenUsage, baseline)
+	decision.RawCompositeStderr = rawStderr
+	decision.AdjustedCompositeStderr = math.Round(rawStderr*decision.Multiplier*1e6) / 1e6
+	report.RawComposite = rawComposite
+	report.Composite = decision.AdjustedComposite
+	report.CompositeStderr = decision.AdjustedCompositeStderr
+	report.Details.TokenEfficiency = &decision
+	return report
 }
 
 func validateBenchVersionResult(requested, artifactVersion int, details *protocol.RunDetails) error {
