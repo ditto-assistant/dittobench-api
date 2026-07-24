@@ -851,6 +851,11 @@ func (b *inferenceBroker) handleEmbedding(w http.ResponseWriter, r *http.Request
 		decoded, err = b.forwardLocalEmbedding(requestContext, payload.Input)
 	}
 	if err != nil {
+		if benchVersion >= 7 {
+			session.mu.Lock()
+			session.failures++
+			session.mu.Unlock()
+		}
 		writeError(w, http.StatusBadGateway, "embedding service unavailable")
 		return
 	}
@@ -1094,7 +1099,14 @@ func (b *inferenceBroker) proxy(w http.ResponseWriter, r *http.Request, session 
 	var responseBody []byte
 	var responseStatus int
 	var totalLatency uint64
-	maxAttempts := b.retry.maxAttempts
+	// The platform owns provider retries and fallback for ticket-scoped v7
+	// inference. Repeating the same logical request here would multiply provider
+	// work and split attempt accounting across two services. Frozen legacy relay
+	// sessions retain their existing bounded retry policy.
+	maxAttempts := 1
+	if legacyGateway != "" {
+		maxAttempts = b.retry.maxAttempts
+	}
 	if maxAttempts < 1 {
 		maxAttempts = 1
 	}

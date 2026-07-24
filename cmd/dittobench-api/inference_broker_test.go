@@ -110,6 +110,49 @@ func TestLegacyBrokerSessionsRunConcurrentlyWithIsolatedAccounting(t *testing.T)
 	}
 }
 
+func TestLegacyBrokerRetainsBoundedRelayRetries(t *testing.T) {
+	requestCount := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requestCount++
+		if requestCount < 3 {
+			http.Error(w, "transient", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"usage":{"prompt_tokens":3,"completion_tokens":4},"choices":[{"message":{"content":"OK"}}]}`))
+	}))
+	defer upstream.Close()
+
+	broker := newInferenceBroker(1)
+	broker.sleep = func(context.Context, time.Duration) error { return nil }
+	runID := uuid.NewString()
+	id, err := broker.prepareLegacy(runID, protocol.BenchVersionV6, upstream.URL, relayHealthSnapshot{
+		Provider: "openrouter", ProfileRevision: llm.OpenRouterRelayProfileRevision,
+		Model: llm.LockedHarnessModel,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !broker.bindSource(id, runID, "192.0.2.42") {
+		t.Fatal("failed to bind legacy session")
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/inference/chat/completions", bytes.NewBufferString(`{"model":"qwen/qwen3-32b"}`))
+	request.RemoteAddr = "192.0.2.42:4321"
+	request.SetPathValue("rest", "chat/completions")
+	recorder := httptest.NewRecorder()
+	broker.handle(recorder, request)
+	if recorder.Code != http.StatusOK || requestCount != 3 {
+		t.Fatalf("legacy retry status=%d attempts=%d body=%s", recorder.Code, requestCount, recorder.Body.String())
+	}
+	snapshot, err := broker.snapshot(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.UpstreamAttempts != 3 || snapshot.InfrastructureFailures != 0 || snapshot.Successes != 1 {
+		t.Fatalf("legacy retry accounting = %+v", snapshot)
+	}
+}
+
 func TestLegacyBrokerRejectsUnreviewedRelayIdentity(t *testing.T) {
 	broker := newInferenceBroker(1)
 	if _, err := broker.prepareLegacy(uuid.NewString(), protocol.BenchVersionV6, "http://127.0.0.1:11434", relayHealthSnapshot{
@@ -256,6 +299,42 @@ func TestV7EmbeddingBrokerUsesSignedLockedPlatformRoute(t *testing.T) {
 	}
 	if calls.Load() != 1 {
 		t.Fatalf("hosted embedding calls=%d, want 1", calls.Load())
+	}
+}
+
+func TestV7EmbeddingBrokerCountsPlatformFailureAsInfrastructure(t *testing.T) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer upstream.Close()
+
+	broker := newInferenceBroker(1)
+	proxyURL := configureBrokerUpstream(broker, upstream)
+	prepared := prepareBrokerSession(t, broker)
+	activateBrokerSessionFor(t, broker, prepared, proxyURL, "openrouter", "openrouter-route-0123456789abcdef-v1", llm.V7HarnessModel)
+	runID := claimAndBindBrokerSession(t, broker, prepared["session_id"], "192.0.2.71", protocol.BenchVersionV7)
+	if !broker.beginEmbeddingPhase(prepared["session_id"], runID) {
+		t.Fatal("failed to admit v7 embedding phase")
+	}
+	defer broker.endEmbeddingPhase(prepared["session_id"], runID)
+	start, err := broker.snapshot(prepared["session_id"])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	response := callEmbedding(broker, "192.0.2.71", "hosted text")
+	if response.Code != http.StatusBadGateway {
+		t.Fatalf("hosted embedding status=%d body=%s", response.Code, response.Body.String())
+	}
+	snapshot, err := broker.snapshot(prepared["session_id"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.InfrastructureFailures != 1 {
+		t.Fatalf("hosted embedding failure accounting = %+v", snapshot)
+	}
+	if err := relayDegradedSince(start, snapshot); err == nil {
+		t.Fatal("hosted embedding infrastructure failure did not fail scoring closed")
 	}
 }
 
@@ -898,20 +977,14 @@ func TestInferenceBrokerTrustedProbeUsesControlPlaneSession(t *testing.T) {
 	}
 }
 
-func TestInferenceBrokerRetriesTransientProviderDenial(t *testing.T) {
+func TestV7InferenceBrokerDelegatesProviderRetryToPlatform(t *testing.T) {
 	const profile = "openrouter-route-0123456789abcdef-v1"
 	requestCount := 0
 	var nonces []string
 	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestCount++
 		nonces = append(nonces, r.Header.Get("X-Ditto-Nonce"))
-		if requestCount <= 3 {
-			statuses := []int{http.StatusRequestTimeout, http.StatusTooManyRequests, http.StatusServiceUnavailable}
-			http.Error(w, "transient", statuses[requestCount-1])
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"usage":{"prompt_tokens":2,"completion_tokens":1},"choices":[{"message":{"content":"OK"}}]}`))
+		http.Error(w, "transient", http.StatusServiceUnavailable)
 	}))
 	defer upstream.Close()
 
@@ -931,18 +1004,14 @@ func TestInferenceBrokerRetriesTransientProviderDenial(t *testing.T) {
 	request.SetPathValue("rest", "v1/chat/completions")
 	recorder := httptest.NewRecorder()
 	broker.handle(recorder, request)
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("request status = %d, want 200: %s", recorder.Code, recorder.Body.String())
+	if recorder.Code != http.StatusBadGateway {
+		t.Fatalf("request status = %d, want 502: %s", recorder.Code, recorder.Body.String())
 	}
-	if requestCount != 4 {
-		t.Fatalf("retry attempts=%d, want 4", requestCount)
+	if requestCount != 1 {
+		t.Fatalf("platform deliveries=%d, want 1", requestCount)
 	}
-	seen := make(map[string]bool, len(nonces))
-	for _, nonce := range nonces {
-		if nonce == "" || seen[nonce] {
-			t.Fatalf("retry did not use independently signed attempts: nonces=%v", nonces)
-		}
-		seen[nonce] = true
+	if len(nonces) != 1 || nonces[0] == "" {
+		t.Fatalf("platform delivery was not independently signed: nonces=%v", nonces)
 	}
 
 	end, err := broker.snapshot(prepared["session_id"])
@@ -953,18 +1022,18 @@ func TestInferenceBrokerRetriesTransientProviderDenial(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if usage.Requests != 1 || usage.Successes != 1 || usage.UsageAvailable != 1 || usage.UsageUnavailable != 0 || usage.Status != "complete" {
-		t.Fatalf("recovered provider result accounting = %+v", usage)
+	if usage.Requests != 1 || usage.Successes != 0 || usage.UsageAvailable != 0 {
+		t.Fatalf("provider failure accounting = %+v", usage)
 	}
 	execution, err := relayExecutionSince(start, end)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if execution.UpstreamAttempts != 4 || execution.Retries != 3 || execution.InfrastructureFailures != 0 {
-		t.Fatalf("recovered provider execution accounting = %+v", execution)
+	if execution.UpstreamAttempts != 1 || execution.Retries != 0 || execution.InfrastructureFailures != 1 {
+		t.Fatalf("provider execution accounting = %+v", execution)
 	}
-	if err := requireCompleteV7Usage(protocol.BenchVersionV7, usage); err != nil {
-		t.Fatalf("v7 rejected a fully accounted recovered request: %v", err)
+	if err := requireCompleteV7Usage(protocol.BenchVersionV7, usage); err == nil {
+		t.Fatal("v7 accepted a run with a provider infrastructure failure")
 	}
 }
 
@@ -993,7 +1062,7 @@ func TestInferenceBrokerRejectsExhaustedTransientFailures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.Requests != 1 || snapshot.Successes != 0 || snapshot.UpstreamAttempts != uint64(broker.retry.maxAttempts) || snapshot.InfrastructureFailures != 1 {
+	if snapshot.Requests != 1 || snapshot.Successes != 0 || snapshot.UpstreamAttempts != 1 || snapshot.InfrastructureFailures != 1 {
 		t.Fatalf("exhausted provider accounting = %+v", snapshot)
 	}
 }

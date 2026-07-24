@@ -385,3 +385,29 @@ func (s *server) failRelayUnavailable(runID string, err error) {
 		Retryable: true,
 	})
 }
+
+func trustedEmbeddingInfrastructureFailure(err error) *store.Failure {
+	if err == nil {
+		return nil
+	}
+	message := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"embedding service unavailable",
+		"embedding platform returned",
+		"ticket embedding probe failed",
+	} {
+		if strings.Contains(message, marker) {
+			return &store.Failure{
+				Kind:      "validator_infrastructure",
+				Code:      "embedding_provider_unavailable",
+				Retryable: true,
+			}
+		}
+	}
+	return nil
+}
+
+func (s *server) failV7Seeding(runID, message string, err error) {
+	failure := trustedEmbeddingInfrastructureFailure(err)
+	s.store.FailWith(runID, message+err.Error(), failure)
+}
