@@ -424,7 +424,7 @@ func TestMemoryAdmissionCapacityOneQueuesThenAdmitsSibling(t *testing.T) {
 	firstID, firstRun := embeddingBrokerSession(t, broker, "192.0.2.66")
 	secondID, secondRun := embeddingBrokerSession(t, broker, "192.0.2.67")
 	server := &server{memorySlots: make(chan struct{}, 1), broker: broker}
-	endFirst, ok := server.beginMemoryPhase(context.Background(), firstID, firstRun)
+	endFirst, ok := server.beginMemoryPhase(context.Background(), firstID, firstRun, true)
 	if !ok {
 		t.Fatal("capacity-one first phase was not admitted")
 	}
@@ -437,7 +437,7 @@ func TestMemoryAdmissionCapacityOneQueuesThenAdmitsSibling(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	go func() {
-		end, admittedOK := server.beginMemoryPhase(ctx, secondID, secondRun)
+		end, admittedOK := server.beginMemoryPhase(ctx, secondID, secondRun, true)
 		admitted <- admission{end: end, ok: admittedOK}
 	}()
 	select {
@@ -455,6 +455,26 @@ func TestMemoryAdmissionCapacityOneQueuesThenAdmitsSibling(t *testing.T) {
 		result.end()
 	case <-time.After(time.Second):
 		t.Fatal("sibling did not acquire released memory capacity")
+	}
+}
+
+func TestHostedMemoryAdmissionDoesNotUseLocalOllamaQueue(t *testing.T) {
+	broker := newInferenceBroker(2, 1)
+	firstID, firstRun := embeddingBrokerSession(t, broker, "192.0.2.76")
+	secondID, secondRun := embeddingBrokerSession(t, broker, "192.0.2.77")
+	server := &server{memorySlots: make(chan struct{}, 1), broker: broker}
+	endFirst, ok := server.beginMemoryPhase(context.Background(), firstID, firstRun, false)
+	if !ok {
+		t.Fatal("first hosted phase was not admitted")
+	}
+	defer endFirst()
+	endSecond, ok := server.beginMemoryPhase(context.Background(), secondID, secondRun, false)
+	if !ok {
+		t.Fatal("second hosted phase queued behind the local Ollama lane")
+	}
+	endSecond()
+	if len(server.memorySlots) != 0 {
+		t.Fatal("hosted phases consumed the local Ollama admission slot")
 	}
 }
 
@@ -488,7 +508,7 @@ func TestMemoryAdmissionDrainsHostileInFlightEmbeddingBeforeSibling(t *testing.T
 	firstID, firstRun := embeddingBrokerSession(t, broker, "192.0.2.68")
 	secondID, secondRun := embeddingBrokerSession(t, broker, "192.0.2.69")
 	server := &server{memorySlots: make(chan struct{}, 1), broker: broker}
-	endFirst, ok := server.beginMemoryPhase(context.Background(), firstID, firstRun)
+	endFirst, ok := server.beginMemoryPhase(context.Background(), firstID, firstRun, true)
 	if !ok {
 		t.Fatal("capacity-one first phase was not admitted")
 	}
@@ -511,7 +531,7 @@ func TestMemoryAdmissionDrainsHostileInFlightEmbeddingBeforeSibling(t *testing.T
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	go func() {
-		end, admittedOK := server.beginMemoryPhase(ctx, secondID, secondRun)
+		end, admittedOK := server.beginMemoryPhase(ctx, secondID, secondRun, true)
 		admitted <- admission{end: end, ok: admittedOK}
 	}()
 	select {
