@@ -274,14 +274,14 @@ func TestReadRelayHealthRejectsStaticLegacyHealth(t *testing.T) {
 
 func TestV5RequiresTrustedTokenAccountingWhileLegacyAccountingRemainsReadable(t *testing.T) {
 	legacy := relayHealthSnapshot{AccountingVersion: 1, Status: "ok"}
-	if err := requireTokenAccounting(legacy, protocol.BenchVersionV5, "full", false); err == nil {
+	if err := requireTokenAccounting(legacy, protocol.BenchVersionV5, "full"); err == nil {
 		t.Fatal("v5 accepted relay accounting v1")
 	}
 	metered := relayHealthSnapshot{
 		AccountingVersion: 2, Status: "ok", Provider: "p",
 		ProfileRevision: "r", Model: "m",
 	}
-	if err := requireTokenAccounting(metered, protocol.BenchVersionV5, "full", false); err != nil {
+	if err := requireTokenAccounting(metered, protocol.BenchVersionV5, "full"); err != nil {
 		t.Fatalf("v5 rejected trusted accounting: %v", err)
 	}
 
@@ -294,7 +294,12 @@ func TestV5RequiresTrustedTokenAccountingWhileLegacyAccountingRemainsReadable(t 
 	}
 }
 
-func TestV7RequiresExactModelProfileAndReviewedBaseline(t *testing.T) {
+// Under the v7 QUALITY-ONLY contract the admission gate still fail-closes on
+// the locked model identity and a well-formed versioned route profile, but it
+// no longer requires a reviewed token baseline: token usage never moves the v7
+// composite, so any correct route with trusted metered accounting is admitted
+// and scores quality-only.
+func TestV7RequiresExactModelProfileAndAdmitsQualityOnly(t *testing.T) {
 	snapshot := relayHealthSnapshot{
 		AccountingVersion: 2,
 		Status:            "ok",
@@ -305,24 +310,26 @@ func TestV7RequiresExactModelProfileAndReviewedBaseline(t *testing.T) {
 
 	wrongModel := snapshot
 	wrongModel.Model = llm.LockedHarnessModel
-	if err := requireTokenAccounting(wrongModel, protocol.BenchVersionV7, "full", false); err == nil || !strings.Contains(err.Error(), "model") {
+	if err := requireTokenAccounting(wrongModel, protocol.BenchVersionV7, "full"); err == nil || !strings.Contains(err.Error(), "model") {
 		t.Fatalf("v7 accepted wrong model: %v", err)
 	}
 
 	wrongProfile := snapshot
 	wrongProfile.ProfileRevision = "profile-v1"
-	if err := requireTokenAccounting(wrongProfile, protocol.BenchVersionV7, "full", false); err == nil || !strings.Contains(err.Error(), "profile") {
+	if err := requireTokenAccounting(wrongProfile, protocol.BenchVersionV7, "full"); err == nil || !strings.Contains(err.Error(), "profile") {
 		t.Fatalf("v7 accepted unversioned profile: %v", err)
 	}
 
-	if err := requireTokenAccounting(snapshot, protocol.BenchVersionV7, "full", false); err == nil || !strings.Contains(err.Error(), "reviewed") {
-		t.Fatalf("v7 must remain dark without a reviewed baseline: %v", err)
+	// No reviewed baseline exists for this route; quality-only admits it anyway.
+	if err := requireTokenAccounting(snapshot, protocol.BenchVersionV7, "full"); err != nil {
+		t.Fatalf("v7 quality-only admission rejected a correct route identity: %v", err)
 	}
-	if err := requireTokenAccounting(snapshot, protocol.BenchVersionV7, "full", true); err != nil {
-		t.Fatalf("v7 calibration rejected exact unreviewed route identity: %v", err)
-	}
-	if err := requireTokenAccounting(wrongModel, protocol.BenchVersionV7, "full", true); err == nil || !strings.Contains(err.Error(), "model") {
-		t.Fatalf("v7 calibration accepted wrong model: %v", err)
+
+	// Untrusted accounting and missing provider identity still fail closed.
+	untrusted := snapshot
+	untrusted.AccountingVersion = 1
+	if err := requireTokenAccounting(untrusted, protocol.BenchVersionV7, "full"); err == nil || !strings.Contains(err.Error(), "accounting") {
+		t.Fatalf("v7 accepted untrusted accounting: %v", err)
 	}
 }
 

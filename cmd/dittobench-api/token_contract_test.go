@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/ditto-assistant/dittobench-api/internal/efficiency"
+	"github.com/ditto-assistant/dittobench-api/internal/llm"
 	"github.com/ditto-assistant/dittobench-datagen/protocol"
 )
 
@@ -52,5 +53,66 @@ func TestApplyTokenContractV7QualityOnly(t *testing.T) {
 	v3 := applyTokenContract(mkReport(), protocol.BenchVersionV3, "full", hugeUsage)
 	if v3.Composite != 0.8 || v3.Details.TokenEfficiency != nil {
 		t.Fatalf("pre-v5 reports must not carry a token transform: %+v", v3)
+	}
+}
+
+// End-to-end reconciliation proof: in a SAFE production config (SSRF guard on,
+// allowPrivate=false) with the deliberate v7 activation switch flipped, a v7 run
+// on a correct locked model + versioned route with trusted metered accounting —
+// but NO reviewed token baseline for that route — is admitted at every gate and
+// still produces a quality-only composite (usage recorded, multiplier 1).
+func TestV7AdmitsAndScoresQualityOnlyInSafeProdConfig(t *testing.T) {
+	s := &server{
+		allowPrivate:    false, // SSRF guard ON — safe production config
+		enableV7:        true,  // deliberate activation switch (not a dev/SSRF flag)
+		softwareVersion: "0.10.0", sourceRevision: testSourceRevision,
+	}
+
+	// Activation gate admits v7.
+	if msg := s.benchVersionAdmitted(protocol.BenchVersionV7); msg != "" {
+		t.Fatalf("activated v7 must be admitted at submit: %q", msg)
+	}
+
+	// A route with NO reviewed baseline: correct model, well-formed versioned
+	// route, trusted accounting. The relay identity gate admits it.
+	snapshot := relayHealthSnapshot{
+		AccountingVersion: 2, Status: "ok",
+		Provider: "groq", ProfileRevision: "openrouter-route-0123456789abcdef-v1",
+		Model: llm.V7HarnessModel,
+	}
+	if _, ok := efficiency.LookupForVersion(protocol.BenchVersionV7, "full", protocol.TokenUsage{
+		Provider: snapshot.Provider, ProfileRevision: snapshot.ProfileRevision, Model: snapshot.Model,
+	}); ok {
+		t.Fatal("test route must have no reviewed baseline, to prove none is required")
+	}
+	if err := requireTokenAccounting(snapshot, protocol.BenchVersionV7, "full"); err != nil {
+		t.Fatalf("safe-prod v7 admission rejected a correct route without a baseline: %v", err)
+	}
+
+	// The scored composite is quality-only: extreme usage never moves it.
+	usage := protocol.TokenUsage{
+		Status: "complete", Successes: 10, UsageAvailable: 10,
+		PromptTokens: 40_000_000, CompletionTokens: 2_000_000, TotalTokens: 42_000_000,
+		Provider: snapshot.Provider, ProfileRevision: snapshot.ProfileRevision, Model: snapshot.Model,
+	}
+	report := protocol.ScoreReport{
+		Composite: 0.73, CompositeStderr: 0.01,
+		Details: &protocol.RunDetails{BenchVersion: 7, RunSize: "full", TokenUsage: &usage},
+	}
+	got := applyTokenContract(report, protocol.BenchVersionV7, "full", usage)
+	if got.Composite != 0.73 || got.RawComposite != 0.73 {
+		t.Fatalf("quality-only composite moved under a baseline-less route: %+v", got)
+	}
+	te := got.Details.TokenEfficiency
+	if te == nil || te.Multiplier != 1 || te.PenaltyApplied ||
+		te.FormulaVersion != efficiency.V7QualityOnlyFormula ||
+		te.ObservedTotalTokens != usage.TotalTokens {
+		t.Fatalf("expected neutral quality-only audit record: %+v", te)
+	}
+
+	// Without the activation switch the same run is refused at submit.
+	dark := &server{allowPrivate: false, softwareVersion: "0.10.0", sourceRevision: testSourceRevision}
+	if msg := dark.benchVersionAdmitted(protocol.BenchVersionV7); msg == "" {
+		t.Fatal("v7 must be refused at submit without the activation switch")
 	}
 }

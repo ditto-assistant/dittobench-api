@@ -16,10 +16,20 @@ func testReport(composite float64) protocol.ScoreReport {
 	return protocol.ScoreReport{Composite: composite, ToolMean: 0.8, MemoryMean: 0.8}
 }
 
-func TestV7CalibrationReadinessStaysDarkUntilHostedCampaign(t *testing.T) {
+// Under the quality-only contract the embedded v7 manifest (scoring_enabled=
+// false, permanent) is a live, valid readiness with the exact aggregate route.
+func TestV7CalibrationReadinessReflectsEmbeddedQualityOnlyManifest(t *testing.T) {
 	got := V7CalibrationReadiness()
-	if ValidV7CalibrationReadiness(got) || got.ManifestSHA256 != "" || len(got.SupportedRoutes) != 0 {
-		t.Fatalf("pre-calibration v7 readiness escaped dark gate = %+v", got)
+	if !ValidV7CalibrationReadiness(got) || got.ManifestSHA256 == "" || len(got.SupportedRoutes) != 1 {
+		t.Fatalf("embedded quality-only v7 readiness must be live and valid = %+v", got)
+	}
+	if got.SupportedRoutes[0] != (CalibrationRouteIdentity{
+		Provider: v7AggregateProvider, ProfileRevision: v7AggregateProfile, Model: llm.V7HarnessModel,
+	}) {
+		t.Fatalf("unexpected aggregate route: %+v", got.SupportedRoutes)
+	}
+	if got.Provenance != ProvenanceReviewedMeasured {
+		t.Fatalf("embedded manifest provenance = %s", got.Provenance)
 	}
 }
 
@@ -83,7 +93,15 @@ func TestAggregateV7ManifestRequiresExactTwentyByThreeContract(t *testing.T) {
 	if !ReadyForV7Production(manifest) {
 		t.Fatal("exact aggregate 20x3 manifest must be production-ready")
 	}
-	readiness := v7CalibrationReadiness(manifest, []byte(`{"reviewed":true}`))
+	// The production capability readiness flows through the quality-only
+	// contract (scoring_enabled=false); the same exact 20x3 identity must
+	// resolve its aggregate route there.
+	qualityOnly := manifest
+	qualityOnly.ScoringEnabled = false
+	if !ReadyForV7QualityOnly(qualityOnly) {
+		t.Fatal("exact aggregate 20x3 manifest must satisfy the quality-only contract")
+	}
+	readiness := v7CalibrationReadiness(qualityOnly, []byte(`{"reviewed":true}`))
 	if len(readiness.SupportedRoutes) != 1 || readiness.SupportedRoutes[0] != (CalibrationRouteIdentity{
 		Provider: "openrouter", ProfileRevision: profile, Model: llm.V7HarnessModel,
 	}) {
@@ -292,21 +310,28 @@ func TestEmbeddedManifestIsMeasuredAndPhaseBApproved(t *testing.T) {
 	}
 }
 
-func TestEmbeddedV7ManifestIsDarkBeforeHostedCampaign(t *testing.T) {
-	if ProductionReadyForVersion(protocol.BenchVersionV7) {
-		t.Fatal("pre-calibration hosted v7 manifest must remain dark")
+func TestEmbeddedV7ManifestIsQualityOnlyProductionReady(t *testing.T) {
+	if !ProductionReadyForVersion(protocol.BenchVersionV7) {
+		t.Fatal("embedded quality-only v7 manifest must be production-ready")
 	}
 	manifest := V7ManifestSnapshot()
+	// scoring_enabled stays false permanently under the v7 quality-only contract.
 	if manifest.ScoringEnabled || manifest.StarterKitRevision == "" || len(manifest.Calibration) != 60 || len(manifest.Baselines) != 3 {
 		t.Fatalf("v7 manifest = %#v", manifest)
 	}
+	// The reviewed aggregate route resolves its reference baseline now that the
+	// contract is production-ready, but under quality-only that baseline never
+	// moves the composite (ApplyForVersion is neutral).
 	usage := protocol.TokenUsage{
 		Provider: v7AggregateProvider, ProfileRevision: v7AggregateProfile,
 		Model: llm.V7HarnessModel,
 	}
-	baseline, ok := LookupForVersion(protocol.BenchVersionV7, "full", usage)
-	if ok || baseline.TotalTokens != 0 {
-		t.Fatalf("v7 full baseline = %#v, ok=%v", baseline, ok)
+	if _, ok := LookupForVersion(protocol.BenchVersionV7, "full", usage); !ok {
+		t.Fatal("reviewed aggregate route must resolve its reference baseline once production-ready")
+	}
+	neutral := ApplyForVersion(protocol.BenchVersionV7, testReport(0.9), completeUsage(50_000, 5_000), nil)
+	if neutral.Multiplier != 1 || neutral.AdjustedComposite != 0.9 {
+		t.Fatalf("quality-only v7 must stay neutral regardless of usage/baseline: %#v", neutral)
 	}
 }
 

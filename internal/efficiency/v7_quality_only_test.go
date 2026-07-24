@@ -89,18 +89,22 @@ func TestManifestProvenanceAndDerivedRejection(t *testing.T) {
 	}
 }
 
-// The advertised readiness carries the provenance class — but only once the
-// manifest is ready. The embedded candidate is scoring-disabled, so today's
-// advertised readiness stays dark (empty, fail-closed) with no provenance.
+// The advertised readiness carries the provenance class for the embedded
+// quality-only manifest (scoring_enabled=false, permanent). A scoring-ENABLED
+// manifest is the calibration-tooling contract, not the production quality-only
+// contract, so the production readiness gate reads it dark.
 func TestV7CalibrationReadinessCarriesProvenance(t *testing.T) {
-	dark := V7CalibrationReadiness()
-	if dark.Provenance != "" || dark.ManifestSHA256 != "" {
-		t.Fatalf("disabled candidate must keep readiness dark, got %+v", dark)
+	live := V7CalibrationReadiness()
+	if live.Provenance != ProvenanceReviewedMeasured || live.ManifestSHA256 == "" {
+		t.Fatalf("embedded quality-only manifest must advertise reviewed-measured provenance, got %+v", live)
+	}
+	got := v7CalibrationReadiness(V7ManifestSnapshot(), manifestV7JSON)
+	if got.Provenance != ProvenanceReviewedMeasured {
+		t.Fatalf("quality-only readiness provenance = %q, want %q", got.Provenance, ProvenanceReviewedMeasured)
 	}
 	enabled := V7ManifestSnapshot()
 	enabled.ScoringEnabled = true
-	got := v7CalibrationReadiness(enabled, manifestV7JSON)
-	if got.Provenance != ProvenanceReviewedMeasured {
-		t.Fatalf("enabled readiness provenance = %q, want %q", got.Provenance, ProvenanceReviewedMeasured)
+	if dark := v7CalibrationReadiness(enabled, manifestV7JSON); dark.Provenance != "" || dark.ManifestSHA256 != "" {
+		t.Fatalf("scoring-enabled manifest must not satisfy the quality-only readiness gate, got %+v", dark)
 	}
 }

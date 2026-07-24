@@ -98,6 +98,16 @@ an epoch-frozen relative bonus (`docs/relative-efficiency-bonus-spec.md`);
 the reviewed aggregate GPT-OSS manifest remains the v7 identity/readiness
 anchor and the audited reference evidence.
 
+Admission and activation: the admission gate for v7 is model + route/profile +
+trusted accounting, NOT a reviewed token baseline (none is needed when usage
+cannot move the composite); `scoring_enabled` stays false permanently.
+`scoring_enabled=false` is the quality-only contract, and the embedded manifest
+is production-ready in that state. Turning v7 on is a deliberate operator
+switch, `DITTOBENCH_ENABLE_V7` (not a dev/SSRF flag, and not a code change):
+flipping it is sufficient to advertise and admit v7 in a safe production config,
+yielding quality-only scoring; without it v7 stays dark. Full contract and gate
+trace: `docs/token-efficiency-v7.md`.
+
 ## Operational envelopes for the ~10x datasets
 
 Client-side only; no wire bytes change:

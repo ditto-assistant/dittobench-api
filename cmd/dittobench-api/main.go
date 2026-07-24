@@ -151,13 +151,17 @@ type server struct {
 	allowPrivate           bool
 	allowScreenedImages    bool
 	requireTicketInference bool
-	v7TokenCalibration     bool
-	softwareVersion        string
-	sourceRevision         string
-	limiter                *ratelimit.Limiter
-	runSlots               chan struct{} // bounds concurrent run_size jobs
-	memorySlots            chan struct{} // bounds embedding-heavy memory phases
-	broker                 *inferenceBroker
+	// enableV7 is the deliberate operator activation switch for bench_version 7
+	// (DITTOBENCH_ENABLE_V7). It is independent of the dev/SSRF flags: with the
+	// reviewed quality-only manifest embedded, flipping this switch is
+	// sufficient to advertise and score v7 in a safe production config.
+	enableV7        bool
+	softwareVersion string
+	sourceRevision  string
+	limiter         *ratelimit.Limiter
+	runSlots        chan struct{} // bounds concurrent run_size jobs
+	memorySlots     chan struct{} // bounds embedding-heavy memory phases
+	broker          *inferenceBroker
 	// relayRunMu isolates scored runs that share this server's model relay.
 	// The relay exposes process-wide monotonic failure counters, so overlapping
 	// scored runs could otherwise attribute one run's provider failure to another.
@@ -188,10 +192,12 @@ func main() {
 	allowPrivate := envBool("DITTOBENCH_ALLOW_PRIVATE_HARNESS")
 	allowScreenedImages := envBool("DITTOBENCH_ALLOW_SCREENED_IMAGES")
 	requireTicketInference := envBool("DITTOBENCH_REQUIRE_TICKET_INFERENCE")
-	v7TokenCalibration := envBool("DITTOBENCH_V7_TOKEN_CALIBRATION")
-	if v7TokenCalibration && !(allowPrivate && allowScreenedImages && requireTicketInference) {
-		log.Fatal("DITTOBENCH_V7_TOKEN_CALIBRATION requires private harness, screened image, and ticket inference modes")
-	}
+	// Deliberate production activation of bench_version 7. v7 scores under the
+	// quality-only contract (usage audited, never penalizes; scoring_enabled
+	// stays false permanently). This is NOT a dev/SSRF flag: it does not relax
+	// the harness URL guard, and the SSRF guard stays on unless
+	// DITTOBENCH_ALLOW_PRIVATE_HARNESS is separately set.
+	enableV7 := envBool("DITTOBENCH_ENABLE_V7")
 	softwareVersion := strings.TrimSpace(os.Getenv("DITTOBENCH_SOFTWARE_VERSION"))
 	sourceRevision := strings.TrimSpace(os.Getenv("DITTOBENCH_SOURCE_SHA"))
 	runner.Configure(allowPrivate)
@@ -201,8 +207,8 @@ func main() {
 	if allowScreenedImages {
 		log.Printf("DITTOBENCH_ALLOW_SCREENED_IMAGES set — trusted validator image path enabled")
 	}
-	if v7TokenCalibration {
-		log.Printf("WARNING: DITTOBENCH_V7_TOKEN_CALIBRATION set — unreviewed v7 baseline collection enabled (local/dev only)")
+	if enableV7 {
+		log.Printf("DITTOBENCH_ENABLE_V7 set — bench_version 7 activated (quality-only scoring: usage audited, never penalizes)")
 	}
 
 	sandboxRuntime := sandbox.NewLocalDocker()
@@ -222,7 +228,7 @@ func main() {
 		allowPrivate:           allowPrivate,
 		allowScreenedImages:    allowScreenedImages,
 		requireTicketInference: requireTicketInference,
-		v7TokenCalibration:     v7TokenCalibration,
+		enableV7:               enableV7,
 		softwareVersion:        softwareVersion,
 		sourceRevision:         sourceRevision,
 		limiter:                ratelimit.New(submitsPerWindow, submitWindow),
@@ -332,12 +338,17 @@ func (s *server) handleCapabilities(w http.ResponseWriter, _ *http.Request) {
 	if efficiency.ProductionReadyForVersion(protocol.BenchVersionV6) {
 		versions = append(versions, protocol.BenchVersionV6)
 	}
-	// Advertise v7 only with the audited GPT-OSS token manifest and exact route
-	// identity embedded in this scorer release. Platform rollout stays separate.
-	v7Calibration := efficiency.V7CalibrationReadiness()
-	if efficiency.ProductionReadyForVersion(protocol.BenchVersionV7) &&
-		efficiency.ValidV7CalibrationReadiness(v7Calibration) {
-		versions = append(versions, protocol.BenchVersionV7)
+	// Advertise v7 only when the operator has flipped the deliberate activation
+	// switch (DITTOBENCH_ENABLE_V7) AND this scorer release embeds the audited
+	// GPT-OSS quality-only manifest with the exact route identity. Without the
+	// switch v7 stays dark even though the embedded contract is production-ready.
+	var v7Calibration efficiency.CalibrationReadiness
+	if s.enableV7 {
+		v7Calibration = efficiency.V7CalibrationReadiness()
+		if efficiency.ProductionReadyForVersion(protocol.BenchVersionV7) &&
+			efficiency.ValidV7CalibrationReadiness(v7Calibration) {
+			versions = append(versions, protocol.BenchVersionV7)
+		}
 	}
 	writeJSON(w, http.StatusOK, capabilitiesResponse{
 		SoftwareVersion:        s.softwareVersion,
@@ -663,6 +674,10 @@ func (s *server) handleSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.BenchVersion = version
+	if msg := s.benchVersionAdmitted(req.BenchVersion); msg != "" {
+		writeError(w, http.StatusServiceUnavailable, msg)
+		return
+	}
 	// Exactly one submission source: a running harness (direct), a git repo, or
 	// a presigned platform tarball (mode B). git_url + tarball_url both build in
 	// the Docker sandbox.
@@ -781,6 +796,10 @@ func (s *server) handleScoreRequest(w http.ResponseWriter, r *http.Request, requ
 		return
 	}
 	req.BenchVersion = version
+	if msg := s.benchVersionAdmitted(req.BenchVersion); msg != "" {
+		writeError(w, http.StatusServiceUnavailable, msg)
+		return
+	}
 	if (s.requireTicketInference || req.BenchVersion >= protocol.BenchVersionV7) && req.InferenceSessionID == "" {
 		writeError(
 			w,
@@ -864,6 +883,18 @@ func requestedBenchVersion(requested int, requireExplicit bool) (int, string) {
 		return 0, "unsupported bench_version (supported: 2, 3, 4, 5, 6, 7)"
 	}
 	return requested, ""
+}
+
+// benchVersionAdmitted enforces deliberate runtime activation of bench_version
+// 7: even though the embedded quality-only contract is production-ready, v7 runs
+// are refused until the operator flips DITTOBENCH_ENABLE_V7. Pre-v7 versions are
+// always admitted (their availability is gated by their reviewed manifests, not
+// by a runtime switch). Returns "" when admitted, otherwise a client message.
+func (s *server) benchVersionAdmitted(benchVersion int) string {
+	if benchVersion >= protocol.BenchVersionV7 && !s.enableV7 {
+		return "bench_version 7 is not enabled on this scorer"
+	}
+	return ""
 }
 
 // submitDirect scores a harness the miner is already running, synchronously.

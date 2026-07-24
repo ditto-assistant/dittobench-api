@@ -76,13 +76,45 @@ The reviewed-but-disabled candidate is versioned identically at
 `scoring_enabled: false`. The three raw references and their separately derived
 75% allowances are content-bound into each baseline ID. Readiness rejects
 missing raw evidence, a multiplier other than 7,500, arithmetic drift, or a
-non-derived allowance. Infra must eventually pin the separately reviewed,
-enabled production digest; the pin remains empty at this stage. Merging this
-candidate still does not select benchmark v7 or admit the route.
+non-derived allowance.
+
+`scoring_enabled: false` is the PERMANENT v7 quality-only state, not a
+disabled-awaiting-activation state (see the admission contract below). The
+calibration tooling still validates a scoring-enabled copy of this manifest as
+a completeness check (`efficiency.ReadyForV7Production`), but production
+readiness flows through the quality-only predicate
+(`efficiency.ReadyForV7QualityOnly`), which requires `scoring_enabled: false`.
 
 OpenRouter endpoint discovery is not calibration. Provider-specific baselines
-and adaptive policy selection remain dark follow-up work; they cannot make a
-route score-eligible during the initial aggregate rollout.
+and adaptive policy selection remain follow-up work; under the quality-only
+contract they are not needed to admit or score a route, because no absolute
+token baseline enters v7 scoring at all.
+
+## v7 admission contract: model + profile + accounting (no reviewed baseline)
+
+The scoring layer's quality-only contract is reconciled with the ADMISSION
+layer so a v7 run can actually score in a safe production config (SSRF guard on,
+`DITTOBENCH_ALLOW_PRIVATE_HARNESS` unset):
+
+- The relay identity gate (`requireTokenAccounting`) admits a v7 run on
+  trusted metered accounting (accounting v2), the immutable provider identity,
+  the locked harness model (`openai/gpt-oss-20b`), and a well-formed versioned
+  route profile (`openrouter-route-<16 hex>-v1`). It does NOT require a reviewed
+  token baseline for the route — under quality-only, usage never moves the
+  composite, so no baseline is needed to score. Complete metered usage is still
+  separately enforced (`requireCompleteV7Usage`).
+- `efficiency.ProductionReadyForVersion(v7)` and the advertised v7 calibration
+  readiness are true with the embedded `scoring_enabled: false` manifest,
+  gated fail-closed on the locked model identity, the aggregate route +
+  hosted-embedding profile, and dataset known-vector / calibration-digest
+  verification.
+- Activation is a deliberate operator switch: **`DITTOBENCH_ENABLE_V7`**. It is
+  NOT a dev/SSRF flag — it does not relax the harness URL guard. With the
+  reviewed quality-only manifest embedded, flipping this one switch is
+  sufficient to both advertise v7 in `/v1/capabilities` and admit v7 runs; the
+  score it yields is quality-only (usage recorded, multiplier 1). v7 is not
+  enabled by default: without the switch, v7 submissions are refused
+  (`bench_version 7 is not enabled on this scorer`).
 
 ## v7 token contract: quality-only (usage recorded, never scored)
 

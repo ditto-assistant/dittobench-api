@@ -9,6 +9,7 @@ import (
 
 	"github.com/ditto-assistant/dittobench-api/internal/efficiency"
 	"github.com/ditto-assistant/dittobench-api/internal/llm"
+	"github.com/ditto-assistant/dittobench-datagen/protocol"
 )
 
 const testSourceRevision = "0123456789abcdef0123456789abcdef01234567"
@@ -49,7 +50,10 @@ func TestCapabilitiesReportBoundReleaseIdentity(t *testing.T) {
 	if efficiency.ProductionReadyForVersion(6) {
 		want = append(want, 6)
 	}
-	if efficiency.ProductionReadyForVersion(7) {
+	// v7 is production-ready under the quality-only contract, but this server has
+	// not flipped the DITTOBENCH_ENABLE_V7 activation switch, so it must not
+	// advertise v7.
+	if s.enableV7 && efficiency.ProductionReadyForVersion(7) {
 		want = append(want, 7)
 	}
 	if len(got.SupportedBenchVersions) != len(want) {
@@ -65,9 +69,47 @@ func TestCapabilitiesReportBoundReleaseIdentity(t *testing.T) {
 	}
 }
 
-func TestV7CapabilityStaysDarkBeforeHostedEmbeddingCampaign(t *testing.T) {
-	if efficiency.ProductionReadyForVersion(7) {
-		t.Fatal("v7 must stay dark before its hosted-embedding campaign lands")
+// The embedded quality-only manifest makes v7 production-ready at the
+// efficiency layer, but v7 must stay dark in a scorer that has not flipped the
+// DITTOBENCH_ENABLE_V7 activation switch (and must advertise once it has).
+func TestV7ActivationSwitchGatesCapability(t *testing.T) {
+	if !efficiency.ProductionReadyForVersion(7) {
+		t.Fatal("embedded quality-only v7 manifest must be production-ready")
+	}
+
+	dark := &server{softwareVersion: "0.10.0", sourceRevision: testSourceRevision}
+	rr := httptest.NewRecorder()
+	dark.handleCapabilities(rr, httptest.NewRequest(http.MethodGet, "/v1/capabilities", nil))
+	var got capabilitiesResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range got.SupportedBenchVersions {
+		if v == protocol.BenchVersionV7 {
+			t.Fatal("v7 advertised without the activation switch")
+		}
+	}
+	if efficiency.ValidV7CalibrationReadiness(got.V7Calibration) || got.V7Calibration.ManifestSHA256 != "" {
+		t.Fatalf("v7 calibration leaked without the activation switch: %+v", got.V7Calibration)
+	}
+
+	lit := &server{softwareVersion: "0.10.0", sourceRevision: testSourceRevision, enableV7: true}
+	rr = httptest.NewRecorder()
+	lit.handleCapabilities(rr, httptest.NewRequest(http.MethodGet, "/v1/capabilities", nil))
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, v := range got.SupportedBenchVersions {
+		if v == protocol.BenchVersionV7 {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("v7 not advertised with the activation switch set: %v", got.SupportedBenchVersions)
+	}
+	if !efficiency.ValidV7CalibrationReadiness(got.V7Calibration) {
+		t.Fatalf("activated v7 must expose a valid calibration readiness: %+v", got.V7Calibration)
 	}
 }
 

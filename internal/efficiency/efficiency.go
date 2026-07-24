@@ -240,14 +240,17 @@ func ProductionReady() bool {
 }
 
 // ProductionReadyForVersion keeps execution support separate from capability
-// advertisement. v7 remains dark until its GPT-OSS starter-kit manifest is
-// reviewed and embedded; v5/v6 retain the existing Qwen calibration.
+// advertisement. v7 becomes ready once its reviewed GPT-OSS quality-only
+// manifest is embedded (scoring_enabled=false, permanent — usage is audited but
+// never scored); v5/v6 retain the existing Qwen calibration. Operator-facing
+// activation of v7 in the scorer is a separate deliberate switch
+// (DITTOBENCH_ENABLE_V7); this predicate only reports contract readiness.
 func ProductionReadyForVersion(benchVersion int) bool {
 	switch benchVersion {
 	case protocol.BenchVersionV5, protocol.BenchVersionV6:
 		return ProductionReady()
 	case protocol.BenchVersionV7:
-		return ReadyForV7Production(productionV7Manifest)
+		return ReadyForV7QualityOnly(productionV7Manifest)
 	default:
 		return false
 	}
@@ -261,7 +264,7 @@ func V7CalibrationReadiness() CalibrationReadiness {
 
 func v7CalibrationReadiness(manifest Manifest, rawManifest []byte) CalibrationReadiness {
 	readiness := CalibrationReadiness{SupportedRoutes: []CalibrationRouteIdentity{}}
-	if len(rawManifest) == 0 || !ReadyForV7Production(manifest) {
+	if len(rawManifest) == 0 || !ReadyForV7QualityOnly(manifest) {
 		return readiness
 	}
 	seen := map[CalibrationRouteIdentity]bool{}
@@ -350,17 +353,22 @@ const (
 	v7AllowancePolicy          = "starter_raw_p90_floor_75_percent_v1"
 )
 
-// ReadyForV7Production validates the initial aggregate GPT-OSS calibration
-// contract. Provider-specific manifests remain dark until adaptive routing is
-// separately reviewed and enabled. Derived manifests (calibration-transfer
-// provenance) are rejected fail-closed: the derived+smoke-validated class is
-// reserved for a later explicit platform policy, and today only a
-// reviewed-measured campaign may enable v7 identity/readiness.
-func ReadyForV7Production(manifest Manifest) bool {
+// v7ContractShapeValid validates every element of the reviewed aggregate
+// GPT-OSS v7 contract EXCEPT the scoring_enabled flag: the locked harness model
+// identity, the aggregate route + hosted embedding profile, the starter-kit
+// revision, the dataset known-vector and calibration-digest verification, and
+// the three reference baseline groups (one per run size). Both the
+// scoring-enabled contract (ReadyForV7Production) and the quality-only
+// production contract (ReadyForV7QualityOnly) build on this shared, fail-closed
+// identity gate. Derived manifests (calibration-transfer provenance) are
+// rejected here: the derived+smoke-validated class is reserved for a later
+// explicit platform policy, and today only a reviewed-measured campaign may
+// establish v7 identity/readiness.
+func v7ContractShapeValid(manifest Manifest) bool {
 	if manifest.Derived != nil {
 		return false
 	}
-	if !manifest.ScoringEnabled || manifest.BenchVersion != protocol.BenchVersionV7 ||
+	if manifest.BenchVersion != protocol.BenchVersionV7 ||
 		manifest.StarterKitRevision != v7StarterKitRevision ||
 		manifest.DatasetKnownVector != v7DatasetKnownVector ||
 		calibrationDatasetDigest(manifest.Calibration) != v7CalibrationDatasetDigest ||
@@ -396,6 +404,29 @@ func ReadyForV7Production(manifest Manifest) bool {
 		}
 	}
 	return true
+}
+
+// ReadyForV7Production validates the SCORING-ENABLED aggregate GPT-OSS contract:
+// the full identity gate plus scoring_enabled=true. This is the completeness
+// gate the calibration tooling uses before it may emit an explicitly
+// scoring-enabled candidate. The embedded production manifest ships
+// scoring_enabled=false (the permanent v7 quality-only contract), so this
+// returns false for it by design — production readiness flows through
+// ReadyForV7QualityOnly.
+func ReadyForV7Production(manifest Manifest) bool {
+	return manifest.ScoringEnabled && v7ContractShapeValid(manifest)
+}
+
+// ReadyForV7QualityOnly validates the v7 QUALITY-ONLY production contract: the
+// full model/route/embedding/dataset-hash identity gate is intact and enforced,
+// but scoring_enabled MUST be false. Under quality-only, token usage never
+// moves the composite (ApplyForVersion emits a neutral multiplier-1 record), so
+// no scoring-enabled token baseline is required to admit or score a v7 run —
+// yet the locked model identity (openai/gpt-oss-20b), the route/embedding
+// profile, and dataset verification remain fail-closed. This is the predicate
+// behind ProductionReadyForVersion(V7) and the v7 capability readiness.
+func ReadyForV7QualityOnly(manifest Manifest) bool {
+	return !manifest.ScoringEnabled && v7ContractShapeValid(manifest)
 }
 
 func canonicalSHA256(value string) bool {
