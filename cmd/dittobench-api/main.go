@@ -1047,16 +1047,16 @@ func (s *server) acquireRunSlot(w http.ResponseWriter) bool {
 	}
 }
 
-// beginMemoryPhase is the single admission boundary for validator-owned
-// embedding capacity. Practice runs share the same global slot. Scored sandbox
-// runs additionally open only their source-bound broker session, and only for
-// the lifetime of this admitted phase.
+// beginMemoryPhase opens the source-bound broker session for the lifetime of
+// the memory phase. Historical local-embedding runs additionally share the
+// global Ollama slot; hosted v7 runs are isolated per ticket and bypass it.
 func (s *server) beginMemoryPhase(
 	ctx context.Context,
 	inferenceSessionID string,
 	runID string,
+	localEmbedding bool,
 ) (func(), bool) {
-	if s.memorySlots != nil {
+	if localEmbedding && s.memorySlots != nil {
 		select {
 		case s.memorySlots <- struct{}{}:
 		case <-ctx.Done():
@@ -1064,7 +1064,7 @@ func (s *server) beginMemoryPhase(
 		}
 	}
 	releaseSlot := func() {
-		if s.memorySlots != nil {
+		if localEmbedding && s.memorySlots != nil {
 			<-s.memorySlots
 		}
 	}
@@ -1370,7 +1370,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	// the old post-tool boundary made native retrieval fail before chat began.
 	endEmbeddingPhase := func() {}
 	if req.BenchVersion >= protocol.BenchVersionV7 {
-		endMemoryPhase, admitted := s.beginMemoryPhase(ctx, inferenceSessionID, runID)
+		endMemoryPhase, admitted := s.beginMemoryPhase(ctx, inferenceSessionID, runID, false)
 		if !admitted {
 			if ctx.Err() == nil {
 				s.store.Fail(runID, "embedding phase admission failed")
@@ -1439,7 +1439,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	// Historical local-embedding versions retain their frozen boundary: tool
 	// cases may overlap, then the embedding-heavy seed/query phase is admitted.
 	if req.BenchVersion < protocol.BenchVersionV7 {
-		endMemoryPhase, admitted := s.beginMemoryPhase(ctx, inferenceSessionID, runID)
+		endMemoryPhase, admitted := s.beginMemoryPhase(ctx, inferenceSessionID, runID, true)
 		if !admitted {
 			if ctx.Err() == nil {
 				s.store.Fail(runID, "embedding phase admission failed")

@@ -245,8 +245,8 @@ func (b *inferenceBroker) endEmbeddingPhase(id, runID string) {
 	session.mu.Unlock()
 	// A hostile harness may return from its scored request while leaving a
 	// background embedding call open. Revoke that exact call and wait for its
-	// cleanup to release embeddingSlots before the scorer releases memory-phase
-	// admission to a sibling.
+	// cleanup to release any historical local-embedding slot before the scorer
+	// releases memory-phase admission to a sibling.
 	if cancel != nil {
 		cancel()
 	}
@@ -830,13 +830,18 @@ func (b *inferenceBroker) handleEmbedding(w http.ResponseWriter, r *http.Request
 	session.embeddingInputBytes += uint64(inputBytes)
 	session.mu.Unlock()
 
-	select {
-	case b.embeddingSlots <- struct{}{}:
-		slotAcquired = true
-	default:
-		w.Header().Set("Retry-After", "1")
-		writeError(w, http.StatusTooManyRequests, "embedding service is at capacity")
-		return
+	// v2-v6 retain the frozen global Ollama lane. Hosted v7 requests are already
+	// isolated and serialized per ticket above, so unrelated evaluations must
+	// not queue behind an obsolete host-global embedding bottleneck.
+	if benchVersion < 7 {
+		select {
+		case b.embeddingSlots <- struct{}{}:
+			slotAcquired = true
+		default:
+			w.Header().Set("Retry-After", "1")
+			writeError(w, http.StatusTooManyRequests, "embedding service is at capacity")
+			return
+		}
 	}
 
 	var decoded embeddingResponse
