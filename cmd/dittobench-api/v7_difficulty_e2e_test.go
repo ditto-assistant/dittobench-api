@@ -119,8 +119,9 @@ func TestV7DifficultyOnGeneratedToolSuites(t *testing.T) {
 
 	naiveV6 := scoreGeneratedToolSuite(t, seed, protocol.BenchVersionV6, false)
 	naiveV7 := scoreGeneratedToolSuite(t, seed, protocol.BenchVersionV7, false)
-	// Deterministic per datagen revision (measured 3.4x at datagen v7-difficulty
-	// a91fc9b; suite recomposition moves it somewhat). The suite-level ratio is
+	// Deterministic per datagen revision (measured 2.8x at datagen v7-difficulty
+	// e1dfbbb, the pinned final deepened head; 3.4x at the earlier a91fc9b —
+	// suite recomposition moves it somewhat). The suite-level ratio is
 	// bounded by cases a parser answers legitimately (abstention/no-tool reward
 	// inaction in both contracts); assert at least a 2.5x collapse so a
 	// regression that re-opens selection credit cannot hide behind that
