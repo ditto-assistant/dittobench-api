@@ -121,7 +121,6 @@ func TestCanonicalScoreRequiresTicketInferenceWhenEnforced(t *testing.T) {
 
 func TestBenchmarkV7IntrinsicallyRequiresTicketInference(t *testing.T) {
 	s := newScoreTestServer()
-	s.enableV7 = true // v7 activated, so the run reaches the ticket-inference gate
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(
 		http.MethodPost,

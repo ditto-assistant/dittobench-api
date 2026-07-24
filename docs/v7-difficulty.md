@@ -102,10 +102,13 @@ Admission and activation: the admission gate for v7 is model + route/profile +
 trusted accounting, NOT a reviewed token baseline (none is needed when usage
 cannot move the composite); `scoring_enabled` stays false permanently.
 `scoring_enabled=false` is the quality-only contract, and the embedded manifest
-is production-ready in that state. Turning v7 on is a deliberate operator
-switch, `DITTOBENCH_ENABLE_V7` (not a dev/SSRF flag, and not a code change):
-flipping it is sufficient to advertise and admit v7 in a safe production config,
-yielding quality-only scoring; without it v7 stays dark. Full contract and gate
+is production-ready in that state. There is no validator-side activation flag:
+the validator ADVERTISES v7 iff it is technically ready
+(`efficiency.ReadyForV7QualityOnly`), exactly as v5/v6 advertise on their
+reviewed manifests. Whether v7 is dispatched/scored is the platform's normal
+benchmark rollout (active bench, controlled via backroom); the validator scores
+whatever bench the platform sends in the run request, and rolling the active
+bench back to 6 rolls v7 back with no validator change. Full contract and gate
 trace: `docs/token-efficiency-v7.md`.
 
 ## Operational envelopes for the ~10x datasets

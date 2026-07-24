@@ -239,12 +239,13 @@ func ProductionReady() bool {
 	return ReadyForProduction(productionManifest)
 }
 
-// ProductionReadyForVersion keeps execution support separate from capability
+// ProductionReadyForVersion reports TECHNICAL readiness, which gates capability
 // advertisement. v7 becomes ready once its reviewed GPT-OSS quality-only
 // manifest is embedded (scoring_enabled=false, permanent — usage is audited but
-// never scored); v5/v6 retain the existing Qwen calibration. Operator-facing
-// activation of v7 in the scorer is a separate deliberate switch
-// (DITTOBENCH_ENABLE_V7); this predicate only reports contract readiness.
+// never scored); v5/v6 retain the existing Qwen calibration. Whether a ready
+// version is actually dispatched/scored is the platform's benchmark rollout
+// decision (backroom-controlled active bench, rollback to v6 supported); there
+// is deliberately no validator-side activation flag.
 func ProductionReadyForVersion(benchVersion int) bool {
 	switch benchVersion {
 	case protocol.BenchVersionV5, protocol.BenchVersionV6:

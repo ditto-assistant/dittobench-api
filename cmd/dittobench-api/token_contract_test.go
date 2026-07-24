@@ -57,24 +57,17 @@ func TestApplyTokenContractV7QualityOnly(t *testing.T) {
 }
 
 // End-to-end reconciliation proof: in a SAFE production config (SSRF guard on,
-// allowPrivate=false) with the deliberate v7 activation switch flipped, a v7 run
-// on a correct locked model + versioned route with trusted metered accounting —
-// but NO reviewed token baseline for that route — is admitted at every gate and
-// still produces a quality-only composite (usage recorded, multiplier 1).
-func TestV7AdmitsAndScoresQualityOnlyInSafeProdConfig(t *testing.T) {
-	s := &server{
-		allowPrivate:    false, // SSRF guard ON — safe production config
-		enableV7:        true,  // deliberate activation switch (not a dev/SSRF flag)
-		softwareVersion: "0.10.0", sourceRevision: testSourceRevision,
-	}
-
-	// Activation gate admits v7.
-	if msg := s.benchVersionAdmitted(protocol.BenchVersionV7); msg != "" {
-		t.Fatalf("activated v7 must be admitted at submit: %q", msg)
-	}
-
+// allowPrivate=false) with NO validator-side activation flag, a v7 run the
+// PLATFORM dispatches (bench_version=7 in the request) on a correct locked
+// model + versioned route with trusted metered accounting — but NO reviewed
+// token baseline for that route — is admitted at every gate and still produces
+// a quality-only composite (usage recorded, multiplier 1). Rollback: the same
+// validator scores whatever bench the platform dispatches, so setting the
+// active bench back to 6 needs no code/env change.
+func TestV7DispatchedByPlatformAdmitsAndScoresQualityOnly(t *testing.T) {
 	// A route with NO reviewed baseline: correct model, well-formed versioned
-	// route, trusted accounting. The relay identity gate admits it.
+	// route, trusted accounting. The relay identity gate admits it — no baseline,
+	// no env var.
 	snapshot := relayHealthSnapshot{
 		AccountingVersion: 2, Status: "ok",
 		Provider: "groq", ProfileRevision: "openrouter-route-0123456789abcdef-v1",
@@ -89,7 +82,16 @@ func TestV7AdmitsAndScoresQualityOnlyInSafeProdConfig(t *testing.T) {
 		t.Fatalf("safe-prod v7 admission rejected a correct route without a baseline: %v", err)
 	}
 
-	// The scored composite is quality-only: extreme usage never moves it.
+	// The platform selects the bench per run; the validator scores exactly what
+	// it dispatched. Both v7 (rolled out) and v6 (rolled back) resolve with no
+	// per-version gate.
+	for _, v := range []int{protocol.BenchVersionV7, protocol.BenchVersionV6} {
+		if got, msg := requestedBenchVersion(v, true); got != v || msg != "" {
+			t.Fatalf("platform-dispatched bench_version %d rejected: (%d, %q)", v, got, msg)
+		}
+	}
+
+	// The scored v7 composite is quality-only: extreme usage never moves it.
 	usage := protocol.TokenUsage{
 		Status: "complete", Successes: 10, UsageAvailable: 10,
 		PromptTokens: 40_000_000, CompletionTokens: 2_000_000, TotalTokens: 42_000_000,
@@ -108,11 +110,5 @@ func TestV7AdmitsAndScoresQualityOnlyInSafeProdConfig(t *testing.T) {
 		te.FormulaVersion != efficiency.V7QualityOnlyFormula ||
 		te.ObservedTotalTokens != usage.TotalTokens {
 		t.Fatalf("expected neutral quality-only audit record: %+v", te)
-	}
-
-	// Without the activation switch the same run is refused at submit.
-	dark := &server{allowPrivate: false, softwareVersion: "0.10.0", sourceRevision: testSourceRevision}
-	if msg := dark.benchVersionAdmitted(protocol.BenchVersionV7); msg == "" {
-		t.Fatal("v7 must be refused at submit without the activation switch")
 	}
 }

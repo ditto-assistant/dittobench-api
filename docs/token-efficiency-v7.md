@@ -108,13 +108,29 @@ layer so a v7 run can actually score in a safe production config (SSRF guard on,
   gated fail-closed on the locked model identity, the aggregate route +
   hosted-embedding profile, and dataset known-vector / calibration-digest
   verification.
-- Activation is a deliberate operator switch: **`DITTOBENCH_ENABLE_V7`**. It is
-  NOT a dev/SSRF flag — it does not relax the harness URL guard. With the
-  reviewed quality-only manifest embedded, flipping this one switch is
-  sufficient to both advertise v7 in `/v1/capabilities` and admit v7 runs; the
-  score it yields is quality-only (usage recorded, multiplier 1). v7 is not
-  enabled by default: without the switch, v7 submissions are refused
-  (`bench_version 7 is not enabled on this scorer`).
+
+## v7 activation: the normal platform benchmark rollout (no validator flag)
+
+Activation is separated cleanly from readiness, and it uses the SAME mechanism
+v2→v6 used — there is no bespoke validator env var:
+
+- **Capability (validator-side):** the validator ADVERTISES v7 in
+  `/v1/capabilities` (`SupportedBenchVersions`) iff it is technically ready
+  (`efficiency.ReadyForV7QualityOnly`: correct locked model, aggregate
+  route/embedding profile, dataset verification, quality-only contract). This
+  is exactly how v5/v6 advertise on their reviewed manifests. Merging and
+  deploying the api makes validators v7-CAPABLE, not v7-active. A stale or
+  misconfigured validator simply fails the readiness gate and does not
+  advertise v7 — that is the safety, no flag required.
+- **Activation (platform-side):** whether v7 is actually dispatched and scored
+  is decided entirely by the platform's benchmark rollout (the active bench
+  version, controlled via backroom). The validator learns the bench version
+  from the run request the platform sends (`bench_version` in the submit/score
+  body) and scores whatever active bench the platform dispatches, provided it
+  advertises support.
+- **Rollback:** because the validator scores whatever bench the platform
+  dispatches, setting the active bench back to 6 rolls v7 back with no validator
+  code or config change — the same rollback path v2→v6 already have.
 
 ## v7 token contract: quality-only (usage recorded, never scored)
 
