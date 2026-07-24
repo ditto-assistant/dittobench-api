@@ -47,11 +47,12 @@ func TestV7StarterKitRevisionMustBeCanonicalGitSHA(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rejected canonical starter revision: %v", err)
 	}
-	// The v7-hard (difficulty release) known vector. Requires the datagen
-	// v7-difficulty release (go.mod); the pre-hardening vector was
-	// 1cfc6e3b…f58fcf and lives on in the embedded reviewed manifest until the
-	// recalibration campaign replaces it (docs/token-efficiency-v7.md).
-	if manifest.DatasetKnownVector != "1aa1ad26d6b5285258128f5e4a222a150e6d3781411ffdc982f0e336f8e1ee94" {
+	// The v7-hard (difficulty release) known vector, pinned to the FINAL
+	// datagen v7-difficulty head (go.mod replace / the tagged release at
+	// merge). The pre-hardening vector was 1cfc6e3b…f58fcf and lives on in
+	// the embedded reviewed manifest as the identity anchor
+	// (docs/token-efficiency-v7.md).
+	if manifest.DatasetKnownVector != "b4269bc834530465775177605c9566d97034c8db798b33193a82d6e8cf989322" {
 		t.Fatalf("v7 known vector = %s", manifest.DatasetKnownVector)
 	}
 	for _, dataset := range manifest.Calibration {
@@ -97,7 +98,7 @@ func TestRefreshedDatasetManifestUsesCanonicalV7Profile(t *testing.T) {
 	}
 	// v7-hard vector; see the pin comment in
 	// TestV7StarterKitRevisionMustBeCanonicalGitSHA.
-	if manifest.DatasetKnownVector != "1aa1ad26d6b5285258128f5e4a222a150e6d3781411ffdc982f0e336f8e1ee94" {
+	if manifest.DatasetKnownVector != "b4269bc834530465775177605c9566d97034c8db798b33193a82d6e8cf989322" {
 		t.Fatalf("v7 known vector = %s", manifest.DatasetKnownVector)
 	}
 	if len(manifest.Calibration) != 60 {
