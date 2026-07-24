@@ -1,8 +1,10 @@
 package runner
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -303,5 +305,56 @@ func TestRunCaseGivesUpAfterAttempts(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&calls); got != int32(runAttempts) {
 		t.Fatalf("expected %d attempts, got %d", runAttempts, got)
+	}
+}
+
+// v7 timeout envelopes: client-side only (the wire bytes never change), gated
+// on bench_version >= 7 so historical replay timing is untouched.
+func TestPerCaseTimeoutForVersion(t *testing.T) {
+	for _, v := range []int{0, 2, 6} {
+		if got := perCaseTimeoutFor(v); got != perCaseTimeout {
+			t.Fatalf("v%d per-case timeout must stay %v, got %v", v, perCaseTimeout, got)
+		}
+	}
+	if got := perCaseTimeoutFor(7); got != v7PerCaseTimeout {
+		t.Fatalf("v7 per-case timeout should be %v, got %v", v7PerCaseTimeout, got)
+	}
+	if v7PerCaseTimeout <= perCaseTimeout {
+		t.Fatalf("v7 per-case timeout must exceed the historical %v, got %v", perCaseTimeout, v7PerCaseTimeout)
+	}
+}
+
+func TestSeedTimeoutForVersion(t *testing.T) {
+	for _, v := range []int{0, 2, 6} {
+		if got := seedTimeoutFor(v); got != seedTimeout {
+			t.Fatalf("v%d seed timeout must stay %v, got %v", v, seedTimeout, got)
+		}
+	}
+	if got := seedTimeoutFor(7); got < seedTimeout || got != v7SeedTimeout {
+		t.Fatalf("v7 seed timeout should be %v (>= historical), got %v", v7SeedTimeout, got)
+	}
+}
+
+// SeedForVersion must marshal byte-identical /seed requests to Seed — the v7
+// difference is only the client-side deadline.
+func TestSeedForVersionWireIdentity(t *testing.T) {
+	var bodies [][]byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, b)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"loaded_pairs":1}`))
+	}))
+	defer srv.Close()
+
+	req := protocol.SeedRequest{UserID: "u1"}
+	if _, err := Seed(sandboxContext(), srv.URL, req); err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+	if _, err := SeedForVersion(sandboxContext(), srv.URL, req, 7); err != nil {
+		t.Fatalf("SeedForVersion: %v", err)
+	}
+	if len(bodies) != 2 || !bytes.Equal(bodies[0], bodies[1]) {
+		t.Fatalf("v7 seed request bytes must be identical to the legacy path: %q vs %q", bodies[0], bodies[1])
 	}
 }

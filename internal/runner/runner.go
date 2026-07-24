@@ -22,6 +22,24 @@ import (
 // perCaseTimeout bounds a single /run call.
 const perCaseTimeout = 120 * time.Second
 
+// v7PerCaseTimeout bounds a single /run call for bench_version >= 7. The v7
+// difficulty release ships ~10x denser haystacks and longer multi-hop chains,
+// so a legitimate case round-trip (locked-model reasoning included) needs more
+// headroom than the historical 120s. Client-side only: the request bytes on
+// the wire are unchanged. Overridable via DITTOBENCH_V7_CASE_TIMEOUT (a Go
+// duration string such as "8m").
+var v7PerCaseTimeout = envDuration("DITTOBENCH_V7_CASE_TIMEOUT", 5*time.Minute)
+
+// perCaseTimeoutFor selects the per-case deadline for a bench version. Pre-v7
+// versions keep the frozen 120s so historical replay timing envelopes are
+// untouched.
+func perCaseTimeoutFor(benchVersion int) time.Duration {
+	if benchVersion >= 7 {
+		return v7PerCaseTimeout
+	}
+	return perCaseTimeout
+}
+
 // healthTimeout bounds the /health probe.
 const healthTimeout = 10 * time.Second
 
@@ -137,10 +155,34 @@ func RunHarness(ctx context.Context, harnessURL string, ds protocol.Dataset, too
 	return out, nil
 }
 
+// v7SeedTimeout bounds a /seed call for bench_version >= 7 haystacks, which
+// are ~10x denser than the historical suites and can take a CPU-only embedder
+// well past the 5-minute default. An explicit DITTOBENCH_SEED_TIMEOUT still
+// applies to every version via the max() in seedTimeoutFor. Overridable via
+// DITTOBENCH_V7_SEED_TIMEOUT.
+var v7SeedTimeout = envDuration("DITTOBENCH_V7_SEED_TIMEOUT", 15*time.Minute)
+
+// seedTimeoutFor selects the /seed deadline for a bench version: pre-v7 keeps
+// the historical timeout; v7 gets at least v7SeedTimeout (an operator-raised
+// DITTOBENCH_SEED_TIMEOUT wins when larger).
+func seedTimeoutFor(benchVersion int) time.Duration {
+	if benchVersion >= 7 && v7SeedTimeout > seedTimeout {
+		return v7SeedTimeout
+	}
+	return seedTimeout
+}
+
 // Seed POSTs a fresh haystack to <harnessURL>/seed and returns the loaded
 // counts the harness reports. Used by the run_size pipeline before memory cases.
 func Seed(ctx context.Context, harnessURL string, req protocol.SeedRequest) (protocol.SeedResponse, error) {
-	ctx, cancel := context.WithTimeout(ctx, seedTimeout)
+	return SeedForVersion(ctx, harnessURL, req, 0)
+}
+
+// SeedForVersion is Seed with the bench version's deadline envelope. The wire
+// bytes are identical to Seed for every version — only the client-side timeout
+// differs (v7 haystacks are much larger).
+func SeedForVersion(ctx context.Context, harnessURL string, req protocol.SeedRequest, benchVersion int) (protocol.SeedResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, seedTimeoutFor(benchVersion))
 	defer cancel()
 
 	buf, err := json.Marshal(req)
@@ -254,7 +296,7 @@ func runOne(ctx context.Context, harnessURL string, c protocol.ToolCase, tools [
 func runOneWithTelemetry(ctx context.Context, harnessURL string, c protocol.ToolCase, tools []protocol.ToolDefinition, opts CaseOptions) (protocol.RunResponse, CaseExecution, error) {
 	started := time.Now()
 	execution := CaseExecution{Attempts: make([]AttemptTelemetry, 0, runAttempts)}
-	ctx, cancel := context.WithTimeout(ctx, perCaseTimeout)
+	ctx, cancel := context.WithTimeout(ctx, perCaseTimeoutFor(opts.BenchVersion))
 	defer cancel()
 	finish := func(outcome string, err error) (protocol.RunResponse, CaseExecution, error) {
 		execution.TotalDurationMs = time.Since(started).Milliseconds()

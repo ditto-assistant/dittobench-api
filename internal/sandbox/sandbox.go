@@ -175,9 +175,15 @@ type LocalDocker struct {
 // NewLocalDocker returns a LocalDocker with sensible defaults.
 func NewLocalDocker() *LocalDocker {
 	return &LocalDocker{
-		HarnessPort:     "8080",
-		MemoryLimit:     "3g",
-		TmpfsLimit:      "512m",
+		HarnessPort: "8080",
+		// The historical caps (3g / 512m) remain the defaults so v2..v6 replay
+		// envelopes are unchanged. A validator administering the v7 difficulty
+		// suite (~10x denser haystacks: a much larger on-disk memory store and
+		// embedding working set) should raise these via
+		// DITTOBENCH_SANDBOX_MEMORY_LIMIT / DITTOBENCH_SANDBOX_TMPFS_LIMIT
+		// (docker --memory / tmpfs size syntax, e.g. "6g" / "2g").
+		MemoryLimit:     envStrDefault("DITTOBENCH_SANDBOX_MEMORY_LIMIT", "3g"),
+		TmpfsLimit:      envStrDefault("DITTOBENCH_SANDBOX_TMPFS_LIMIT", "512m"),
 		CPULimit:        "2",
 		BuildTimeout:    25 * time.Minute,
 		StartTimeout:    time.Duration(envIntDefault("DITTOBENCH_SANDBOX_START_TIMEOUT_SECONDS", 120)) * time.Second,
@@ -215,6 +221,15 @@ func envBoolDefault(name string, def bool) bool {
 	default:
 		return def
 	}
+}
+
+// envStrDefault reads a non-empty env var, falling back to def when unset or
+// blank.
+func envStrDefault(name, def string) string {
+	if v := strings.TrimSpace(os.Getenv(name)); v != "" {
+		return v
+	}
+	return def
 }
 
 // envIntDefault reads a positive int env var, falling back to def on unset or
