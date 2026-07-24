@@ -40,32 +40,52 @@ const (
 //     docs/relative-efficiency-bonus-spec.md. The validator's only job is to
 //     expose the audited inputs that make that computable.
 //
-// v5/v6 keep the historical absolute transform byte-for-byte (10% max
-// penalty, one-sided rational curve).
+// The reviewed-measured manifest embedded below (the 60-run 2026-07 campaign,
+// raw p90 references with 75% allowances, scoring_enabled=false) is retained
+// as the canonical v7 REFERENCE IDENTITY and audited evidence; under this
+// contract its budgets are never activated for v7 scoring — the successor is
+// the platform-side relative bonus, not these absolute budgets. v5/v6 keep
+// the historical absolute transform byte-for-byte.
 const (
 	V7QualityOnlyFormula = "v7-quality-only-v1"
 	V7QualityOnlyReason  = "v7_quality_only_contract"
 )
 
 type Baseline struct {
-	ID                 string `json:"id"`
-	BenchVersion       int    `json:"bench_version"`
-	RunSize            string `json:"run_size"`
-	Provider           string `json:"provider"`
-	ProfileRevision    string `json:"profile_revision"`
-	Model              string `json:"model"`
-	PromptTokens       uint64 `json:"prompt_tokens"`
-	CompletionTokens   uint64 `json:"completion_tokens"`
-	TotalTokens        uint64 `json:"total_tokens"`
-	Samples            int    `json:"samples"`
-	Aggregation        string `json:"aggregation"`
-	StarterKitRevision string `json:"starter_kit_revision"`
+	ID                           string `json:"id"`
+	BenchVersion                 int    `json:"bench_version"`
+	RunSize                      string `json:"run_size"`
+	Provider                     string `json:"provider"`
+	ProfileRevision              string `json:"profile_revision"`
+	Model                        string `json:"model"`
+	PromptTokens                 uint64 `json:"prompt_tokens,omitempty"`
+	CompletionTokens             uint64 `json:"completion_tokens,omitempty"`
+	TotalTokens                  uint64 `json:"total_tokens,omitempty"`
+	RawReferencePromptTokens     uint64 `json:"raw_reference_prompt_tokens,omitempty"`
+	RawReferenceCompletionTokens uint64 `json:"raw_reference_completion_tokens,omitempty"`
+	RawReferenceTotalTokens      uint64 `json:"raw_reference_total_tokens,omitempty"`
+	AllowanceMultiplierBPS       uint64 `json:"allowance_multiplier_bps,omitempty"`
+	AllowancePromptTokens        uint64 `json:"allowance_prompt_tokens,omitempty"`
+	AllowanceCompletionTokens    uint64 `json:"allowance_completion_tokens,omitempty"`
+	AllowanceTotalTokens         uint64 `json:"allowance_total_tokens,omitempty"`
+	AllowancePolicy              string `json:"allowance_policy,omitempty"`
+	Samples                      int    `json:"samples"`
+	Aggregation                  string `json:"aggregation"`
+	StarterKitRevision           string `json:"starter_kit_revision"`
 }
 
 type CalibrationDataset struct {
 	RunSize       string `json:"run_size"`
 	Seed          int64  `json:"seed"`
 	DatasetSHA256 string `json:"dataset_sha256"`
+}
+
+type EmbeddingContract struct {
+	Provider      string `json:"provider"`
+	Model         string `json:"model"`
+	Profile       string `json:"profile"`
+	Dimensions    int    `json:"dimensions"`
+	CatalogSHA256 string `json:"catalog_sha256"`
 }
 
 type Manifest struct {
@@ -75,6 +95,7 @@ type Manifest struct {
 	ScoringEnabled     bool                 `json:"scoring_enabled"`
 	DatasetKnownVector string               `json:"dataset_known_vector"`
 	StarterKitRevision string               `json:"starter_kit_revision"`
+	Embedding          *EmbeddingContract   `json:"embedding,omitempty"`
 	Calibration        []CalibrationDataset `json:"calibration_datasets"`
 	Baselines          []Baseline           `json:"baselines"`
 	// Derived is the calibration-transfer provenance record (additive,
@@ -204,6 +225,10 @@ func V7ManifestSnapshot() Manifest {
 	copy := productionV7Manifest
 	copy.Calibration = append([]CalibrationDataset(nil), productionV7Manifest.Calibration...)
 	copy.Baselines = append([]Baseline(nil), productionV7Manifest.Baselines...)
+	if productionV7Manifest.Embedding != nil {
+		embedding := *productionV7Manifest.Embedding
+		copy.Embedding = &embedding
+	}
 	return copy
 }
 
@@ -313,9 +338,16 @@ func ReadyForProduction(manifest Manifest) bool {
 const (
 	v7AggregateProvider        = "openrouter"
 	v7AggregateProfile         = "openrouter-route-a471cd87ae7df5b9-v1"
-	v7StarterKitRevision       = "2ec9029568f20015562193a378eb8bce51191470"
+	v7StarterKitRevision       = "62223b028acceb38ad0db98790402f1e2361dd18"
 	v7DatasetKnownVector       = "1cfc6e3b9f3f4c04afe04b058a6851f9357f6463170b879867e2cf4588f58fcf"
 	v7CalibrationDatasetDigest = "11067ee51dd87582af939f26631cfc075588a13f708a726a3ebae1199dcabfa8"
+	v7EmbeddingProvider        = "Perplexity"
+	v7EmbeddingModel           = "perplexity/pplx-embed-v1-0.6b"
+	v7EmbeddingProfile         = "dittobench-v7-openrouter-pplx-embed-v1-0.6b-768-v1"
+	v7EmbeddingDimensions      = 768
+	v7EmbeddingCatalogSHA256   = "a6fff568e4f8c9d17e54739e6da2cdd76006d2a486124c5c43b12e94099d3348"
+	v7AllowanceMultiplierBPS   = 7500
+	v7AllowancePolicy          = "starter_raw_p90_floor_75_percent_v1"
 )
 
 // ReadyForV7Production validates the initial aggregate GPT-OSS calibration
@@ -332,7 +364,12 @@ func ReadyForV7Production(manifest Manifest) bool {
 		manifest.StarterKitRevision != v7StarterKitRevision ||
 		manifest.DatasetKnownVector != v7DatasetKnownVector ||
 		calibrationDatasetDigest(manifest.Calibration) != v7CalibrationDatasetDigest ||
-		!validV7CalibrationDatasets(manifest.Calibration) {
+		!validV7CalibrationDatasets(manifest.Calibration) ||
+		manifest.Embedding == nil || *manifest.Embedding != (EmbeddingContract{
+		Provider: v7EmbeddingProvider, Model: v7EmbeddingModel,
+		Profile: v7EmbeddingProfile, Dimensions: v7EmbeddingDimensions,
+		CatalogSHA256: v7EmbeddingCatalogSHA256,
+	}) {
 		return false
 	}
 	groups := map[string]int{}
@@ -382,6 +419,14 @@ func calibrationDatasetDigest(datasets []CalibrationDataset) string {
 }
 
 func baselineID(benchVersion int, b Baseline) string {
+	if benchVersion == protocol.BenchVersionV7 {
+		canonical := fmt.Sprintf("%s:%s:%s:%s:%s:%d:%d:%d:%d:%d:%d:%d:%s:%s", FormulaVersion, b.RunSize, b.Provider,
+			b.ProfileRevision, b.Model, b.RawReferencePromptTokens, b.RawReferenceCompletionTokens,
+			b.RawReferenceTotalTokens, b.AllowanceMultiplierBPS, b.AllowancePromptTokens,
+			b.AllowanceCompletionTokens, b.AllowanceTotalTokens, b.AllowancePolicy, b.StarterKitRevision)
+		sum := sha256.Sum256([]byte(canonical))
+		return fmt.Sprintf("v%d-starter-p90-%x", benchVersion, sum[:8])
+	}
 	canonical := fmt.Sprintf("%s:%s:%s:%s:%s:%d:%d:%d:%s", FormulaVersion, b.RunSize, b.Provider,
 		b.ProfileRevision, b.Model, b.PromptTokens, b.CompletionTokens, b.TotalTokens, b.StarterKitRevision)
 	sum := sha256.Sum256([]byte(canonical))
@@ -453,9 +498,38 @@ func LookupForVersion(benchVersion int, runSize string, usage protocol.TokenUsag
 }
 
 func validBaseline(b Baseline) bool {
+	if b.BenchVersion == protocol.BenchVersionV7 {
+		return validV7Allowance(b)
+	}
 	return b.ID != "" && b.Samples >= 20 && b.Aggregation == "nearest_rank_p90" &&
 		b.PromptTokens > 0 && b.CompletionTokens > 0 &&
 		b.TotalTokens == b.PromptTokens+b.CompletionTokens && b.StarterKitRevision != ""
+}
+
+func validV7Allowance(b Baseline) bool {
+	if b.ID == "" || b.Samples != 20 || b.Aggregation != "nearest_rank_p90" ||
+		b.StarterKitRevision == "" || b.PromptTokens != 0 || b.CompletionTokens != 0 || b.TotalTokens != 0 ||
+		b.RawReferencePromptTokens == 0 || b.RawReferenceCompletionTokens == 0 ||
+		b.RawReferenceTotalTokens != b.RawReferencePromptTokens+b.RawReferenceCompletionTokens ||
+		b.AllowanceMultiplierBPS != v7AllowanceMultiplierBPS || b.AllowancePolicy != v7AllowancePolicy {
+		return false
+	}
+	if b.RawReferenceTotalTokens > ^uint64(0)/v7AllowanceMultiplierBPS ||
+		b.RawReferencePromptTokens > ^uint64(0)/v7AllowanceMultiplierBPS {
+		return false
+	}
+	wantTotal := b.RawReferenceTotalTokens * v7AllowanceMultiplierBPS / 10_000
+	wantPrompt := b.RawReferencePromptTokens * v7AllowanceMultiplierBPS / 10_000
+	return b.AllowanceTotalTokens == wantTotal && b.AllowancePromptTokens == wantPrompt &&
+		b.AllowanceCompletionTokens == wantTotal-wantPrompt &&
+		b.AllowanceTotalTokens == b.AllowancePromptTokens+b.AllowanceCompletionTokens
+}
+
+func allowanceTokens(b Baseline) (uint64, uint64, uint64) {
+	if b.BenchVersion == protocol.BenchVersionV7 {
+		return b.AllowancePromptTokens, b.AllowanceCompletionTokens, b.AllowanceTotalTokens
+	}
+	return b.PromptTokens, b.CompletionTokens, b.TotalTokens
 }
 
 // Apply returns the complete audit record and mutates no report. Callers assign
@@ -484,14 +558,15 @@ func Apply(raw protocol.ScoreReport, usage protocol.TokenUsage, baseline *Baseli
 		return result
 	}
 	result.BaselineID = baseline.ID
-	result.BaselinePromptTokens = baseline.PromptTokens
-	result.BaselineCompletionTokens = baseline.CompletionTokens
-	result.BaselineTotalTokens = baseline.TotalTokens
-	if usage.TotalTokens <= baseline.TotalTokens {
+	allowancePrompt, allowanceCompletion, allowanceTotal := allowanceTokens(*baseline)
+	result.BaselinePromptTokens = allowancePrompt
+	result.BaselineCompletionTokens = allowanceCompletion
+	result.BaselineTotalTokens = allowanceTotal
+	if usage.TotalTokens <= allowanceTotal {
 		return result
 	}
 
-	ratio := float64(usage.TotalTokens) / float64(baseline.TotalTokens)
+	ratio := float64(usage.TotalTokens) / float64(allowanceTotal)
 	result.ExcessRatio = ratio - 1
 	// A one-sided rational curve is neutral through the generous p90 budget,
 	// then approaches (but never crosses) the 0.90 floor as waste grows.
@@ -513,7 +588,8 @@ func Apply(raw protocol.ScoreReport, usage protocol.TokenUsage, baseline *Baseli
 // byte-identical to Apply. v7 is the QUALITY-ONLY contract: the returned
 // record is always neutral (multiplier 1, composite untouched) and exists
 // purely to carry the audited observed usage and the explicit decision reason
-// into the report — token usage is recorded, never scored, for v7.
+// into the report — token usage is recorded, never scored, for v7. The
+// reviewed manifest's budgets/allowances are reference identity only.
 func ApplyForVersion(benchVersion int, raw protocol.ScoreReport, usage protocol.TokenUsage, baseline *Baseline) protocol.TokenEfficiency {
 	if benchVersion >= protocol.BenchVersionV7 {
 		return protocol.TokenEfficiency{

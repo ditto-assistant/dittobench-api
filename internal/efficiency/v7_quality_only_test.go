@@ -58,11 +58,19 @@ func TestManifestProvenanceAndDerivedRejection(t *testing.T) {
 	if p := ManifestProvenance(measured); p != ProvenanceReviewedMeasured {
 		t.Fatalf("embedded manifest must be reviewed-measured, got %s", p)
 	}
-	if !ReadyForV7Production(measured) {
-		t.Fatalf("embedded reviewed-measured manifest must stay production-ready")
+	// The embedded 2026-07 campaign manifest ships as a candidate
+	// (scoring_enabled=false — under the v7 quality-only contract its budgets
+	// are reference identity, never activated). Structurally it must still
+	// satisfy the readiness gate once enabled, so the gate's derived-rejection
+	// below is meaningful.
+	enabled := V7ManifestSnapshot()
+	enabled.ScoringEnabled = true
+	if !ReadyForV7Production(enabled) {
+		t.Fatalf("enabled copy of the reviewed-measured manifest must be production-ready")
 	}
 
 	derived := V7ManifestSnapshot()
+	derived.ScoringEnabled = true
 	derived.Derived = &Derivation{Method: "tokenmodel-anchored-v1"}
 	if p := ManifestProvenance(derived); p != ProvenanceDerivedUnvalidated {
 		t.Fatalf("derivation without smoke must classify derived-unvalidated, got %s", p)
@@ -81,10 +89,18 @@ func TestManifestProvenanceAndDerivedRejection(t *testing.T) {
 	}
 }
 
-// The advertised readiness carries the provenance class.
+// The advertised readiness carries the provenance class — but only once the
+// manifest is ready. The embedded candidate is scoring-disabled, so today's
+// advertised readiness stays dark (empty, fail-closed) with no provenance.
 func TestV7CalibrationReadinessCarriesProvenance(t *testing.T) {
-	got := V7CalibrationReadiness()
+	dark := V7CalibrationReadiness()
+	if dark.Provenance != "" || dark.ManifestSHA256 != "" {
+		t.Fatalf("disabled candidate must keep readiness dark, got %+v", dark)
+	}
+	enabled := V7ManifestSnapshot()
+	enabled.ScoringEnabled = true
+	got := v7CalibrationReadiness(enabled, manifestV7JSON)
 	if got.Provenance != ProvenanceReviewedMeasured {
-		t.Fatalf("embedded readiness provenance = %q, want %q", got.Provenance, ProvenanceReviewedMeasured)
+		t.Fatalf("enabled readiness provenance = %q, want %q", got.Provenance, ProvenanceReviewedMeasured)
 	}
 }

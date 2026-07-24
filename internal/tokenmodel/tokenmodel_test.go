@@ -99,10 +99,13 @@ func testModel() Model {
 }
 
 // sourceManifest is the embedded reviewed-measured v7 manifest — exactly the
-// artifact a real transfer would start from.
+// artifact a real transfer would start from. The embedded copy ships as a
+// disabled candidate (quality-only contract), and a transfer source must be a
+// reviewed, ENABLED manifest, so the fixture enables it.
 func sourceManifest(t *testing.T) (efficiency.Manifest, []byte) {
 	t.Helper()
 	m := efficiency.V7ManifestSnapshot()
+	m.ScoringEnabled = true
 	raw, err := json.Marshal(m)
 	if err != nil {
 		t.Fatal(err)

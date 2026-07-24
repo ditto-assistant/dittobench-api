@@ -105,8 +105,12 @@ bench_version >= 7):
   RELATIVE bonus among quality-qualified submissions:
   `docs/relative-efficiency-bonus-spec.md`.
 
-The calibration campaign above retains full value as audited reference
-evidence (provenance class: reviewed-measured) and as the fit corpus for the
-calibration-transfer research tooling
-(`docs/token-calibration-transfer.md`) — relevant again if a stable absolute
-budget or hard abuse ceiling is reinstated once difficulty settles.
+Under this contract the embedded campaign manifest stays
+`scoring_enabled: false` for v7 permanently: its raw p90 references
+(71,309 / 450,074 / 995,198 small/medium/full) and 75% allowances
+(53,481 / 337,555 / 746,398) are the canonical reviewed-measured REFERENCE
+IDENTITY and audited evidence, not budgets awaiting activation. The successor
+mechanism is the platform-side relative bonus
+(`docs/relative-efficiency-bonus-spec.md`), and the campaign additionally
+serves as the fit corpus for the calibration-transfer research tooling
+(`docs/token-calibration-transfer.md`).
