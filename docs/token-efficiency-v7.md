@@ -83,3 +83,32 @@ candidate still does not select benchmark v7 or admit the route.
 OpenRouter endpoint discovery is not calibration. Provider-specific baselines
 and adaptive policy selection remain dark follow-up work; they cannot make a
 route score-eligible during the initial aggregate rollout.
+
+## v7 strict transform (difficulty release)
+
+The v7 difficulty release (`docs/v7-difficulty.md`) keeps this reviewed
+aggregate manifest as the calibration identity anchor — none of the digests,
+route identity, or readiness gates above change — and layers a version-gated
+strict transform on top (`efficiency.ApplyForVersion`, bench_version >= 7):
+
+- **Interim budget scale.** The effective budget is
+  `manifest p90 total × V7TokenBudgetScale` (currently 4). The embedded
+  baselines were measured on the pre-hardening v7 datasets; the ~10x harder
+  suite legitimately needs more tokens (more cases, denser haystacks, longer
+  multi-hop chains), so the budget is scaled rather than silently taxing every
+  run. The reported `baseline_*_tokens` fields stay the manifest's reviewed
+  values, so the identity remains auditable.
+- **3x deeper waste penalty.** Beyond the scaled budget the same one-sided
+  rational curve applies with `maximum_penalty` 0.30 (floor 0.70) instead of
+  0.10, reported in-band as formula `v7-relay-token-waste-p90-strict-v1`.
+  Brute-force strategies (re-reading the whole haystack per question,
+  unbounded self-consistency sampling) lose up to a third of their composite.
+
+v5/v6 continue through the unmodified `Apply` path byte-for-byte
+(`TestApplyForVersionPreV7Identity`).
+
+**Recalibration obligation:** `V7TokenBudgetScale` is an explicit interim
+constant. Before platform rollout of the hardened suite, repeat the 60-dataset
+campaign above against the tagged v7-hard datagen release, embed the reviewed
+manifest, and retire the scale (set it to 1). The scale is deliberately a
+compile-time constant so this cannot drift silently in an operator env var.
