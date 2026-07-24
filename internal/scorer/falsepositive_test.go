@@ -620,9 +620,15 @@ func TestAggregateForVersionV3AndV4AreGated(t *testing.T) {
 		}
 	}
 
-	// Aggregate defaults to the current bench version, which is gated.
-	if got := Aggregate("run", perCase).Composite; got != want {
-		t.Fatalf("Aggregate should score under CurrentBenchVersion (gated): got %v want %v", got, want)
+	// Aggregate defaults to the current bench version, which is gated — under
+	// v7 with the deeper v7 gate stack, so assert identity with the explicit
+	// current-version aggregate rather than the frozen v3 value.
+	wantCurrent := AggregateForVersion("run", perCase, protocol.CurrentBenchVersion).Composite
+	if got := Aggregate("run", perCase).Composite; got != wantCurrent {
+		t.Fatalf("Aggregate should score under CurrentBenchVersion (gated): got %v want %v", got, wantCurrent)
+	}
+	if wantCurrent >= 0.75 {
+		t.Fatalf("current-version composite should be strictly below the raw mean, got %v", wantCurrent)
 	}
 }
 

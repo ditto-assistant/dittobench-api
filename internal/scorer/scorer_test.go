@@ -258,11 +258,19 @@ func TestAggregateFoldsMetamorphicFactor(t *testing.T) {
 		mc("g1", 1.0, true), mc("g1", 1.0, true),
 		mc("g2", 1.0, true), mc("g2", 0.0, false),
 	}
-	rep := Aggregate("run", perCase)
+	// Historical (v3..v6) factor, pinned via an explicit version — Aggregate
+	// follows CurrentBenchVersion, which under v7 deepens the penalty.
+	rep := AggregateForVersion("run", perCase, protocol.BenchVersionV3)
 	// memMean 0.75, one of two groups split -> factor 1 - 0.15*0.5 = 0.925.
 	want := round6(0.75 * round6(1.0-metamorphicMaxPenalty*0.5))
 	if rep.Composite != want {
 		t.Fatalf("composite should fold the metamorphic factor: got %v want %v", rep.Composite, want)
+	}
+	// v7 deepens the same half-split to 1 - 0.40*0.5 = 0.80.
+	rep7 := AggregateForVersion("run", perCase, protocol.BenchVersionV7)
+	want7 := round6(0.75 * round6(1.0-v7MetamorphicMaxPenalty*0.5))
+	if rep7.Composite != want7 {
+		t.Fatalf("v7 composite should fold the deeper metamorphic factor: got %v want %v", rep7.Composite, want7)
 	}
 }
 
