@@ -98,6 +98,38 @@ Client-side only; no wire bytes change:
 - The v5/v6 gate stack in `CompositeGateForVersion` is untouched for
   `benchVersion < 7`; v7 routes to `compositeGateV7`.
 
+## Datagen v7-hard integration status (2026-07-23)
+
+The hardened ~10x datagen suite is developed on the `v7-difficulty` branch of
+`dittobench-datagen` (sibling worktree `../datagen-v7-hard`). At the time this
+branch was cut it was NOT integrable — `go test ./...` there failed
+(`TestV7KnownVector`: the v7 full-run vector for seed 123456789 drifted from
+`1cfc6e3b…f58fcf` to `7fb989d7…31859a`, i.e. its own pinned vector is not yet
+re-pinned) and the tree was mid-edit (new generators `composedinj.go`,
+`deepchain.go`, `deepjoin.go`, `nearmiss.go`, `tempcalc.go` in flight; a
+transient undefined `pageURLForSeed` in `toolexec`). The temporary
+`go.mod` replace was therefore NOT added.
+
+To integrate once that branch's tests pass:
+
+1. Add to `go.mod`:
+   `replace github.com/ditto-assistant/dittobench-datagen => ../datagen-v7-hard // TEMPORARY: swap for tagged release before merge`
+   then `go mod tidy && go test ./...`.
+2. Expected/allowed drift: only v7 dataset bytes. The compat proof is
+   `TestBenchVersionDatasetVectors` (`cmd/dittobench-api`), which pins the v2
+   and v3 full-run vectors — those MUST NOT move.
+3. `internal/efficiency` stays internally consistent (the embedded v7 manifest
+   and `v7DatasetKnownVector` pin each other, both describing the
+   pre-hardening datasets), but the calibration then describes the old suite —
+   run the `cmd/tokenbaseline` recalibration campaign against the tagged
+   release and retire `V7TokenBudgetScale`.
+4. New v7 tool-case categories from the hardened generators must be checked
+   against `datagen.IsResultUsage` and `toolexec.Observable` so they route
+   into the right scoring branch (result-usage composition vs plain
+   trajectory; observed-execution capping).
+5. Re-measure the end-to-end (tool + memory) difficulty ratio; the 12.7x
+   identity in this repo covers the validator-side levers on the tool axis.
+
 ## Reviewer watch-items
 
 - `V7TokenBudgetScale = 4` is an explicit interim constant. Before platform
