@@ -169,6 +169,28 @@ func TestRelayFailureIsRetryableValidatorInfrastructure(t *testing.T) {
 	}
 }
 
+func TestTrustedEmbeddingFailureIsRetryableValidatorInfrastructure(t *testing.T) {
+	failure := trustedEmbeddingInfrastructureFailure(errors.New("/seed returned 502: embedding service unavailable"))
+	if failure == nil || failure.Kind != "validator_infrastructure" ||
+		failure.Code != "embedding_provider_unavailable" || !failure.Retryable {
+		t.Fatalf("failure = %#v", failure)
+	}
+	if got := trustedEmbeddingInfrastructureFailure(errors.New("harness returned malformed seed output")); got != nil {
+		t.Fatalf("miner failure misclassified as infrastructure: %#v", got)
+	}
+}
+
+func TestV7SeedingFailurePersistsStructuredInfrastructureClassification(t *testing.T) {
+	s := &server{store: store.New()}
+	s.store.Create("run", "run_size", store.StatusRunning, 1, 7)
+	s.failV7Seeding("run", "seeding failed: ", errors.New("embedding service unavailable"))
+	job, _ := s.store.Get("run")
+	if job.Status != store.StatusFailed || job.Failure == nil ||
+		job.Failure.Code != "embedding_provider_unavailable" || !job.Failure.Retryable {
+		t.Fatalf("job = %#v", job)
+	}
+}
+
 func TestRelayDegradedSince(t *testing.T) {
 	start := relayHealthSnapshot{Requests: 10, Successes: 9, InfrastructureFailures: 1, CallerCancellations: 2, UpstreamAttempts: 12}
 	if err := relayDegradedSince(start, relayHealthSnapshot{Requests: 20, Successes: 19, InfrastructureFailures: 1, CallerCancellations: 3, UpstreamAttempts: 23}); err != nil {

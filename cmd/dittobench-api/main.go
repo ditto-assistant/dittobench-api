@@ -1469,7 +1469,11 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	if len(iso.SecondaryWave.Pairs) > 0 {
 		s.store.SetStage(runID, store.StatusSeeding, len(perCase), total)
 		if _, err := runner.Seed(ctx, harnessURL, iso.SecondaryWave); err != nil {
-			s.store.Fail(runID, "seeding secondary isolation graph failed: "+err.Error())
+			if req.BenchVersion >= protocol.BenchVersionV7 {
+				s.failV7Seeding(runID, "seeding secondary isolation graph failed: ", err)
+			} else {
+				s.store.Fail(runID, "seeding secondary isolation graph failed: "+err.Error())
+			}
 			return
 		}
 	}
@@ -1477,7 +1481,11 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		if len(wave.Pairs) > 0 {
 			s.store.SetStage(runID, store.StatusSeeding, len(perCase), total)
 			if _, err := runner.Seed(ctx, harnessURL, wave); err != nil {
-				s.store.Fail(runID, fmt.Sprintf("seeding haystack wave %d failed: %s", w, err.Error()))
+				if req.BenchVersion >= protocol.BenchVersionV7 {
+					s.failV7Seeding(runID, fmt.Sprintf("seeding haystack wave %d failed: ", w), err)
+				} else {
+					s.store.Fail(runID, fmt.Sprintf("seeding haystack wave %d failed: %s", w, err.Error()))
+				}
 				return
 			}
 		}
