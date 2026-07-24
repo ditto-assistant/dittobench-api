@@ -86,6 +86,15 @@ func envIntDefault(key string, def int) int {
 	return def
 }
 
+func envFloatDefault(key string, def float64) float64 {
+	if value := os.Getenv(key); value != "" {
+		if parsed, err := strconv.ParseFloat(value, 64); err == nil && parsed > 0 && !math.IsInf(parsed, 0) && !math.IsNaN(parsed) {
+			return parsed
+		}
+	}
+	return def
+}
+
 // runBounded runs fn for each index in [0,n) with at most `concurrency` calls in
 // flight, and returns once all have finished. fn must be safe for concurrent use;
 // callers write per-index results into a preallocated slice so output order is

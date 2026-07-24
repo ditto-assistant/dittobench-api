@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	mathrand "math/rand/v2"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -129,12 +130,43 @@ type inferenceBroker struct {
 	platformProxyURL string
 	embeddingURL     string
 	embeddingSlots   chan struct{}
+	retry            brokerRetryConfig
+	sleep            func(context.Context, time.Duration) error
 }
 
 type toolRoute struct {
 	expectedSourceIP string
 	handler          http.Handler
 	slots            chan struct{}
+}
+
+type brokerRetryConfig struct {
+	maxAttempts int
+	base        time.Duration
+	cap         time.Duration
+	factor      float64
+}
+
+func (c brokerRetryConfig) backoff(attempt int) time.Duration {
+	delay := float64(c.base) * math.Pow(c.factor, float64(attempt-1))
+	if maximum := float64(c.cap); c.cap > 0 && delay > maximum {
+		delay = maximum
+	}
+	if delay <= 0 {
+		return 0
+	}
+	return time.Duration(delay/2 + mathrand.Float64()*(delay/2))
+}
+
+func brokerSleep(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func newInferenceBroker(maxSessions int, embeddingCapacity ...int) *inferenceBroker {
@@ -163,6 +195,13 @@ func newInferenceBroker(maxSessions int, embeddingCapacity ...int) *inferenceBro
 		embeddingURL: configuredEmbeddingURL(
 			envOr("DITTOBENCH_EMBEDDING_UPSTREAM_URL", "http://host.docker.internal:11434/api/embed"),
 		),
+		retry: brokerRetryConfig{
+			maxAttempts: envIntDefault("RELAY_RETRY_MAX_ATTEMPTS", 6),
+			base:        time.Duration(envIntDefault("RELAY_RETRY_BASE_MS", 200)) * time.Millisecond,
+			cap:         time.Duration(envIntDefault("RELAY_RETRY_CAP_MS", 2000)) * time.Millisecond,
+			factor:      envFloatDefault("RELAY_RETRY_FACTOR", 2),
+		},
+		sleep: brokerSleep,
 	}
 }
 
@@ -1026,21 +1065,19 @@ func (b *inferenceBroker) proxy(w http.ResponseWriter, r *http.Request, session 
 	privateKey := append(ed25519.PrivateKey(nil), session.privateKey...)
 	session.requests++
 	session.promptBytes += uint64(len(body))
-	session.upstreamAttempts++
 	session.mu.Unlock()
 
-	nonce := uuid.NewString()
 	requestCtx, cancel := context.WithCancel(r.Context())
+	cancelID := uuid.NewString()
 	session.mu.Lock()
-	session.cancels[nonce] = cancel
+	session.cancels[cancelID] = cancel
 	session.mu.Unlock()
 	defer func() {
 		cancel()
 		session.mu.Lock()
-		delete(session.cancels, nonce)
+		delete(session.cancels, cancelID)
 		session.mu.Unlock()
 	}()
-	requested := time.Now().UTC().Format("2006-01-02T15:04:05.000000+00:00")
 	if legacyGateway != "" {
 		var routeErr error
 		proxyURL, routeErr = relayURL(legacyGateway, "/v1/chat/completions")
@@ -1049,63 +1086,79 @@ func (b *inferenceBroker) proxy(w http.ResponseWriter, r *http.Request, session 
 			return
 		}
 	}
-	req, err := http.NewRequestWithContext(requestCtx, http.MethodPost, proxyURL, bytes.NewReader(body))
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "inference provider unavailable")
-		return
+	var responseBody []byte
+	var responseStatus int
+	var totalLatency uint64
+	maxAttempts := b.retry.maxAttempts
+	if maxAttempts < 1 {
+		maxAttempts = 1
 	}
-	req.Header.Set("Content-Type", "application/json")
-	if legacyGateway == "" {
-		digest := sha256.Sum256(body)
-		message := fmt.Sprintf("ditto-inference:v1:%s:%d:%s:%s:%s", grantID, generation, nonce, requested, hex.EncodeToString(digest[:]))
-		proof := base64.RawURLEncoding.EncodeToString(ed25519.Sign(privateKey, []byte(message)))
-		req.Header.Set("Authorization", "Bearer "+bearer)
-		req.Header.Set("X-Ditto-Grant", grantID)
-		req.Header.Set("X-Ditto-Generation", fmt.Sprint(generation))
-		req.Header.Set("X-Ditto-Nonce", nonce)
-		req.Header.Set("X-Ditto-Requested-At", requested)
-		req.Header.Set("X-Ditto-Proof", proof)
-	}
-	started := time.Now()
-	resp, err := b.client.Do(req)
-	latency := uint64(time.Since(started).Milliseconds())
-	if err != nil {
-		if requestCtx.Err() != nil {
-			session.mu.Lock()
-			session.callerCancels++
-			session.mu.Unlock()
-			writeError(w, http.StatusConflict, "inference session unavailable")
-			return
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if attempt > 1 && b.sleep(requestCtx, b.retry.backoff(attempt-1)) != nil {
+			break
+		}
+		nonce := uuid.NewString()
+		requested := time.Now().UTC().Format("2006-01-02T15:04:05.000000+00:00")
+		req, buildErr := http.NewRequestWithContext(requestCtx, http.MethodPost, proxyURL, bytes.NewReader(body))
+		if buildErr != nil {
+			break
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if legacyGateway == "" {
+			digest := sha256.Sum256(body)
+			message := fmt.Sprintf("ditto-inference:v1:%s:%d:%s:%s:%s", grantID, generation, nonce, requested, hex.EncodeToString(digest[:]))
+			proof := base64.RawURLEncoding.EncodeToString(ed25519.Sign(privateKey, []byte(message)))
+			req.Header.Set("Authorization", "Bearer "+bearer)
+			req.Header.Set("X-Ditto-Grant", grantID)
+			req.Header.Set("X-Ditto-Generation", fmt.Sprint(generation))
+			req.Header.Set("X-Ditto-Nonce", nonce)
+			req.Header.Set("X-Ditto-Requested-At", requested)
+			req.Header.Set("X-Ditto-Proof", proof)
 		}
 		session.mu.Lock()
-		session.failures++
-		session.providerLatency += latency
+		session.upstreamAttempts++
 		session.mu.Unlock()
-		writeError(w, http.StatusBadGateway, "inference provider unavailable")
-		return
+		started := time.Now()
+		resp, requestErr := b.client.Do(req)
+		totalLatency += uint64(time.Since(started).Milliseconds())
+		if requestErr != nil {
+			if requestCtx.Err() != nil {
+				break
+			}
+			continue
+		}
+		candidateBody, readErr := io.ReadAll(io.LimitReader(resp.Body, (16<<20)+1))
+		_ = resp.Body.Close()
+		responseStatus = resp.StatusCode
+		if readErr != nil || len(candidateBody) > 16<<20 {
+			continue
+		}
+		responseBody = candidateBody
+		if responseStatus == http.StatusRequestTimeout || responseStatus == http.StatusTooManyRequests || responseStatus >= 500 {
+			continue
+		}
+		break
 	}
-	defer resp.Body.Close()
-	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, (16<<20)+1))
-	if err != nil || len(responseBody) > 16<<20 {
+	if requestCtx.Err() != nil {
 		session.mu.Lock()
-		session.failures++
-		session.providerLatency += latency
+		session.callerCancels++
+		session.providerLatency += totalLatency
 		session.mu.Unlock()
-		writeError(w, http.StatusBadGateway, "inference provider unavailable")
+		writeError(w, http.StatusConflict, "inference session unavailable")
 		return
 	}
-	if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+	if responseStatus >= 400 && responseStatus < 500 && responseStatus != http.StatusTooManyRequests {
 		session.mu.Lock()
 		session.usageUnavailable++
-		session.providerLatency += latency
+		session.providerLatency += totalLatency
 		session.mu.Unlock()
-		writeError(w, resp.StatusCode, "inference request denied")
+		writeError(w, responseStatus, "inference request denied")
 		return
 	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+	if responseStatus < 200 || responseStatus >= 300 || len(responseBody) == 0 {
 		session.mu.Lock()
 		session.failures++
-		session.providerLatency += latency
+		session.providerLatency += totalLatency
 		session.mu.Unlock()
 		writeError(w, http.StatusBadGateway, "inference provider unavailable")
 		return
@@ -1119,7 +1172,7 @@ func (b *inferenceBroker) proxy(w http.ResponseWriter, r *http.Request, session 
 	usageOK := json.Unmarshal(responseBody, &decoded) == nil && decoded.Usage != nil && decoded.Usage.PromptTokens >= 0 && decoded.Usage.CompletionTokens >= 0
 	session.mu.Lock()
 	session.successes++
-	session.providerLatency += latency
+	session.providerLatency += totalLatency
 	if usageOK {
 		session.usageAvailable++
 		session.promptTokens += uint64(decoded.Usage.PromptTokens)

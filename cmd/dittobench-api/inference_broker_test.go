@@ -878,13 +878,16 @@ func TestInferenceBrokerTrustedProbeUsesControlPlaneSession(t *testing.T) {
 	}
 }
 
-func TestInferenceBrokerCountsProviderDenialAsIncompleteUsage(t *testing.T) {
+func TestInferenceBrokerRetriesTransientProviderDenial(t *testing.T) {
 	const profile = "openrouter-route-0123456789abcdef-v1"
 	requestCount := 0
-	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	var nonces []string
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestCount++
-		if requestCount == 1 {
-			http.Error(w, "rate limited", http.StatusTooManyRequests)
+		nonces = append(nonces, r.Header.Get("X-Ditto-Nonce"))
+		if requestCount <= 3 {
+			statuses := []int{http.StatusRequestTimeout, http.StatusTooManyRequests, http.StatusServiceUnavailable}
+			http.Error(w, "transient", statuses[requestCount-1])
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -893,6 +896,7 @@ func TestInferenceBrokerCountsProviderDenialAsIncompleteUsage(t *testing.T) {
 	defer upstream.Close()
 
 	broker := newInferenceBroker(1)
+	broker.sleep = func(context.Context, time.Duration) error { return nil }
 	proxyURL := configureBrokerUpstream(broker, upstream)
 	prepared := prepareBrokerSession(t, broker)
 	activateBrokerSessionFor(t, broker, prepared, proxyURL, "groq", profile, llm.V7HarnessModel)
@@ -902,15 +906,23 @@ func TestInferenceBrokerCountsProviderDenialAsIncompleteUsage(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for i, wantStatus := range []int{http.StatusTooManyRequests, http.StatusOK} {
-		request := httptest.NewRequest(http.MethodPost, "/v1/inference/id/v1/chat/completions", bytes.NewBufferString(`{"model":"openai/gpt-oss-20b"}`))
-		request.RemoteAddr = "192.0.2.31:4321"
-		request.SetPathValue("rest", "v1/chat/completions")
-		recorder := httptest.NewRecorder()
-		broker.handle(recorder, request)
-		if recorder.Code != wantStatus {
-			t.Fatalf("request %d status = %d, want %d: %s", i+1, recorder.Code, wantStatus, recorder.Body.String())
+	request := httptest.NewRequest(http.MethodPost, "/v1/inference/id/v1/chat/completions", bytes.NewBufferString(`{"model":"openai/gpt-oss-20b"}`))
+	request.RemoteAddr = "192.0.2.31:4321"
+	request.SetPathValue("rest", "v1/chat/completions")
+	recorder := httptest.NewRecorder()
+	broker.handle(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("request status = %d, want 200: %s", recorder.Code, recorder.Body.String())
+	}
+	if requestCount != 4 {
+		t.Fatalf("retry attempts=%d, want 4", requestCount)
+	}
+	seen := make(map[string]bool, len(nonces))
+	for _, nonce := range nonces {
+		if nonce == "" || seen[nonce] {
+			t.Fatalf("retry did not use independently signed attempts: nonces=%v", nonces)
 		}
+		seen[nonce] = true
 	}
 
 	end, err := broker.snapshot(prepared["session_id"])
@@ -921,11 +933,48 @@ func TestInferenceBrokerCountsProviderDenialAsIncompleteUsage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if usage.Requests != 2 || usage.Successes != 1 || usage.UsageAvailable != 1 || usage.UsageUnavailable != 1 || usage.Status != "unavailable" {
-		t.Fatalf("mixed provider result accounting = %+v", usage)
+	if usage.Requests != 1 || usage.Successes != 1 || usage.UsageAvailable != 1 || usage.UsageUnavailable != 0 || usage.Status != "complete" {
+		t.Fatalf("recovered provider result accounting = %+v", usage)
 	}
-	if err := requireCompleteV7Usage(protocol.BenchVersionV7, usage); err == nil {
-		t.Fatal("v7 accepted a provider denial hidden behind a later success")
+	execution, err := relayExecutionSince(start, end)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if execution.UpstreamAttempts != 4 || execution.Retries != 3 || execution.InfrastructureFailures != 0 {
+		t.Fatalf("recovered provider execution accounting = %+v", execution)
+	}
+	if err := requireCompleteV7Usage(protocol.BenchVersionV7, usage); err != nil {
+		t.Fatalf("v7 rejected a fully accounted recovered request: %v", err)
+	}
+}
+
+func TestInferenceBrokerRejectsExhaustedTransientFailures(t *testing.T) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer upstream.Close()
+
+	broker := newInferenceBroker(1)
+	broker.sleep = func(context.Context, time.Duration) error { return nil }
+	proxyURL := configureBrokerUpstream(broker, upstream)
+	prepared := prepareBrokerSession(t, broker)
+	activateBrokerSessionFor(t, broker, prepared, proxyURL, "groq", "openrouter-route-0123456789abcdef-v1", llm.V7HarnessModel)
+	claimAndBindBrokerSession(t, broker, prepared["session_id"], "192.0.2.32", protocol.BenchVersionV7)
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/inference/id/v1/chat/completions", bytes.NewBufferString(`{"model":"openai/gpt-oss-20b"}`))
+	request.RemoteAddr = "192.0.2.32:4321"
+	request.SetPathValue("rest", "v1/chat/completions")
+	recorder := httptest.NewRecorder()
+	broker.handle(recorder, request)
+	if recorder.Code != http.StatusBadGateway {
+		t.Fatalf("request status = %d, want 502: %s", recorder.Code, recorder.Body.String())
+	}
+	snapshot, err := broker.snapshot(prepared["session_id"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Requests != 1 || snapshot.Successes != 0 || snapshot.UpstreamAttempts != uint64(broker.retry.maxAttempts) || snapshot.InfrastructureFailures != 1 {
+		t.Fatalf("exhausted provider accounting = %+v", snapshot)
 	}
 }
 
