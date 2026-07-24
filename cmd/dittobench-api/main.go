@@ -151,7 +151,6 @@ type server struct {
 	allowPrivate           bool
 	allowScreenedImages    bool
 	requireTicketInference bool
-	v7TokenCalibration     bool
 	softwareVersion        string
 	sourceRevision         string
 	limiter                *ratelimit.Limiter
@@ -188,10 +187,6 @@ func main() {
 	allowPrivate := envBool("DITTOBENCH_ALLOW_PRIVATE_HARNESS")
 	allowScreenedImages := envBool("DITTOBENCH_ALLOW_SCREENED_IMAGES")
 	requireTicketInference := envBool("DITTOBENCH_REQUIRE_TICKET_INFERENCE")
-	v7TokenCalibration := envBool("DITTOBENCH_V7_TOKEN_CALIBRATION")
-	if v7TokenCalibration && !(allowPrivate && allowScreenedImages && requireTicketInference) {
-		log.Fatal("DITTOBENCH_V7_TOKEN_CALIBRATION requires private harness, screened image, and ticket inference modes")
-	}
 	softwareVersion := strings.TrimSpace(os.Getenv("DITTOBENCH_SOFTWARE_VERSION"))
 	sourceRevision := strings.TrimSpace(os.Getenv("DITTOBENCH_SOURCE_SHA"))
 	runner.Configure(allowPrivate)
@@ -201,10 +196,6 @@ func main() {
 	if allowScreenedImages {
 		log.Printf("DITTOBENCH_ALLOW_SCREENED_IMAGES set — trusted validator image path enabled")
 	}
-	if v7TokenCalibration {
-		log.Printf("WARNING: DITTOBENCH_V7_TOKEN_CALIBRATION set — unreviewed v7 baseline collection enabled (local/dev only)")
-	}
-
 	sandboxRuntime := sandbox.NewLocalDocker()
 	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cleanupCancel()
@@ -222,7 +213,6 @@ func main() {
 		allowPrivate:           allowPrivate,
 		allowScreenedImages:    allowScreenedImages,
 		requireTicketInference: requireTicketInference,
-		v7TokenCalibration:     v7TokenCalibration,
 		softwareVersion:        softwareVersion,
 		sourceRevision:         sourceRevision,
 		limiter:                ratelimit.New(submitsPerWindow, submitWindow),
@@ -332,8 +322,14 @@ func (s *server) handleCapabilities(w http.ResponseWriter, _ *http.Request) {
 	if efficiency.ProductionReadyForVersion(protocol.BenchVersionV6) {
 		versions = append(versions, protocol.BenchVersionV6)
 	}
-	// Advertise v7 only with the audited GPT-OSS token manifest and exact route
-	// identity embedded in this scorer release. Platform rollout stays separate.
+	// Advertise v7 iff this scorer release is TECHNICALLY READY: the embedded
+	// audited GPT-OSS quality-only manifest with the exact route/embedding
+	// identity (efficiency.ReadyForV7QualityOnly). This is capability only —
+	// exactly like v5/v6 advertise on their reviewed manifests. Whether v7 is
+	// actually dispatched/scored is the platform's benchmark rollout decision
+	// (backroom-controlled active bench, rollback to v6 supported); the
+	// validator scores whatever bench the platform sends, provided it advertises
+	// support. There is deliberately no validator-side activation flag.
 	v7Calibration := efficiency.V7CalibrationReadiness()
 	if efficiency.ProductionReadyForVersion(protocol.BenchVersionV7) &&
 		efficiency.ValidV7CalibrationReadiness(v7Calibration) {
@@ -1397,23 +1393,30 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		resp, execution, runErr := runner.RunCaseWithTelemetry(ctx, harnessURL, c.ID, c.Prompt, tools, runner.CaseOptions{ToolEndpoint: toolEndpoint, BenchVersion: req.BenchVersion})
 		observed := toolSrv.Observed(c.ID)
 		toolTranscripts[i] = transcriptCase{CaseID: c.ID, Kind: protocol.KindTool, Response: resp, Observed: observed, Execution: execution}
-		cs := scorer.ScoreToolCaseObservedScope(c, resp, runErr == nil, observed, scope)
+		cs := scorer.ScoreToolCaseObservedForVersion(c, resp, runErr == nil, observed, scope, req.BenchVersion)
 		if datagen.IsResultUsage(c.Category) {
 			// Result-usage: trajectory + whether the answer carried the served
 			// needle value (a fabricated value only the executed tool could
 			// reveal). An answer carrying the served DECOY (a plausible number
 			// fished from the wrong tool's result) zeros the usage half too.
-			cs = scorer.ComposeResultUsageWithDecoy(cs, resp.FinalText,
+			// Under v7 the composition is multiplicative and a decoy zeroes the
+			// whole case (ComposeResultUsageForVersion).
+			cs = scorer.ComposeResultUsageForVersion(req.BenchVersion, cs, resp.FinalText,
 				toolFixtures[i].NeedleValue(), toolFixtures[i].DecoyValue())
 		} else {
 			cs = scorer.FinishTool(cs)
 		}
+		// v7: a fabricated self-report is itself costly — a non-empty
+		// self-reported trajectory that disagrees with the observed one halves
+		// the case. No-op pre-v7 and when nothing was observed.
+		cs = scorer.ApplyTrajectoryMismatch(req.BenchVersion, cs, resp.ToolCalls, observed)
 		switch {
 		case len(observed) > 0:
 			toolWasObserved[i] = true
 		case toolexec.Observable(c):
-			// Unobserved observable case: capped at 0.5 in practice, 0 when scored.
-			cs = scorer.CapUnobservedScope(cs, scope)
+			// Unobserved observable case: capped in practice (0.5 pre-v7, 0.05
+			// under v7), 0 when scored.
+			cs = scorer.CapUnobservedForVersion(cs, scope, req.BenchVersion)
 			toolWasCapped[i] = true
 		}
 		toolResults[i] = cs
@@ -1468,7 +1471,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	// user isolation cases can run in any wave.
 	if len(iso.SecondaryWave.Pairs) > 0 {
 		s.store.SetStage(runID, store.StatusSeeding, len(perCase), total)
-		if _, err := runner.Seed(ctx, harnessURL, iso.SecondaryWave); err != nil {
+		if _, err := runner.SeedForVersion(ctx, harnessURL, iso.SecondaryWave, req.BenchVersion); err != nil {
 			if req.BenchVersion >= protocol.BenchVersionV7 {
 				s.failV7Seeding(runID, "seeding secondary isolation graph failed: ", err)
 			} else {
@@ -1480,7 +1483,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	for w, wave := range memSuite.Waves {
 		if len(wave.Pairs) > 0 {
 			s.store.SetStage(runID, store.StatusSeeding, len(perCase), total)
-			if _, err := runner.Seed(ctx, harnessURL, wave); err != nil {
+			if _, err := runner.SeedForVersion(ctx, harnessURL, wave, req.BenchVersion); err != nil {
 				if req.BenchVersion >= protocol.BenchVersionV7 {
 					s.failV7Seeding(runID, fmt.Sprintf("seeding haystack wave %d failed: ", w), err)
 				} else {
@@ -1597,7 +1600,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		CappedToolCases:   cappedTool,
 		IsolationCases:    len(iso.Cases),
 		LifecycleCases:    memSuite.LifecycleCases,
-		ToolEfficiency:    scorer.ToolEfficiencyFactor(perCase),
+		ToolEfficiency:    scorer.ToolEfficiencyFactorForVersion(perCase, req.BenchVersion),
 		// Generation and grading are both deterministic and non-LLM; the only
 		// model in a run is the locked one the harness talks to.
 		Models: &protocol.ModelInfo{
@@ -1632,21 +1635,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		report.Details.CalibrationBrier = brier
 		report.Details.CalibrationN = cn
 	}
-	if req.BenchVersion >= protocol.BenchVersionV5 {
-		rawComposite := report.Composite
-		rawStderr := report.CompositeStderr
-		var baseline *efficiency.Baseline
-		if found, ok := efficiency.LookupForVersion(req.BenchVersion, req.RunSize, tokenUsage); ok {
-			baseline = &found
-		}
-		decision := efficiency.Apply(report, tokenUsage, baseline)
-		decision.RawCompositeStderr = rawStderr
-		decision.AdjustedCompositeStderr = math.Round(rawStderr*decision.Multiplier*1e6) / 1e6
-		report.RawComposite = rawComposite
-		report.Composite = decision.AdjustedComposite
-		report.CompositeStderr = decision.AdjustedCompositeStderr
-		report.Details.TokenEfficiency = &decision
-	}
+	report = applyTokenContract(report, req.BenchVersion, req.RunSize, tokenUsage)
 	if injections > 0 {
 		log.Printf("run %s: %d injection-compliance case(s) flagged", runID, injections)
 	}
@@ -1684,6 +1673,36 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	s.store.Finish(runID, report)
 	log.Printf("run %s done: bench_version=%d composite=%.3f tool_mean=%.3f memory_mean=%.3f observed=%d capped=%d",
 		runID, req.BenchVersion, report.Composite, report.ToolMean, report.MemoryMean, observedTool, cappedTool)
+}
+
+// applyTokenContract applies the bench version's token contract to a scored
+// report:
+//
+//   - v5/v6: the absolute p90 token-waste transform (efficiency.Apply) may
+//     discount the composite, exactly as historically.
+//   - v7 (quality-only contract): the composite is NEVER moved by token
+//     usage. A neutral TokenEfficiency record still lands in the report so
+//     the audited observed usage is first-class alongside the quality score
+//     (details.token_usage carries the full metered block independently).
+//   - pre-v5: untouched.
+func applyTokenContract(report protocol.ScoreReport, benchVersion int, runSize string, tokenUsage protocol.TokenUsage) protocol.ScoreReport {
+	if benchVersion < protocol.BenchVersionV5 {
+		return report
+	}
+	rawComposite := report.Composite
+	rawStderr := report.CompositeStderr
+	var baseline *efficiency.Baseline
+	if found, ok := efficiency.LookupForVersion(benchVersion, runSize, tokenUsage); ok {
+		baseline = &found
+	}
+	decision := efficiency.ApplyForVersion(benchVersion, report, tokenUsage, baseline)
+	decision.RawCompositeStderr = rawStderr
+	decision.AdjustedCompositeStderr = math.Round(rawStderr*decision.Multiplier*1e6) / 1e6
+	report.RawComposite = rawComposite
+	report.Composite = decision.AdjustedComposite
+	report.CompositeStderr = decision.AdjustedCompositeStderr
+	report.Details.TokenEfficiency = &decision
+	return report
 }
 
 func validateBenchVersionResult(requested, artifactVersion int, details *protocol.RunDetails) error {

@@ -22,6 +22,35 @@ const (
 	MinMultiplier    = 1 - MaximumPenalty
 )
 
+// v7 quality-only contract. While the v7 difficulty suite is still moving,
+// repeatedly recalibrating an ABSOLUTE token budget is the wrong contract, so
+// bench_version 7 removes the token penalty from the composite entirely:
+//
+//   - The v7 composite is a pure function of answer/trajectory QUALITY. No
+//     token multiplier is applied, so a deterministic validator produces the
+//     same score for the same artifact regardless of when it runs.
+//   - Audited usage stays FIRST-CLASS: validators keep metering and reporting
+//     trusted chat + embedding usage (details.token_usage and the broker
+//     accounting record) alongside the quality score. ApplyForVersion emits a
+//     neutral TokenEfficiency record carrying the observed totals and the
+//     explicit decision reason below, so every v7 report shows the usage and
+//     shows that it did not move the composite.
+//   - Efficiency incentives move to the PLATFORM layer as a bounded,
+//     epoch-frozen RELATIVE bonus among quality-qualified submissions — see
+//     docs/relative-efficiency-bonus-spec.md. The validator's only job is to
+//     expose the audited inputs that make that computable.
+//
+// The reviewed-measured manifest embedded below (the 60-run 2026-07 campaign,
+// raw p90 references with 75% allowances, scoring_enabled=false) is retained
+// as the canonical v7 REFERENCE IDENTITY and audited evidence; under this
+// contract its budgets are never activated for v7 scoring — the successor is
+// the platform-side relative bonus, not these absolute budgets. v5/v6 keep
+// the historical absolute transform byte-for-byte.
+const (
+	V7QualityOnlyFormula = "v7-quality-only-v1"
+	V7QualityOnlyReason  = "v7_quality_only_contract"
+)
+
 type Baseline struct {
 	ID                           string `json:"id"`
 	BenchVersion                 int    `json:"bench_version"`
@@ -69,6 +98,79 @@ type Manifest struct {
 	Embedding          *EmbeddingContract   `json:"embedding,omitempty"`
 	Calibration        []CalibrationDataset `json:"calibration_datasets"`
 	Baselines          []Baseline           `json:"baselines"`
+	// Derived is the calibration-transfer provenance record (additive,
+	// omitted for reviewed-measured manifests). A manifest carrying it was
+	// DERIVED by the offline token model (internal/tokenmodel) rather than
+	// measured by a live campaign. No scoring or readiness gate consumes
+	// derived manifests today — the class is reserved for a later, explicit
+	// platform policy decision; ReadyForV7Production rejects them fail-closed.
+	Derived *Derivation `json:"derived,omitempty"`
+}
+
+// Derivation records how a derived manifest was produced: the model identity,
+// the fit evidence behind it, the per-size transfer factors applied, and the
+// smoke-validation outcome (nil until a smoke pass runs).
+type Derivation struct {
+	Method               string                    `json:"method"`
+	ModelVersion         string                    `json:"model_version"`
+	SourceManifestSHA256 string                    `json:"source_manifest_sha256"`
+	SourceBenchVersion   int                       `json:"source_bench_version"`
+	FitCorpusSHA256      string                    `json:"fit_corpus_sha256"`
+	FitRuns              int                       `json:"fit_runs"`
+	FitResidualMeanPct   map[string]float64        `json:"fit_residual_mean_pct"`
+	FitResidualMaxPct    map[string]float64        `json:"fit_residual_max_pct"`
+	TransferP90CVMaxPct  map[string]float64        `json:"transfer_p90_cv_max_pct"`
+	TransferFactors      map[string]TransferFactor `json:"transfer_factors"`
+	Smoke                *SmokeRecord              `json:"smoke,omitempty"`
+}
+
+// TransferFactor is the per-run-size multiplicative correction applied to the
+// model's raw predictions (the measured-vs-predicted anchor at the p90 rank
+// of the fit corpus).
+type TransferFactor struct {
+	Prompt     float64 `json:"prompt"`
+	Completion float64 `json:"completion"`
+}
+
+// SmokeRecord is the outcome of validating a derived manifest against K live
+// runs. Passed is true only when every smoke run's measured chat total landed
+// inside the acceptance band (tolerance shrunk by the border zone — a
+// near-boundary result is rejected as inconclusive, fail-closed).
+type SmokeRecord struct {
+	Runs           []SmokeRun         `json:"runs"`
+	TolerancePct   map[string]float64 `json:"tolerance_pct"`
+	BorderZoneFrac float64            `json:"border_zone_frac"`
+	Passed         bool               `json:"passed"`
+}
+
+// SmokeRun is one live run's measured-vs-predicted comparison.
+type SmokeRun struct {
+	RunSize              string  `json:"run_size"`
+	Seed                 int64   `json:"seed"`
+	MeasuredTotalTokens  uint64  `json:"measured_total_tokens"`
+	PredictedTotalTokens uint64  `json:"predicted_total_tokens"`
+	ErrorPct             float64 `json:"error_pct"`
+}
+
+// Manifest provenance classes. ReviewedMeasured is the only class any gate
+// accepts today.
+const (
+	ProvenanceReviewedMeasured     = "reviewed-measured"
+	ProvenanceDerivedSmokeVerified = "derived-smoke-validated"
+	ProvenanceDerivedUnvalidated   = "derived-unvalidated"
+)
+
+// ManifestProvenance classifies a manifest's calibration provenance. The
+// platform can use this to apply per-class rollout policy; validator-side
+// gates currently accept only ProvenanceReviewedMeasured.
+func ManifestProvenance(m Manifest) string {
+	if m.Derived == nil {
+		return ProvenanceReviewedMeasured
+	}
+	if m.Derived.Smoke != nil && m.Derived.Smoke.Passed {
+		return ProvenanceDerivedSmokeVerified
+	}
+	return ProvenanceDerivedUnvalidated
 }
 
 // CalibrationRouteIdentity is the exact provider route contract covered by a
@@ -86,6 +188,10 @@ type CalibrationRouteIdentity struct {
 type CalibrationReadiness struct {
 	ManifestSHA256  string                     `json:"manifest_sha256"`
 	SupportedRoutes []CalibrationRouteIdentity `json:"supported_routes"`
+	// Provenance is the manifest's calibration provenance class (additive;
+	// see ManifestProvenance). The embedded production manifest is always
+	// reviewed-measured today.
+	Provenance string `json:"provenance,omitempty"`
 }
 
 //go:embed baselines_v5.json
@@ -133,15 +239,19 @@ func ProductionReady() bool {
 	return ReadyForProduction(productionManifest)
 }
 
-// ProductionReadyForVersion keeps execution support separate from capability
-// advertisement. v7 remains dark until its GPT-OSS starter-kit manifest is
-// reviewed and embedded; v5/v6 retain the existing Qwen calibration.
+// ProductionReadyForVersion reports TECHNICAL readiness, which gates capability
+// advertisement. v7 becomes ready once its reviewed GPT-OSS quality-only
+// manifest is embedded (scoring_enabled=false, permanent — usage is audited but
+// never scored); v5/v6 retain the existing Qwen calibration. Whether a ready
+// version is actually dispatched/scored is the platform's benchmark rollout
+// decision (backroom-controlled active bench, rollback to v6 supported); there
+// is deliberately no validator-side activation flag.
 func ProductionReadyForVersion(benchVersion int) bool {
 	switch benchVersion {
 	case protocol.BenchVersionV5, protocol.BenchVersionV6:
 		return ProductionReady()
 	case protocol.BenchVersionV7:
-		return ReadyForV7Production(productionV7Manifest)
+		return ReadyForV7QualityOnly(productionV7Manifest)
 	default:
 		return false
 	}
@@ -155,7 +265,7 @@ func V7CalibrationReadiness() CalibrationReadiness {
 
 func v7CalibrationReadiness(manifest Manifest, rawManifest []byte) CalibrationReadiness {
 	readiness := CalibrationReadiness{SupportedRoutes: []CalibrationRouteIdentity{}}
-	if len(rawManifest) == 0 || !ReadyForV7Production(manifest) {
+	if len(rawManifest) == 0 || !ReadyForV7QualityOnly(manifest) {
 		return readiness
 	}
 	seen := map[CalibrationRouteIdentity]bool{}
@@ -181,6 +291,7 @@ func v7CalibrationReadiness(manifest Manifest, rawManifest []byte) CalibrationRe
 	})
 	sum := sha256.Sum256(rawManifest)
 	readiness.ManifestSHA256 = fmt.Sprintf("%x", sum[:])
+	readiness.Provenance = ManifestProvenance(manifest)
 	return readiness
 }
 
@@ -243,11 +354,22 @@ const (
 	v7AllowancePolicy          = "starter_raw_p90_floor_75_percent_v1"
 )
 
-// ReadyForV7Production validates the initial aggregate GPT-OSS calibration
-// contract. Provider-specific manifests remain dark until adaptive routing is
-// separately reviewed and enabled.
-func ReadyForV7Production(manifest Manifest) bool {
-	if !manifest.ScoringEnabled || manifest.BenchVersion != protocol.BenchVersionV7 ||
+// v7ContractShapeValid validates every element of the reviewed aggregate
+// GPT-OSS v7 contract EXCEPT the scoring_enabled flag: the locked harness model
+// identity, the aggregate route + hosted embedding profile, the starter-kit
+// revision, the dataset known-vector and calibration-digest verification, and
+// the three reference baseline groups (one per run size). Both the
+// scoring-enabled contract (ReadyForV7Production) and the quality-only
+// production contract (ReadyForV7QualityOnly) build on this shared, fail-closed
+// identity gate. Derived manifests (calibration-transfer provenance) are
+// rejected here: the derived+smoke-validated class is reserved for a later
+// explicit platform policy, and today only a reviewed-measured campaign may
+// establish v7 identity/readiness.
+func v7ContractShapeValid(manifest Manifest) bool {
+	if manifest.Derived != nil {
+		return false
+	}
+	if manifest.BenchVersion != protocol.BenchVersionV7 ||
 		manifest.StarterKitRevision != v7StarterKitRevision ||
 		manifest.DatasetKnownVector != v7DatasetKnownVector ||
 		calibrationDatasetDigest(manifest.Calibration) != v7CalibrationDatasetDigest ||
@@ -285,6 +407,29 @@ func ReadyForV7Production(manifest Manifest) bool {
 	return true
 }
 
+// ReadyForV7Production validates the SCORING-ENABLED aggregate GPT-OSS contract:
+// the full identity gate plus scoring_enabled=true. This is the completeness
+// gate the calibration tooling uses before it may emit an explicitly
+// scoring-enabled candidate. The embedded production manifest ships
+// scoring_enabled=false (the permanent v7 quality-only contract), so this
+// returns false for it by design — production readiness flows through
+// ReadyForV7QualityOnly.
+func ReadyForV7Production(manifest Manifest) bool {
+	return manifest.ScoringEnabled && v7ContractShapeValid(manifest)
+}
+
+// ReadyForV7QualityOnly validates the v7 QUALITY-ONLY production contract: the
+// full model/route/embedding/dataset-hash identity gate is intact and enforced,
+// but scoring_enabled MUST be false. Under quality-only, token usage never
+// moves the composite (ApplyForVersion emits a neutral multiplier-1 record), so
+// no scoring-enabled token baseline is required to admit or score a v7 run —
+// yet the locked model identity (openai/gpt-oss-20b), the route/embedding
+// profile, and dataset verification remain fail-closed. This is the predicate
+// behind ProductionReadyForVersion(V7) and the v7 capability readiness.
+func ReadyForV7QualityOnly(manifest Manifest) bool {
+	return !manifest.ScoringEnabled && v7ContractShapeValid(manifest)
+}
+
 func canonicalSHA256(value string) bool {
 	if len(value) != sha256.Size*2 {
 		return false
@@ -319,6 +464,11 @@ func baselineID(benchVersion int, b Baseline) string {
 	sum := sha256.Sum256([]byte(canonical))
 	return fmt.Sprintf("v%d-starter-p90-%x", benchVersion, sum[:8])
 }
+
+// BaselineID is the canonical content-derived baseline id (exported for the
+// calibration-transfer tooling, which must mint ids the same way the measured
+// pipeline does).
+func BaselineID(benchVersion int, b Baseline) string { return baselineID(benchVersion, b) }
 
 func validV7CalibrationDatasets(datasets []CalibrationDataset) bool {
 	if len(datasets) != 60 {
@@ -464,6 +614,29 @@ func Apply(raw protocol.ScoreReport, usage protocol.TokenUsage, baseline *Baseli
 	result.DecisionReason = "above_budget"
 	result.AdjustedComposite = round6(raw.Composite * result.Multiplier)
 	return result
+}
+
+// ApplyForVersion selects the token contract for a bench version. v5/v6 are
+// byte-identical to Apply. v7 is the QUALITY-ONLY contract: the returned
+// record is always neutral (multiplier 1, composite untouched) and exists
+// purely to carry the audited observed usage and the explicit decision reason
+// into the report — token usage is recorded, never scored, for v7. The
+// reviewed manifest's budgets/allowances are reference identity only.
+func ApplyForVersion(benchVersion int, raw protocol.ScoreReport, usage protocol.TokenUsage, baseline *Baseline) protocol.TokenEfficiency {
+	if benchVersion >= protocol.BenchVersionV7 {
+		return protocol.TokenEfficiency{
+			FormulaVersion:           V7QualityOnlyFormula,
+			ObservedPromptTokens:     usage.PromptTokens,
+			ObservedCompletionTokens: usage.CompletionTokens,
+			ObservedTotalTokens:      usage.TotalTokens,
+			MinimumMultiplier:        1,
+			Multiplier:               1,
+			RawComposite:             raw.Composite,
+			AdjustedComposite:        raw.Composite,
+			DecisionReason:           V7QualityOnlyReason,
+		}
+	}
+	return Apply(raw, usage, baseline)
 }
 
 // ValidUsage applies the same completeness and arithmetic checks to scoring

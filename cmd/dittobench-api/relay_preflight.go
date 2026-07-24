@@ -181,7 +181,16 @@ func validV7RouteProfile(profile string) bool {
 	return true
 }
 
-func requireTokenAccounting(snapshot relayHealthSnapshot, benchVersion int, runSize string, v7TokenCalibration bool) error {
+// requireTokenAccounting is the admission gate on relay identity before a run.
+// v5/v6 additionally require a reviewed absolute token baseline (their
+// composite is discounted against it). v7 runs under the QUALITY-ONLY contract:
+// token usage never moves the composite, so no reviewed token baseline is
+// required to admit or score a v7 run. The v7 gate still fail-closes on the
+// things that matter for identity — trusted accounting (v2), the immutable
+// provider identity, the locked harness model, and a well-formed versioned
+// route profile — and complete metered usage is separately enforced by
+// requireCompleteV7Usage at run result.
+func requireTokenAccounting(snapshot relayHealthSnapshot, benchVersion int, runSize string) error {
 	if snapshot.AccountingVersion != 2 {
 		return fmt.Errorf("relay health lacks trusted token accounting")
 	}
@@ -194,14 +203,6 @@ func requireTokenAccounting(snapshot relayHealthSnapshot, benchVersion int, runS
 		}
 		if !validV7RouteProfile(snapshot.ProfileRevision) {
 			return fmt.Errorf("relay profile does not match benchmark v7")
-		}
-		identity := protocol.TokenUsage{
-			Provider:        snapshot.Provider,
-			ProfileRevision: snapshot.ProfileRevision,
-			Model:           snapshot.Model,
-		}
-		if _, ok := efficiency.LookupForVersion(benchVersion, runSize, identity); !ok && !v7TokenCalibration {
-			return fmt.Errorf("relay profile lacks a reviewed benchmark v7 token baseline")
 		}
 	}
 	return nil
@@ -306,7 +307,7 @@ func (s *server) relayRunStart(ctx context.Context, runID string, benchVersion i
 		return relayHealthSnapshot{}, false
 	}
 	if benchVersion >= protocol.BenchVersionV5 {
-		if err := requireTokenAccounting(snapshot, benchVersion, runSize, s.v7TokenCalibration); err != nil {
+		if err := requireTokenAccounting(snapshot, benchVersion, runSize); err != nil {
 			s.failRelayUnavailable(runID, err)
 			return relayHealthSnapshot{}, false
 		}

@@ -168,8 +168,11 @@ func TestCompositeStderrScaledByGateFactor(t *testing.T) {
 		t.Fatalf("canary factors: clean=%v (want 1.0), leak=%v (want %v)",
 			fClean, fLeak, canaryLeakPenalty)
 	}
-	repClean := Aggregate("run", clean)
-	repLeak := Aggregate("run", leak)
+	// Pinned to the frozen v5 contract: Aggregate follows CurrentBenchVersion,
+	// and v7 deepens the leak penalty to 0.25 (asserted in v7_test.go); this
+	// test isolates the SE-shares-the-gate identity under the historical 0.5.
+	repClean := AggregateForVersion("run", clean, protocol.BenchVersionV5)
+	repLeak := AggregateForVersion("run", leak, protocol.BenchVersionV5)
 	if repClean.CompositeStderr <= 0 || repLeak.CompositeStderr <= 0 {
 		t.Fatalf("expected positive stderrs, got clean=%v leak=%v",
 			repClean.CompositeStderr, repLeak.CompositeStderr)

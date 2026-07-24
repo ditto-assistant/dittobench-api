@@ -24,7 +24,28 @@ const (
 // expected tools, returning a [0,1] score and human-readable notes. It assumes
 // the caller has already handled the no-expected-tool and no-response cases.
 func deterministicToolScore(c protocol.ToolCase, calls []protocol.ObservedToolCall) (float64, []string) {
+	return deterministicToolScoreStrict(c, calls, false)
+}
+
+// deterministicToolScoreStrict is deterministicToolScore with the v7 strict
+// contract (strict=true, bench_version >= 7):
+//
+//   - A FORBIDDEN argument on any expected tool's call zeroes the whole case.
+//     Pre-v7 it only counted against arg precision, so a harness could carry a
+//     banned selector and still keep most of its credit.
+//   - Hop ORDER multiplies the whole score for ordered multi-hop cases, not
+//     just the 0.2-weight trajectory term: an out-of-order chain cannot hide
+//     behind name/arg F1.
+//   - The extra-call / over-budget penalty is DOUBLED before it enters the
+//     trajectory term.
+//
+// strict=false reproduces the historical scoring byte-for-byte.
+func deterministicToolScoreStrict(c protocol.ToolCase, calls []protocol.ObservedToolCall, strict bool) (float64, []string) {
 	var notes []string
+
+	if strict && forbiddenArgPresent(c.ExpectedTools, calls) {
+		return 0, append(notes, "v7 strict: forbidden argument present — case scored 0")
+	}
 
 	expectedNames := map[string]int{}
 	for _, t := range c.ExpectedTools {
@@ -86,13 +107,46 @@ func deterministicToolScore(c protocol.ToolCase, calls []protocol.ObservedToolCa
 			notes = append(notes, fmt.Sprintf("%d extra/unexpected tool call(s)", extras))
 		}
 	}
+	if strict {
+		penalty *= 2 // v7: over-budget/extra calls cost double
+	}
 	if penalty > 1 {
 		penalty = 1
 	}
 
 	trajectory := order * (1 - penalty)
 	score := wName*nameScore + wArg*argF1 + wTrajectory*trajectory
+	if strict && !c.Unordered && order < 1 {
+		// v7: hop order gates the WHOLE score for ordered multi-hop cases. The
+		// trajectory term already carries order at 0.2 weight; multiplying again
+		// is intentional — a fully out-of-order chain scores 0.
+		score *= order
+		notes = append(notes, "v7 strict: out-of-order multi-hop — score multiplied by order credit")
+	}
 	return clamp01(round6(score)), notes
+}
+
+// forbiddenArgPresent reports whether any observed call to an expected tool
+// carries one of that tool's forbidden arguments. Used only by the v7 strict
+// contract, where a forbidden argument zeroes the case.
+func forbiddenArgPresent(expected []protocol.ToolSpec, calls []protocol.ObservedToolCall) bool {
+	for _, et := range expected {
+		if len(et.ForbiddenArgs) == 0 {
+			continue
+		}
+		for _, o := range calls {
+			if o.Name != et.Name {
+				continue
+			}
+			observedArgs := parseArgs(o.Args)
+			for _, forbidden := range et.ForbiddenArgs {
+				if _, present := observedArgs[forbidden]; present {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // argCorrectness scores required/forbidden arguments over the matched expected

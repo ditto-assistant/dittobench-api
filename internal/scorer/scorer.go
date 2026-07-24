@@ -252,17 +252,10 @@ const (
 )
 
 // overshootEfficiency maps how far an observed trajectory exceeded the expected
-// tool count to a factor in [1-effMaxPenalty, 1].
+// tool count to a factor in [1-effMaxPenalty, 1] under the historical (v3..v6)
+// curve. The shared implementation lives in v7.go (overshootEfficiencyWith).
 func overshootEfficiency(expected, actual int) float64 {
-	over := actual - expected
-	if over <= effFreeOvershoot {
-		return 1.0
-	}
-	frac := float64(over-effFreeOvershoot) / float64(effFullOvershoot-effFreeOvershoot)
-	if frac > 1 {
-		frac = 1
-	}
-	return 1 - frac*effMaxPenalty
+	return overshootEfficiencyWith(expected, actual, legacyEffParams)
 }
 
 // ToolEfficiencyFactor is the run's observed tool-efficiency multiplier for the
@@ -270,43 +263,15 @@ func overshootEfficiency(expected, actual int) float64 {
 // tool cases, or 1.0 (no effect) when none ran under observed execution — e.g. a
 // remote harness that never routed through the mock endpoint, where the call
 // count is unverifiable and so is not scored.
+// Memory-routing cases are scored routing-only precisely so the suite does
+// not penalize a competent memory harness for HOW it retrieves (see
+// scoreCase's allMemoryTools branch); charging overshoot there would
+// re-penalize exactly that. AllowExtraTools cases REQUIRE more calls than
+// expected (forced first-call failure), so they are exempt too. Both
+// exemptions live in toolEfficiencyFactorWith (v7.go), shared with the v7
+// tightened curve.
 func ToolEfficiencyFactor(perCase []protocol.CaseScore) float64 {
-	var sum float64
-	var n int
-	for _, cs := range perCase {
-		if cs.Kind != protocol.KindTool || !cs.Observed {
-			continue
-		}
-		// Memory-routing cases are scored routing-only precisely so the suite does
-		// not penalize a competent memory harness for HOW it retrieves (see
-		// scoreCase's allMemoryTools branch). Charging overshoot here re-penalized
-		// exactly that: issuing several search_memories queries to answer one
-		// lookup is normal retrieval, not waste. Worse, it inverted the incentive
-		// -- a harness that routes retrieval through the endpoint is observed and
-		// taxed, while one that hides retrieval internally is unobserved and pays
-		// nothing.
-		if allMemoryToolNames(cs.Expected) {
-			continue
-		}
-		// AllowExtraTools cases REQUIRE more calls than expected: the serving layer
-		// forces the first content-tool call to fail, so a correct harness must
-		// retry. That lands on the free-overshoot boundary, where any further
-		// legitimate retry would start paying a penalty for the recovery the case
-		// exists to test.
-		if cs.AllowExtraTools {
-			continue
-		}
-		expected := len(cs.Expected)
-		if expected < 1 || cs.Score < effGateScore {
-			continue
-		}
-		sum += overshootEfficiency(expected, len(cs.Called))
-		n++
-	}
-	if n == 0 {
-		return 1.0
-	}
-	return sum / float64(n)
+	return toolEfficiencyFactorWith(perCase, legacyEffParams)
 }
 
 // CapUnobserved applies UnobservedCeiling to a fully-composed tool CaseScore when
@@ -395,16 +360,7 @@ func isCanaryCase(cs protocol.CaseScore) bool {
 // generator no longer audit-duplicates the canary, which is what made a second
 // case reachable; this keeps the factor correct regardless.
 func CanaryIntegrityFactor(perCase []protocol.CaseScore) float64 {
-	for _, cs := range perCase {
-		if !isCanaryCase(cs) || cs.Score >= canaryPassThreshold {
-			continue
-		}
-		if hasNote(cs, canaryLeakNote) {
-			return canaryLeakPenalty // genuine breach: hard disqualifier
-		}
-		// honest miss: no composite penalty (already reflected in accuracy)
-	}
-	return 1.0
+	return canaryIntegrityFactorWith(perCase, canaryLeakPenalty)
 }
 
 // MetamorphicConsistency returns the fraction of invariance twin groups whose
@@ -729,11 +685,7 @@ func ConversationalSanity(perCase []protocol.CaseScore) *float64 {
 // Returns 1.0 (no effect) when no conversational case ran. Pure function of
 // perCase.
 func ConversationalSanityFactor(perCase []protocol.CaseScore) float64 {
-	rate := ConversationalSanity(perCase)
-	if rate == nil {
-		return 1.0
-	}
-	return round6(convSanityFloor + (1-convSanityFloor)*(*rate))
+	return conversationalSanityFactorWith(perCase, convSanityFloor)
 }
 
 // Transform-audit enforcement (v5 plan 4.5). The reproduce-under-transform audit
@@ -782,22 +734,7 @@ func transformAuditEnforced() bool {
 // (perCase, enforced), so passing enforced explicitly keeps it testable and keeps
 // the default-configuration composite reproducible.
 func TransformAuditFactor(perCase []protocol.CaseScore, enforced bool) float64 {
-	if !enforced {
-		return 1.0
-	}
-	ap := AuditPairs(perCase)
-	if ap.Total() < transformAuditMinPairs {
-		return 1.0
-	}
-	dir := ap.BaseOnly - ap.TransformOnly
-	if dir <= 0 {
-		return 1.0
-	}
-	frac := float64(dir) / float64(transformAuditSaturate)
-	if frac > 1 {
-		frac = 1
-	}
-	return round6(1 - frac*transformAuditMaxPenalty)
+	return transformAuditFactorWith(perCase, enforced, transformAuditMaxPenalty)
 }
 
 // CompositeGateForVersion is CompositeGate plus the version-gated v5 tiers: the
@@ -805,8 +742,13 @@ func TransformAuditFactor(perCase []protocol.CaseScore, enforced bool) float64 {
 // (4.5). Both are applied OUTSIDE boundedGateFloor, like the canary disqualifier,
 // so a conversational-sanity failure can pull the composite below the bounded
 // floor. For pre-v5 versions this is exactly CompositeGate, so v3/v4 scores are
-// byte-identical.
+// byte-identical. bench_version 7 replaces the whole gate stack with the
+// deepened v7 contract (see compositeGateV7 in v7.go); v5/v6 replays keep the
+// historical constants byte-for-byte.
 func CompositeGateForVersion(perCase []protocol.CaseScore, benchVersion int) float64 {
+	if benchVersion >= protocol.BenchVersionV7 {
+		return compositeGateV7(perCase)
+	}
 	gate := CompositeGate(perCase)
 	if benchVersion >= protocol.BenchVersionV5 {
 		gate = round6(gate *
@@ -843,24 +785,7 @@ func CompositeGateForVersion(perCase []protocol.CaseScore, benchVersion int) flo
 // over-called, so an isolated stray call is nearly free while a harness that acts
 // on every recall question takes the full bounded hit.
 func MemoryOverCallFactor(perCase []protocol.CaseScore) float64 {
-	observed, overCalled := 0, 0
-	for _, cs := range perCase {
-		if cs.Kind != protocol.KindMemory || !cs.Observed || cs.Category == gen.QTLifecycleWrite {
-			continue
-		}
-		observed++
-		for _, name := range cs.Called {
-			if !memoryTools[name] {
-				overCalled++
-				break
-			}
-		}
-	}
-	if observed == 0 {
-		return 1.0
-	}
-	rate := float64(overCalled) / float64(observed)
-	return round6(1.0 - memoryOverCallMaxPenalty*rate)
+	return memoryOverCallFactorWith(perCase, memoryOverCallMaxPenalty)
 }
 
 // metamorphicMaxPenalty is the deepest the metamorphic-consistency factor can
@@ -883,12 +808,7 @@ const metamorphicMaxPenalty = 0.15
 // is a pure function of that already-published value and stays auditable
 // without a new wire field. Returns 1.0 (no effect) when no twin groups ran.
 func MetamorphicConsistencyFactor(perCase []protocol.CaseScore) float64 {
-	rate := MetamorphicConsistency(perCase)
-	if rate == nil {
-		return 1.0
-	}
-	split := 1.0 - *rate // fraction of twin groups the harness answered inconsistently
-	return round6(1.0 - metamorphicMaxPenalty*split)
+	return metamorphicConsistencyFactorWith(perCase, metamorphicMaxPenalty)
 }
 
 // CalibrationBrier returns the mean Brier score over cases whose harness
@@ -1137,6 +1057,14 @@ func AggregateForVersion(runID string, perCase []protocol.CaseScore, benchVersio
 }
 
 func scoreCase(c protocol.ToolCase, resp protocol.RunResponse, ok bool, scope Scope) protocol.CaseScore {
+	return scoreCaseStrict(c, resp, ok, scope, false)
+}
+
+// scoreCaseStrict is scoreCase with the v7 strict deterministic-trajectory flag
+// (forbidden-arg zeroing, whole-score order multiplication, doubled extra-call
+// penalty). strict=false reproduces the historical v2..v6 scoring exactly; the
+// no-expected-tool and memory-routing branches are contract-invariant.
+func scoreCaseStrict(c protocol.ToolCase, resp protocol.RunResponse, ok bool, scope Scope, strict bool) protocol.CaseScore {
 	cs := protocol.CaseScore{
 		CaseID:          c.ID,
 		Category:        c.Category,
@@ -1225,8 +1153,9 @@ func scoreCase(c protocol.ToolCase, resp protocol.RunResponse, ok bool, scope Sc
 	}
 
 	// Deterministic trajectory + argument scoring: name-F1, arg-F1, and a
-	// trajectory term (order credit × extra-call discipline).
-	score, notes := deterministicToolScore(c, resp.ToolCalls)
+	// trajectory term (order credit × extra-call discipline). strict applies the
+	// v7 tightenings.
+	score, notes := deterministicToolScoreStrict(c, resp.ToolCalls, strict)
 	cs.ToolScore = score
 	cs.Notes = append(cs.Notes, notes...)
 	return cs

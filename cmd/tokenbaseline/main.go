@@ -17,6 +17,7 @@ import (
 
 	"github.com/ditto-assistant/dittobench-api/internal/efficiency"
 	"github.com/ditto-assistant/dittobench-api/internal/llm"
+	"github.com/ditto-assistant/dittobench-api/internal/tokenmodel"
 	"github.com/ditto-assistant/dittobench-datagen/gen"
 	"github.com/ditto-assistant/dittobench-datagen/protocol"
 )
@@ -39,7 +40,41 @@ func main() {
 	starterKitRevision := flag.String("starter-kit-revision", "", "immutable starter-kit git revision (required for v7)")
 	refreshDatasets := flag.Bool("refresh-datasets", false, "regenerate the pinned calibration dataset hashes and known vector")
 	enableScoring := flag.Bool("enable-scoring", false, "emit an enabled candidate after every supplied provider profile validates")
+	transferFrom := flag.String("transfer-from", "", "derive a -bench-version manifest offline from this reviewed-measured source manifest (research tooling; no scoring gate consumes derived manifests)")
+	smokeManifest := flag.String("smoke", "", "validate this derived manifest against the supplied live run reports; rejects fail-closed")
 	flag.Parse()
+	// Calibration-transfer research modes (see docs/token-calibration-transfer.md).
+	if *transferFrom != "" && *smokeManifest != "" {
+		fatalf("-transfer-from and -smoke are mutually exclusive")
+	}
+	if *transferFrom != "" {
+		if flag.NArg() != 0 {
+			fatalf("-transfer-from does not accept score reports")
+		}
+		derived, err := deriveManifestFromFile(*transferFrom, *benchVersion)
+		if err != nil {
+			fatalf("transfer: %v", err)
+		}
+		printManifest(derived)
+		return
+	}
+	if *smokeManifest != "" {
+		if flag.NArg() == 0 {
+			fatalf("-smoke requires at least one live run report (recommended: one per run size)")
+		}
+		validated, reasons, err := smokeValidateFromFiles(*smokeManifest, flag.Args())
+		if err != nil {
+			fatalf("smoke: %v", err)
+		}
+		if len(reasons) > 0 {
+			for _, reason := range reasons {
+				fmt.Fprintln(os.Stderr, "smoke: "+reason)
+			}
+			fatalf("smoke validation FAILED — run full calibration (60-run campaign) instead of transferring")
+		}
+		printManifest(validated)
+		return
+	}
 	if *benchVersion != protocol.BenchVersionV5 && *benchVersion != protocol.BenchVersionV7 {
 		fatalf("unsupported calibration bench version %d", *benchVersion)
 	}
@@ -162,6 +197,48 @@ func main() {
 		}
 	}
 	printManifest(manifest)
+}
+
+// deriveManifestFromFile reads a reviewed-measured source manifest and
+// derives the target bench version's manifest offline (tokenmodel).
+func deriveManifestFromFile(path string, targetBenchVersion int) (efficiency.Manifest, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return efficiency.Manifest{}, err
+	}
+	var source efficiency.Manifest
+	if err := json.Unmarshal(raw, &source); err != nil {
+		return efficiency.Manifest{}, fmt.Errorf("decode source manifest: %w", err)
+	}
+	return tokenmodel.DeriveManifest(source, raw, targetBenchVersion)
+}
+
+// smokeValidateFromFiles validates a derived manifest against live run
+// reports and, on success, returns the manifest with its smoke record
+// attached (still scoring_enabled=false; enabling remains a review step).
+func smokeValidateFromFiles(manifestPath string, reportPaths []string) (efficiency.Manifest, []string, error) {
+	raw, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return efficiency.Manifest{}, nil, err
+	}
+	var derived efficiency.Manifest
+	if err := json.Unmarshal(raw, &derived); err != nil {
+		return efficiency.Manifest{}, nil, fmt.Errorf("decode derived manifest: %w", err)
+	}
+	reports := make([]protocol.ScoreReport, 0, len(reportPaths))
+	for _, path := range reportPaths {
+		report, err := readReport(path)
+		if err != nil {
+			return efficiency.Manifest{}, nil, fmt.Errorf("%s: %w", path, err)
+		}
+		reports = append(reports, report)
+	}
+	record, reasons, err := tokenmodel.SmokeValidate(derived, reports)
+	if err != nil {
+		return efficiency.Manifest{}, nil, err
+	}
+	derived.Derived.Smoke = &record
+	return derived, reasons, nil
 }
 
 func refreshedDatasetManifest() (efficiency.Manifest, error) {

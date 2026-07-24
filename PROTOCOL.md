@@ -76,7 +76,10 @@ The validator sends one `RunRequest` per case; the harness returns a
   "user_input": "What's the latest on quantum computing?",
   "tools": [ /* ToolDefinition */ ],
   "tool_endpoint": "http://host.docker.internal:49207/tool", // optional (observed tool execution); see below
-  "user_id": "miner"                                         // optional: memory graph to answer from
+  "user_id": "miner",                                        // optional: memory graph to answer from
+  "bench_version": 7                                         // optional, additive: sent ONLY for bench_version >= 7.
+                                                             // Absent (omitted) for v2–v6, so legacy request bytes
+                                                             // are unchanged and old harnesses parse identically.
 }
 ```
 
@@ -306,6 +309,66 @@ a required answer.
 
 These mechanisms are part of the bench_version 3 grader. Earlier versions score
 only the text-payload forbidden-value scan.
+
+### bench_version 7: strict scoring (the ~10x difficulty release)
+
+DittoBench v7 pairs the much harder v7 datagen suite with a strictly harder
+validator scoring contract. **There are no wire changes**: the request/response
+shapes above are byte-identical (the additive `bench_version` field on
+`RunRequest` ships only for v7+ runs), and every change below is gated on
+`bench_version >= 7`, so v2–v6 replays re-score byte-for-byte.
+
+Per-case strictness (tool cases):
+
+- **Selection-only ceiling 0.5 → 0.05 (practice).** An observable tool case
+  that never executed through `tool_endpoint` is worth at most `0.05` — a
+  self-reported trajectory is worth an order of magnitude less than before.
+  Scored scope remains `0` (observed execution stays mandatory).
+- **Result-usage is multiplicative.** `score = trajectory × usage-gate`: the
+  gate is `1.0` when the answer carries the served needle value, `0.1` when it
+  ignores it (was a flat `0.4` trajectory half), and `0.0` — the whole case —
+  when the answer carries the served decoy (the grep-any-number signature).
+- **Self-report/observed mismatch.** A non-empty self-reported `tool_calls`
+  that disagrees (as a name multiset) with the trajectory the validator
+  observed halves the case score. An empty self-report is "no claim" and is
+  not penalized.
+- **Strict trajectory validation.** A forbidden argument on an expected tool's
+  call zeroes the case; hop order multiplies the WHOLE score on ordered
+  multi-hop cases (a fully reversed chain scores 0, not 0.8); the extra-call /
+  over-budget penalty is doubled.
+
+Composite gate depths (all still pure functions of dataset + transcript):
+
+- tool-efficiency: no free overshoot, saturates at +3 extra calls, max penalty
+  15% → 40%; only cases scoring ≥ 0.6 contribute.
+- memory over-call max penalty 10% → 25%; metamorphic split max 15% → 40%.
+- bounded-product floor 0.75 → 0.40; conversational-sanity floor 0.5 → 0.25.
+- canary LEAK multiplier 0.5 → 0.25 (an honest miss still carries no gate).
+- the reproduce-under-transform audit is ENFORCED as part of the v7 contract
+  (it was observational, env-gated, in v5/v6), max penalty 40%, still keyed on
+  the directional base-only-minus-transform-only brittleness signal.
+
+Token contract (scored runs): v7 is QUALITY-ONLY — audited token usage
+(relay-metered chat + embedding, request counts, route/model identity) is
+recorded first-class in the report (`details.token_usage` plus a neutral
+`token_efficiency` record, formula `v7-quality-only-v1`) but NEVER moves the
+v7 composite, so a deterministic validator scores the same artifact
+identically regardless of when it runs. v5/v6 keep the absolute 10%-max p90
+transform byte-for-byte. Efficiency incentives live in the platform layer as
+a capped, epoch-frozen relative bonus among quality-qualified submissions
+(`docs/relative-efficiency-bonus-spec.md`). See `docs/token-efficiency-v7.md`.
+
+Operational envelopes (client-side only, no wire change): per-case `/run`
+deadline 120s → 5m (`DITTOBENCH_V7_CASE_TIMEOUT`), `/seed` deadline ≥ 15m
+(`DITTOBENCH_V7_SEED_TIMEOUT`), and sandbox memory/tmpfs caps overridable via
+`DITTOBENCH_SANDBOX_MEMORY_LIMIT` / `DITTOBENCH_SANDBOX_TMPFS_LIMIT` for the
+denser v7 haystacks.
+
+The measurable difficulty identity (pinned by `internal/scorer/v7_test.go`):
+a naive pattern-matching tool strategy that scores `0.475` under v6 practice
+scoring scores `0.0375` under v7 — **12.7x lower** — while a correct oracle
+response set still scores `1.0` under both contracts. See
+`docs/v7-difficulty.md`.
 
 ### Prohibited: content-keyed mutation of the graded response
 

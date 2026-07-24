@@ -45,11 +45,18 @@ func TestAggregateAppliesEfficiency(t *testing.T) {
 		{CaseID: "t1", Kind: protocol.KindTool, Observed: true, Score: 1.0,
 			Expected: []string{"a"}, Called: []string{"a", "b", "c", "d", "e", "f"}}, // saturated
 	}
-	r := Aggregate("run", perCase)
+	// Historical (v3..v6) curve: 15% saturated penalty. Pinned via an explicit
+	// version — Aggregate follows CurrentBenchVersion, which is v7's deeper curve.
+	r := AggregateForVersion("run", perCase, protocol.BenchVersionV5)
 	if !approx(r.ToolMean, 1.0) {
 		t.Fatalf("tool_mean should stay pure accuracy 1.0, got %v", r.ToolMean)
 	}
 	if !approx(r.Composite, 1-effMaxPenalty) {
 		t.Fatalf("composite should be discounted by efficiency to %v, got %v", 1-effMaxPenalty, r.Composite)
+	}
+	// v7 tightens the same saturated overshoot to a 40% penalty.
+	r7 := AggregateForVersion("run", perCase, protocol.BenchVersionV7)
+	if !approx(r7.Composite, 1-v7EffMaxPenalty) {
+		t.Fatalf("v7 composite should be discounted to %v, got %v", 1-v7EffMaxPenalty, r7.Composite)
 	}
 }

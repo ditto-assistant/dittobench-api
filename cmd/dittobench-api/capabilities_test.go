@@ -9,6 +9,7 @@ import (
 
 	"github.com/ditto-assistant/dittobench-api/internal/efficiency"
 	"github.com/ditto-assistant/dittobench-api/internal/llm"
+	"github.com/ditto-assistant/dittobench-datagen/protocol"
 )
 
 const testSourceRevision = "0123456789abcdef0123456789abcdef01234567"
@@ -34,11 +35,15 @@ func TestCapabilitiesReportBoundReleaseIdentity(t *testing.T) {
 	if got.MemoryPhaseCapacity != maxConcurrentMemoryPhases {
 		t.Fatalf("memory-phase capacity = %d, want %d", got.MemoryPhaseCapacity, maxConcurrentMemoryPhases)
 	}
-	if efficiency.ValidV7CalibrationReadiness(got.V7Calibration) || got.V7Calibration.ManifestSHA256 != "" {
-		t.Fatalf("hosted v7 calibration escaped dark gate: %+v", got.V7Calibration)
+	// The validator is technically ready for v7 (embedded quality-only manifest),
+	// so it advertises a valid calibration readiness with the reviewed aggregate
+	// route. Advertisement is capability, not activation; dispatch is the
+	// platform's rollout decision.
+	if !efficiency.ValidV7CalibrationReadiness(got.V7Calibration) || got.V7Calibration.ManifestSHA256 == "" {
+		t.Fatalf("technically-ready v7 must advertise a valid calibration readiness: %+v", got.V7Calibration)
 	}
-	if strings.Contains(rr.Body.String(), `"profile_revision":"openrouter-route-a471cd87ae7df5b9-v1"`) {
-		t.Fatalf("pre-campaign v7 route leaked into capabilities: %s", rr.Body.String())
+	if !strings.Contains(rr.Body.String(), `"profile_revision":"openrouter-route-a471cd87ae7df5b9-v1"`) {
+		t.Fatalf("advertised v7 must expose its reviewed aggregate route: %s", rr.Body.String())
 	}
 	// v2-v4 are always advertised; v5 is negotiated only once reviewed token
 	// baselines make efficiency.ProductionReady() true (the #54 release gate).
@@ -49,6 +54,9 @@ func TestCapabilitiesReportBoundReleaseIdentity(t *testing.T) {
 	if efficiency.ProductionReadyForVersion(6) {
 		want = append(want, 6)
 	}
+	// v7 is advertised iff the validator is technically ready (the embedded
+	// quality-only manifest). No env var / activation flag gates advertisement;
+	// dispatch is the platform's rollout decision.
 	if efficiency.ProductionReadyForVersion(7) {
 		want = append(want, 7)
 	}
@@ -65,9 +73,34 @@ func TestCapabilitiesReportBoundReleaseIdentity(t *testing.T) {
 	}
 }
 
-func TestV7CapabilityStaysDarkBeforeHostedEmbeddingCampaign(t *testing.T) {
-	if efficiency.ProductionReadyForVersion(7) {
-		t.Fatal("v7 must stay dark before its hosted-embedding campaign lands")
+// v7 capability advertisement is gated ONLY on technical readiness
+// (ReadyForV7QualityOnly), exactly like v5/v6 gate on their reviewed manifests.
+// There is no validator-side activation flag: a ready validator advertises v7,
+// and the platform's benchmark rollout decides whether v7 is dispatched.
+func TestV7CapabilityGatedOnTechnicalReadinessOnly(t *testing.T) {
+	if !efficiency.ProductionReadyForVersion(7) {
+		t.Fatal("embedded quality-only v7 manifest must be technically ready")
+	}
+	s := &server{softwareVersion: "0.10.0", sourceRevision: testSourceRevision}
+	rr := httptest.NewRecorder()
+	s.handleCapabilities(rr, httptest.NewRequest(http.MethodGet, "/v1/capabilities", nil))
+	var got capabilitiesResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, v := range got.SupportedBenchVersions {
+		if v == protocol.BenchVersionV7 {
+			found = true
+		}
+	}
+	// Advertisement follows readiness with no env var involved.
+	if found != efficiency.ProductionReadyForVersion(7) {
+		t.Fatalf("v7 advertisement must track technical readiness: advertised=%v ready=%v",
+			found, efficiency.ProductionReadyForVersion(7))
+	}
+	if !efficiency.ValidV7CalibrationReadiness(got.V7Calibration) {
+		t.Fatalf("ready v7 must expose a valid calibration readiness: %+v", got.V7Calibration)
 	}
 }
 
