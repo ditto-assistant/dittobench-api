@@ -31,6 +31,22 @@ targets: six observable tool cases answered with a plausible self-report and
 no `tool_endpoint` execution, plus two result-usage cases where a number was
 grepped out of the wrong tool's payload (the served decoy).
 
+End-to-end companion on REAL generated suites
+(`TestV7DifficultyOnGeneratedToolSuites`, `cmd/dittobench-api`), medium tool
+suites from the hardened datagen (seed 123456789):
+
+| strategy | v6 suite + v6 scoring | v7-hard suite + v7 scoring | ratio |
+| --- | --- | --- | --- |
+| naive parser (best-case self-reports, fails the negation trap) | 0.600 | 0.178 | **3.4x lower** |
+| oracle | 1.000 | 1.000 | 1.0x |
+
+The suite-level ratio is smaller than the lever-level 12.7x because
+abstention/no-tool and memory-routing cases legitimately reward inaction in
+both contracts; on the observable slice — where the parser's free credit
+lived — the collapse is the full 10x (0.5 → 0.05 per case, traps at 0). The
+memory-axis hardening is measured in the datagen module's own v7 difficulty
+tests.
+
 The v2–v6 benchmark evidence in
 `docs/third-party-benchmark-timeline/` (#76, native Hermes and OpenClaw
 harnesses on OpenRouter/Nebius) is the calibration backdrop: competent honest
@@ -69,9 +85,9 @@ splits ≥ the 4-pair minimum), so symmetric honest noise still gates 1.0 — th
 shipping the gate dark.
 
 Token efficiency: see `docs/token-efficiency-v7.md` — the reviewed aggregate
-GPT-OSS manifest stays the identity anchor; v7 applies an interim ×4 budget
-scale with a 3x deeper penalty (`v7-relay-token-waste-p90-strict-v1`,
-max 30%).
+GPT-OSS manifest stays the identity anchor; v7 applies an interim ×2 budget
+scale (sized from the measured v6 → v7-hard dataset growth) with a 3x deeper
+penalty (`v7-relay-token-waste-p90-strict-v1`, max 30%).
 
 ## Operational envelopes for the ~10x datasets
 
@@ -98,44 +114,52 @@ Client-side only; no wire bytes change:
 - The v5/v6 gate stack in `CompositeGateForVersion` is untouched for
   `benchVersion < 7`; v7 routes to `compositeGateV7`.
 
-## Datagen v7-hard integration status (2026-07-23)
+## Datagen v7-hard integration status (2026-07-23, integrated)
 
-The hardened ~10x datagen suite is developed on the `v7-difficulty` branch of
-`dittobench-datagen` (sibling worktree `../datagen-v7-hard`). At the time this
-branch was cut it was NOT integrable — `go test ./...` there failed
-(`TestV7KnownVector`: the v7 full-run vector for seed 123456789 drifted from
-`1cfc6e3b…f58fcf` to `7fb989d7…31859a`, i.e. its own pinned vector is not yet
-re-pinned) and the tree was mid-edit (new generators `composedinj.go`,
-`deepchain.go`, `deepjoin.go`, `nearmiss.go`, `tempcalc.go` in flight; a
-transient undefined `pageURLForSeed` in `toolexec`). The temporary
-`go.mod` replace was therefore NOT added.
+The hardened datagen suite (branch `v7-difficulty` of `dittobench-datagen`,
+sibling worktree `../datagen-v7-hard`) went green and this repo is now built
+against it via the `go.mod` replace directive marked
+`// TEMPORARY: swap for tagged release before merge`. Integration findings:
 
-To integrate once that branch's tests pass:
+- Full suite passes with the replace active; `gofmt`/`go vet` clean.
+- Only allowed drift observed: the v7 known vector moved to
+  `1aa1ad26d6b5285258128f5e4a222a150e6d3781411ffdc982f0e336f8e1ee94`
+  (re-pinned in `cmd/tokenbaseline/main_test.go`). The v2/v3 vectors pinned by
+  `TestBenchVersionDatasetVectors` and every v5/v6 identity test are
+  unchanged.
+- New v7 tool categories (`negation_no_tool`, `stale_context_web`,
+  `link_chain_result_usage`, `job_chain_recovery_result_usage`) route
+  correctly with no API change: `datagen.IsResultUsage` is suffix-based and
+  `toolexec.Observable`/the fixture serving gate handle the dependent
+  link-chain (search_web serves a per-case page URL; read_links reveals the
+  needle only when called with it) inside the datagen module the validator
+  already drives. New memory modules (deepchain, deepjoin, near-miss
+  abstention, tempcalc, composedinj) grade through the public
+  `dittobench-datagen/grade` path the scorer already uses. The MemorySuite
+  telemetry counters are additive Go fields only.
+- `internal/efficiency` remains internally consistent: the embedded reviewed
+  manifest and `v7DatasetKnownVector` still pin the pre-hardening vector
+  `1cfc6e3b…f58fcf`, so a manifest refreshed under the hardened datagen is
+  correctly rejected by `ReadyForV7Production` until the real recalibration
+  campaign produces a reviewed replacement (v7 scored rollout stays gated on
+  that review, as designed).
 
-1. Add to `go.mod`:
-   `replace github.com/ditto-assistant/dittobench-datagen => ../datagen-v7-hard // TEMPORARY: swap for tagged release before merge`
-   then `go mod tidy && go test ./...`.
-2. Expected/allowed drift: only v7 dataset bytes. The compat proof is
-   `TestBenchVersionDatasetVectors` (`cmd/dittobench-api`), which pins the v2
-   and v3 full-run vectors — those MUST NOT move.
-3. `internal/efficiency` stays internally consistent (the embedded v7 manifest
-   and `v7DatasetKnownVector` pin each other, both describing the
-   pre-hardening datasets), but the calibration then describes the old suite —
-   run the `cmd/tokenbaseline` recalibration campaign against the tagged
-   release and retire `V7TokenBudgetScale`.
-4. New v7 tool-case categories from the hardened generators must be checked
-   against `datagen.IsResultUsage` and `toolexec.Observable` so they route
-   into the right scoring branch (result-usage composition vs plain
-   trajectory; observed-execution capping).
-5. Re-measure the end-to-end (tool + memory) difficulty ratio; the 12.7x
-   identity in this repo covers the validator-side levers on the tool axis.
+Remaining pre-merge steps:
+
+1. Tag the datagen `v7-difficulty` release and swap the replace for the
+   tagged `require` version (`go mod edit -dropreplace …` + version bump).
+2. Run the `cmd/tokenbaseline` 60-dataset recalibration campaign against the
+   tagged release; embed the reviewed manifest; retire `V7TokenBudgetScale`
+   (set to 1) and update `v7DatasetKnownVector`.
 
 ## Reviewer watch-items
 
-- `V7TokenBudgetScale = 4` is an explicit interim constant. Before platform
-  rollout of v7-hard, re-run `cmd/tokenbaseline` against the hardened datagen
-  release and replace the scale with a genuinely recalibrated, reviewed
-  manifest (then set the scale back to 1).
+- `V7TokenBudgetScale = 2` is an explicit interim constant, sized from the
+  measured v6 → v7-hard dataset growth (see the constant's comment and
+  `docs/token-efficiency-v7.md`). Before platform rollout of v7-hard, re-run
+  `cmd/tokenbaseline` against the hardened datagen release and replace the
+  scale with a genuinely recalibrated, reviewed manifest (then set the scale
+  back to 1).
 - The v7 per-case fixtures here measure the validator-side levers; the memory
   half of the ~10x target rides the datagen v7-hard suite and should be
   re-measured end-to-end once that module is tagged.

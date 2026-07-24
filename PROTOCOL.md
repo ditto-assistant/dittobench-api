@@ -349,7 +349,7 @@ Composite gate depths (all still pure functions of dataset + transcript):
   the directional base-only-minus-transform-only brittleness signal.
 
 Token efficiency (scored runs): the reviewed aggregate GPT-OSS p90 manifest
-remains the calibration identity; v7 applies an interim ×4 budget scale (the
+remains the calibration identity; v7 applies an interim ×2 budget scale (the
 hardened suite legitimately needs more tokens) with a 3x deeper waste penalty
 (max 10% → 30%), reported in-band as formula
 `v7-relay-token-waste-p90-strict-v1`. See `docs/token-efficiency-v7.md`.

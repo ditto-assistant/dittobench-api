@@ -92,12 +92,19 @@ route identity, or readiness gates above change — and layers a version-gated
 strict transform on top (`efficiency.ApplyForVersion`, bench_version >= 7):
 
 - **Interim budget scale.** The effective budget is
-  `manifest p90 total × V7TokenBudgetScale` (currently 4). The embedded
-  baselines were measured on the pre-hardening v7 datasets; the ~10x harder
-  suite legitimately needs more tokens (more cases, denser haystacks, longer
-  multi-hop chains), so the budget is scaled rather than silently taxing every
-  run. The reported `baseline_*_tokens` fields stay the manifest's reviewed
-  values, so the identity remains auditable.
+  `manifest p90 total × V7TokenBudgetScale` (currently 2). The embedded
+  baselines were measured on the pre-hardening v7 datasets; the hardened
+  suite legitimately needs more tokens, so the budget is scaled rather than
+  silently taxing every run. The scale is sized from the measured v6 →
+  v7-hard growth (datagen v7-difficulty, averaged over seeds
+  123456789/101/987654321, small/medium/full): total case count ×1.0/×1.23/
+  ×1.22, per-case prompt bytes ×1.56/×1.50/×1.38, haystack pair bytes
+  ×0.99/×1.05/×1.12, artifact bytes ×1.02/×1.15/×1.19, plus one extra tool
+  hop on the new dependent link-chain / recovery categories. Compounded
+  starter-kit p90 growth is expected well under 2x, so 2 keeps honest
+  headroom while preserving the penalty's bite. The reported
+  `baseline_*_tokens` fields stay the manifest's reviewed values, so the
+  identity remains auditable.
 - **3x deeper waste penalty.** Beyond the scaled budget the same one-sided
   rational curve applies with `maximum_penalty` 0.30 (floor 0.70) instead of
   0.10, reported in-band as formula `v7-relay-token-waste-p90-strict-v1`.
