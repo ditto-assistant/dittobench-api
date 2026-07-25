@@ -15,6 +15,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -56,6 +57,29 @@ const (
 	embeddingSessionInputBytes = 1 << 30
 )
 
+// v7TransientMaxAttempts bounds how many times ONE logical v7 inference request
+// may be delivered to the platform proxy. It is a code constant, not an env
+// knob: a validator that quietly retried more than its peers would consume more
+// of the shared route than the fleet agreed to, and the value below is chosen
+// against a hard accounting cost rather than to taste.
+//
+// Why so small. Each broker-level attempt is a NEW nonce and therefore a NEW
+// platform reservation (ditto-platform ditto/db/queries/inference.py:460-474:
+// `reserved_tokens=token_reservation`, `grant.request_count += 1`). A failed
+// attempt is then conservatively charged its FULL reservation to the grant
+// (`if not usage_available: prompt_tokens = request.reserved_tokens`,
+// inference.py:543-547). So attempt N costs the grant one request and a whole
+// reservation whether or not the provider did any work. That ledger is the
+// grant's CAPACITY budget -- it is not the miner's scored usage, which this
+// broker books separately and only from a successful attempt -- but it is still
+// finite, and a large cap here could exhaust a grant mid-run and convert a
+// survivable blip into the very failure the retry exists to prevent.
+//
+// 3 attempts is therefore the smallest cap that survives a single fault the
+// platform's own 3-attempt provider loop could not absorb, and it bounds
+// worst-case grant consumption at 3x rather than unbounded.
+const v7TransientMaxAttempts = 3
+
 type brokerTicketIdentity struct {
 	GrantID        string
 	AgentID        string
@@ -92,12 +116,14 @@ type brokerSession struct {
 	embeddingInFlight     bool
 	embeddingCancel       context.CancelFunc
 	embeddingDone         chan struct{}
+	embeddingRetries      uint64
 	embeddingRequests     uint64
 	embeddingInputs       uint64
 	embeddingInputBytes   uint64
 	requests              uint64
 	successes             uint64
 	failures              uint64
+	grantDenials          uint64
 	usageAvailable        uint64
 	usageUnavailable      uint64
 	promptTokens          uint64
@@ -139,6 +165,58 @@ type toolRoute struct {
 	expectedSourceIP string
 	handler          http.Handler
 	slots            chan struct{}
+}
+
+// platformGrantDenied marks a platform inference response that declined to
+// reserve capacity for this ticket's grant rather than reporting an upstream
+// provider fault.
+//
+// The distinction is exact, not heuristic. The platform inference proxy answers
+// 429 in one place only: when begin_inference_request() refuses the reservation
+// (ditto-platform ditto/api_server/endpoints/inference.py `inference grant
+// unavailable` / `embedding grant unavailable`, backed by
+// ditto/db/queries/inference.py:329-335, which sets `grant.status = "revoked"`
+// when the owning ticket is no longer ISSUED, its deadline was rewritten, or
+// its deadline has passed). A genuine provider rate limit can never surface
+// here as a 429: the platform retries 408/429/5xx upstream itself and converts
+// every remaining provider rejection into a 502.
+//
+// So a 429 on the ticket-scoped path means the validator's LEASE went away --
+// platform-side eviction, budget exhaustion, or per-ticket concurrency -- and
+// counting it as an `infrastructure_failure` alongside real provider faults is
+// what made a mid-run ticket force-expiry look like an upstream provider blip.
+// Both still fail the run closed; only the accounting and the operator-visible
+// reason change.
+type platformGrantDenied struct {
+	status int
+}
+
+// Error deliberately preserves the historical wording so the marker-based
+// classification in trustedEmbeddingInfrastructureFailure keeps matching.
+func (e platformGrantDenied) Error() string {
+	return fmt.Sprintf("embedding platform returned %d", e.status)
+}
+
+// platformEmbeddingTransient marks the narrow class of v7 embedding faults that
+// are worth delivering again: no response at all, or a platform 5xx, which is
+// what the platform returns once its own bounded provider loop has given up.
+// Everything else -- a denied grant, a wrong model, a malformed or
+// wrong-dimension vector, an unusable session -- stays terminal, because a
+// repeat delivery cannot change any of those and an integrity fault must keep
+// failing closed.
+type platformEmbeddingTransient struct {
+	err error
+}
+
+func (e platformEmbeddingTransient) Error() string { return e.err.Error() }
+func (e platformEmbeddingTransient) Unwrap() error { return e.err }
+
+// platformDeniesGrant reports whether a ticket-scoped platform response is a
+// grant denial. Legacy relay sessions are excluded: they talk to the frozen
+// model-relay, which forwards a real provider 429 verbatim, so on that path a
+// 429 IS an upstream fault and must keep its existing accounting.
+func platformDeniesGrant(legacyGateway string, status int) bool {
+	return legacyGateway == "" && status == http.StatusTooManyRequests
 }
 
 type brokerRetryConfig struct {
@@ -847,14 +925,31 @@ func (b *inferenceBroker) handleEmbedding(w http.ResponseWriter, r *http.Request
 
 	var decoded embeddingResponse
 	if benchVersion >= 7 {
-		decoded, err = b.forwardPlatformEmbedding(requestContext, session, payload.Input)
+		decoded, err = b.forwardPlatformEmbeddingWithRetry(requestContext, session, payload.Input)
 	} else {
 		decoded, err = b.forwardLocalEmbedding(requestContext, payload.Input)
 	}
 	if err != nil {
 		if benchVersion >= 7 {
+			// #97 made a v7 embedding fault fail the run closed, and it still
+			// does. What changes is only WHICH counter it lands in: a platform
+			// grant denial is recorded as a lost lease rather than as an
+			// upstream provider failure. Embeddings are roughly two thirds of a
+			// v7 run's inference requests, so an evicted ticket is most likely
+			// to be discovered here first -- which is exactly how a platform
+			// eviction came to be reported as "1 upstream failure".
+			var denied platformGrantDenied
 			session.mu.Lock()
-			session.failures++
+			if errors.As(err, &denied) {
+				session.grantDenials++
+				log.Printf(
+					"run %s: platform declined the embedding grant (429); ticket deadline held locally is %s (in %s) -- this is a lease denial, not a provider fault (denial #%d)",
+					session.boundRunID, session.ticketDeadline.UTC().Format(time.RFC3339),
+					time.Until(session.ticketDeadline).Truncate(time.Second), session.grantDenials,
+				)
+			} else {
+				session.failures++
+			}
 			session.mu.Unlock()
 		}
 		writeError(w, http.StatusBadGateway, "embedding service unavailable")
@@ -873,6 +968,50 @@ func (b *inferenceBroker) handleEmbedding(w http.ResponseWriter, r *http.Request
 		}
 	}
 	writeJSON(w, http.StatusOK, decoded)
+}
+
+// forwardPlatformEmbeddingWithRetry gives the v7 embedding lane the same tiny
+// second line of defence the chat lane has. Embeddings are roughly two thirds
+// of a v7 run's ~1,067 inference requests and had NO retry at all, so they were
+// the most likely place for a single transient fault to discard a whole run.
+//
+// The retryable class is exactly the transient one: a transport failure, or a
+// platform 5xx (which is what the platform returns after its own 3-attempt
+// provider loop gives up). A grant denial is auth class and returns
+// immediately -- retrying a revoked lease cannot succeed and would burn a fresh
+// reservation each time. Every extra delivery is recorded in the session's
+// retry ledger so a run that survived a fault stays distinguishable from one
+// that never faulted.
+func (b *inferenceBroker) forwardPlatformEmbeddingWithRetry(
+	ctx context.Context, session *brokerSession, inputs []string,
+) (embeddingResponse, error) {
+	var lastErr error
+	for attempt := 1; attempt <= v7TransientMaxAttempts; attempt++ {
+		if attempt > 1 {
+			if b.sleep(ctx, b.retry.backoff(attempt-1)) != nil {
+				break
+			}
+			session.mu.Lock()
+			session.embeddingRetries++
+			retries := session.embeddingRetries
+			runID := session.boundRunID
+			session.mu.Unlock()
+			log.Printf(
+				"run %s: retrying v7 embedding attempt %d/%d after a transient platform fault (%v); run retry ledger=%d",
+				runID, attempt, v7TransientMaxAttempts, lastErr, retries,
+			)
+		}
+		decoded, err := b.forwardPlatformEmbedding(ctx, session, inputs)
+		if err == nil {
+			return decoded, nil
+		}
+		lastErr = err
+		var transient platformEmbeddingTransient
+		if !errors.As(err, &transient) || ctx.Err() != nil {
+			return embeddingResponse{}, err
+		}
+	}
+	return embeddingResponse{}, lastErr
 }
 
 func (b *inferenceBroker) forwardLocalEmbedding(ctx context.Context, inputs []string) (embeddingResponse, error) {
@@ -968,11 +1107,28 @@ func (b *inferenceBroker) forwardPlatformEmbedding(ctx context.Context, session 
 	upstream.Header.Set("X-Ditto-Proof", proof)
 	response, err := b.client.Do(upstream)
 	if err != nil {
-		return embeddingResponse{}, err
+		// No response at all: transport/connection fault, the transient class.
+		return embeddingResponse{}, platformEmbeddingTransient{err: err}
 	}
 	defer response.Body.Close()
 	responseBody, err := io.ReadAll(io.LimitReader(response.Body, embeddingResponseLimit+1))
 	if err != nil || len(responseBody) > embeddingResponseLimit || response.StatusCode < 200 || response.StatusCode >= 300 {
+		if err != nil || response.StatusCode >= 500 {
+			// The platform returns 5xx after its own bounded provider loop has
+			// already given up, and a truncated read produced no outcome
+			// either. Both are transient and worth one more delivery.
+			return embeddingResponse{}, platformEmbeddingTransient{
+				err: fmt.Errorf("embedding platform returned %d", response.StatusCode),
+			}
+		}
+		if response.StatusCode == http.StatusTooManyRequests {
+			// Auth class, not a provider fault: the platform's embedding proxy
+			// answers 429 only from begin_inference_request declining the
+			// reservation. Typed so the caller neither retries it nor books it
+			// as an upstream failure; the message is unchanged so the existing
+			// marker-based classification still matches.
+			return embeddingResponse{}, platformGrantDenied{status: response.StatusCode}
+		}
 		return embeddingResponse{}, fmt.Errorf("embedding platform returned %d", response.StatusCode)
 	}
 	var platformResponse platformEmbeddingResponse
@@ -1028,6 +1184,8 @@ func (b *inferenceBroker) health(w http.ResponseWriter, session *brokerSession) 
 		Requests:               session.requests,
 		Successes:              session.successes,
 		InfrastructureFailures: session.failures,
+		GrantDenials:           session.grantDenials,
+		EmbeddingRetries:       session.embeddingRetries,
 		CallerCancellations:    session.callerCancels,
 		UpstreamAttempts:       session.upstreamAttempts,
 		Provider:               session.provider,
@@ -1117,11 +1275,14 @@ func (b *inferenceBroker) proxy(w http.ResponseWriter, r *http.Request, session 
 	var responseBody []byte
 	var responseStatus int
 	var totalLatency uint64
-	// The platform owns provider retries and fallback for ticket-scoped v7
-	// inference. Repeating the same logical request here would multiply provider
-	// work and split attempt accounting across two services. Frozen legacy relay
-	// sessions retain their existing bounded retry policy.
-	maxAttempts := 1
+	// The platform owns the FIRST line of provider retry for ticket-scoped v7
+	// inference (_PROVIDER_MAX_ATTEMPTS=3 over 408/429/5xx, all under one
+	// reservation), so #97 collapsed this loop to a single attempt rather than
+	// multiply provider work. That is still the right default, but one attempt
+	// means a fault the platform could not absorb discards ~18 minutes of work,
+	// so v7 keeps a deliberately tiny second line of defence. See
+	// v7TransientMaxAttempts for why the cap is 3 and not larger.
+	maxAttempts := v7TransientMaxAttempts
 	if legacyGateway != "" {
 		maxAttempts = b.retry.maxAttempts
 	}
@@ -1169,6 +1330,13 @@ func (b *inferenceBroker) proxy(w http.ResponseWriter, r *http.Request, session 
 			continue
 		}
 		responseBody = candidateBody
+		// Auth class: the platform declined the grant. The lease is gone (or its
+		// budget is), so every further attempt would fail identically while
+		// still consuming a fresh reservation and one more request from a grant
+		// that no longer exists. Stop immediately.
+		if platformDeniesGrant(legacyGateway, responseStatus) {
+			break
+		}
 		if responseStatus == http.StatusRequestTimeout || responseStatus == http.StatusTooManyRequests || responseStatus >= 500 {
 			continue
 		}
@@ -1188,6 +1356,25 @@ func (b *inferenceBroker) proxy(w http.ResponseWriter, r *http.Request, session 
 		session.providerLatency += totalLatency
 		session.mu.Unlock()
 		writeError(w, responseStatus, "inference request denied")
+		return
+	}
+	// A platform grant denial is a lost lease, not a provider fault. It is
+	// counted separately so the run's failure names the real cause; the harness
+	// still sees the byte-identical 502 it saw before, because this run is going
+	// to be discarded either way and its remaining requests must not observe a
+	// changed gateway contract mid-benchmark.
+	if platformDeniesGrant(legacyGateway, responseStatus) {
+		session.mu.Lock()
+		session.grantDenials++
+		session.providerLatency += totalLatency
+		denials := session.grantDenials
+		runID, deadline := session.boundRunID, session.ticketDeadline
+		session.mu.Unlock()
+		log.Printf(
+			"run %s: platform declined the inference grant (429); ticket deadline held locally is %s (in %s) -- this is a lease denial, not a provider fault (denial #%d)",
+			runID, deadline.UTC().Format(time.RFC3339), time.Until(deadline).Truncate(time.Second), denials,
+		)
+		writeError(w, http.StatusBadGateway, "inference provider unavailable")
 		return
 	}
 	if responseStatus < 200 || responseStatus >= 300 || len(responseBody) == 0 {
@@ -1276,6 +1463,7 @@ func (b *inferenceBroker) snapshot(id string) (relayHealthSnapshot, error) {
 	return relayHealthSnapshot{
 		AccountingVersion: 2, Status: "ok", Requests: session.requests,
 		Successes: session.successes, InfrastructureFailures: session.failures,
+		GrantDenials: session.grantDenials, EmbeddingRetries: session.embeddingRetries,
 		CallerCancellations: session.callerCancels, UpstreamAttempts: session.upstreamAttempts,
 		Provider: session.provider, ProfileRevision: session.profileRevision,
 		Model: session.model, UsageAvailable: session.usageAvailable,

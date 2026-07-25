@@ -25,27 +25,48 @@ type relayHealthSnapshot struct {
 	Requests               uint64 `json:"requests"`
 	Successes              uint64 `json:"successes"`
 	InfrastructureFailures uint64 `json:"infrastructure_failures"`
-	CallerCancellations    uint64 `json:"caller_cancellations"`
-	UpstreamAttempts       uint64 `json:"upstream_attempts"`
-	Provider               string `json:"provider"`
-	ProfileRevision        string `json:"profile_revision"`
-	Model                  string `json:"model"`
-	UsageAvailable         uint64 `json:"usage_available"`
-	UsageUnavailable       uint64 `json:"usage_unavailable"`
-	PromptTokens           uint64 `json:"prompt_tokens"`
-	PromptBytes            uint64 `json:"prompt_bytes"`
-	CompletionTokens       uint64 `json:"completion_tokens"`
-	ProviderLatencyMs      uint64 `json:"provider_latency_ms"`
-	TTFTStatus             string `json:"ttft_status"`
+	// GrantDenials counts platform-side refusals to reserve capacity for this
+	// ticket's grant (revoked lease, rewritten/passed ticket deadline,
+	// exhausted budget, per-ticket concurrency). Deliberately separate from
+	// InfrastructureFailures: those are upstream PROVIDER faults, and merging
+	// the two makes a validator losing its lease indistinguishable from a
+	// provider blip. A legacy relay never reports this.
+	GrantDenials uint64 `json:"grant_denials"`
+	// EmbeddingRetries is the v7 embedding lane's retry ledger, the counterpart
+	// of UpstreamAttempts-minus-Requests on the chat lane.
+	EmbeddingRetries    uint64 `json:"embedding_retries"`
+	CallerCancellations uint64 `json:"caller_cancellations"`
+	UpstreamAttempts    uint64 `json:"upstream_attempts"`
+	Provider            string `json:"provider"`
+	ProfileRevision     string `json:"profile_revision"`
+	Model               string `json:"model"`
+	UsageAvailable      uint64 `json:"usage_available"`
+	UsageUnavailable    uint64 `json:"usage_unavailable"`
+	PromptTokens        uint64 `json:"prompt_tokens"`
+	PromptBytes         uint64 `json:"prompt_bytes"`
+	CompletionTokens    uint64 `json:"completion_tokens"`
+	ProviderLatencyMs   uint64 `json:"provider_latency_ms"`
+	TTFTStatus          string `json:"ttft_status"`
 }
 
+// relayExecutionSummary is the run's delivery ledger. It is embedded in the
+// content-addressed transcript artifact, so the retry counts below are hashed
+// into transcript_sha256 and travel with the signed score: a run that survived
+// a transient fault stays permanently distinguishable from one that never
+// faulted, and neither count can be edited after the fact.
+//
+// The retry fields are `omitempty` so a clean run's transcript bytes -- and
+// therefore its digest -- are byte-identical to what this code produced before
+// retries existed. Only a run that actually retried carries the extra keys.
 type relayExecutionSummary struct {
 	Requests               uint64 `json:"requests"`
 	Successes              uint64 `json:"successes"`
 	InfrastructureFailures uint64 `json:"infrastructure_failures"`
+	GrantDenials           uint64 `json:"grant_denials,omitempty"`
 	CallerCancellations    uint64 `json:"caller_cancellations"`
 	UpstreamAttempts       uint64 `json:"upstream_attempts"`
 	Retries                uint64 `json:"retries"`
+	EmbeddingRetries       uint64 `json:"embedding_retries,omitempty"`
 }
 
 // lockScoredRelayRun serializes the portion of scored jobs that can call the
@@ -215,11 +236,26 @@ func requireCompleteV7Usage(benchVersion int, usage protocol.TokenUsage) error {
 	return nil
 }
 
+// relayDegradedSince keeps #97's fail-closed rule: a run must never be scored
+// on degraded inference. What changed is only the DIAGNOSIS. A lost lease and a
+// provider fault used to produce the same "upstream failure" sentence, so a
+// platform-side ticket force-expiry -- which revokes the grant and makes the
+// scorer's next request fail -- was reported as if the provider had blipped.
+// Grant denials are therefore reported first and by their own name: when both
+// are present, the denial is the cause and the provider counter is downstream
+// noise.
 func relayDegradedSince(start, end relayHealthSnapshot) error {
 	if end.Requests < start.Requests || end.Successes < start.Successes ||
 		end.InfrastructureFailures < start.InfrastructureFailures ||
+		end.GrantDenials < start.GrantDenials || end.EmbeddingRetries < start.EmbeddingRetries ||
 		end.CallerCancellations < start.CallerCancellations || end.UpstreamAttempts < start.UpstreamAttempts {
 		return fmt.Errorf("relay restarted during benchmark")
+	}
+	if end.GrantDenials > start.GrantDenials {
+		return fmt.Errorf(
+			"platform declined this run's inference grant %d time(s) during benchmark (lease revoked, deadline rewritten, or budget exhausted) — not an upstream provider fault",
+			end.GrantDenials-start.GrantDenials,
+		)
 	}
 	if end.InfrastructureFailures > start.InfrastructureFailures {
 		return fmt.Errorf("relay recorded %d upstream failure(s) during benchmark", end.InfrastructureFailures-start.InfrastructureFailures)
@@ -230,6 +266,7 @@ func relayDegradedSince(start, end relayHealthSnapshot) error {
 func relayExecutionSince(start, end relayHealthSnapshot) (relayExecutionSummary, error) {
 	if end.Requests < start.Requests || end.Successes < start.Successes ||
 		end.InfrastructureFailures < start.InfrastructureFailures ||
+		end.GrantDenials < start.GrantDenials || end.EmbeddingRetries < start.EmbeddingRetries ||
 		end.CallerCancellations < start.CallerCancellations || end.UpstreamAttempts < start.UpstreamAttempts {
 		return relayExecutionSummary{}, fmt.Errorf("relay restarted during benchmark")
 	}
@@ -237,6 +274,8 @@ func relayExecutionSince(start, end relayHealthSnapshot) (relayExecutionSummary,
 		Requests:               end.Requests - start.Requests,
 		Successes:              end.Successes - start.Successes,
 		InfrastructureFailures: end.InfrastructureFailures - start.InfrastructureFailures,
+		GrantDenials:           end.GrantDenials - start.GrantDenials,
+		EmbeddingRetries:       end.EmbeddingRetries - start.EmbeddingRetries,
 		CallerCancellations:    end.CallerCancellations - start.CallerCancellations,
 		UpstreamAttempts:       end.UpstreamAttempts - start.UpstreamAttempts,
 	}
