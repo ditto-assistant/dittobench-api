@@ -1269,3 +1269,56 @@ func TestToolRouteRejectsOverCapacityBeforeReadingBody(t *testing.T) {
 		t.Fatalf("over-capacity tool status=%d called=%t body_reads=%d", recorder.Code, called, body.reads)
 	}
 }
+
+// TestV7BrokerServesBYOKShapedRequests exercises the exact request a harness
+// built against the pre-v7 BYOK contract emits once OPENAI_BASE_URL /
+// OPENROUTER_BASE_URL are aliased to the broker gateway: base URL
+// ".../v1/inference" plus the client's own "/chat/completions" suffix, carrying
+// whatever key the client found in its environment.
+//
+// Two invariants are pinned:
+//   - the aliased path shape is served (no miner change required), and
+//   - the caller's Authorization header is ignored and replaced by the
+//     ticket-bound platform bearer, so the placeholder key handed to the sandbox
+//     grants nothing and is worthless if exfiltrated.
+func TestV7BrokerServesBYOKShapedRequests(t *testing.T) {
+	const profile = "openrouter-route-0123456789abcdef-v1"
+	var seenAuthorization []string
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenAuthorization = append(seenAuthorization, r.Header.Get("Authorization"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"usage":{"prompt_tokens":3,"completion_tokens":4},"choices":[{"message":{"content":"OK"}}]}`))
+	}))
+	defer upstream.Close()
+
+	broker := newInferenceBroker(1)
+	proxyURL := configureBrokerUpstream(broker, upstream)
+	prepared := prepareBrokerSession(t, broker)
+	activateBrokerSessionFor(t, broker, prepared, proxyURL, "groq", profile, llm.V7HarnessModel)
+	claimAndBindBrokerSession(t, broker, prepared["session_id"], "192.0.2.71", protocol.BenchVersionV7)
+
+	// The BYOK suffix: an OpenAI/OpenRouter client appends /chat/completions to
+	// its configured base URL, which under the alias is ".../v1/inference".
+	request := httptest.NewRequest(http.MethodPost, "/v1/inference/chat/completions",
+		bytes.NewBufferString(`{"model":"`+llm.V7HarnessModel+`"}`))
+	request.RemoteAddr = "192.0.2.71:4321"
+	request.SetPathValue("rest", "chat/completions")
+	// A harness may send the injected placeholder, a stale real OpenRouter key,
+	// or nothing at all. None of it may reach or influence the upstream.
+	request.Header.Set("Authorization", "Bearer sk-or-v1-attacker-supplied")
+	recorder := httptest.NewRecorder()
+	broker.handle(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("BYOK-shaped request status = %d, want 200: %s", recorder.Code, recorder.Body.String())
+	}
+	if len(seenAuthorization) != 1 {
+		t.Fatalf("upstream deliveries = %d, want 1", len(seenAuthorization))
+	}
+	if seenAuthorization[0] != "Bearer platform-bearer-never-given-to-harness" {
+		t.Fatalf("upstream Authorization = %q; the broker must substitute the ticket bearer", seenAuthorization[0])
+	}
+	if strings.Contains(seenAuthorization[0], "attacker-supplied") {
+		t.Fatal("the caller's key reached the platform proxy")
+	}
+}
