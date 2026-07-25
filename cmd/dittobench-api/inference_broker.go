@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	mathrand "math/rand/v2"
 	"net"
@@ -1064,11 +1065,28 @@ func (b *inferenceBroker) proxy(w http.ResponseWriter, r *http.Request, session 
 		return
 	}
 	session.mu.Lock()
-	if sourceIP(r.RemoteAddr) != session.expectedSourceIP || !session.activeLocked(time.Now()) ||
-		modelRequest.Model != session.requestModel {
+	if sourceIP(r.RemoteAddr) != session.expectedSourceIP || !session.activeLocked(time.Now()) {
 		session.mu.Unlock()
 		writeError(w, http.StatusUnauthorized, "inference session unavailable")
 		return
+	}
+	// The model is a property of the ticket, not of the request. The harness
+	// that produced this body is miner-authored, so its model field is at best
+	// advisory: substitute the ticket's model rather than rejecting, so a
+	// harness carrying a stale default (every pre-v7 fork of the starter kit
+	// defaults to qwen/qwen3-32b) is scored on the locked model instead of
+	// failing closed with an error it cannot act on. The platform proxy re-locks
+	// the same value independently, so this is convenience, not the boundary.
+	if modelRequest.Model != session.requestModel {
+		rewritten, rewriteErr := rewriteRequestModel(body, session.requestModel)
+		if rewriteErr != nil {
+			session.mu.Unlock()
+			writeError(w, http.StatusBadRequest, "invalid inference request")
+			return
+		}
+		log.Printf("run %s: harness requested model %q; serving the ticket model %q",
+			session.boundRunID, modelRequest.Model, session.requestModel)
+		body = rewritten
 	}
 	grantID, bearer, proxyURL, generation := session.grantID, session.bearer, session.proxyURL, session.generation
 	legacyGateway := session.legacyGateway
@@ -1265,4 +1283,17 @@ func (b *inferenceBroker) snapshot(id string) (relayHealthSnapshot, error) {
 		PromptBytes: session.promptBytes, CompletionTokens: session.completionTokens,
 		ProviderLatencyMs: session.providerLatency, TTFTStatus: "not_streamed",
 	}, nil
+}
+
+// rewriteRequestModel replaces the caller's `model` with the ticket's, leaving
+// every other field of the request untouched. Decoding into a generic map and
+// re-encoding is deliberate: it normalises exactly one field and cannot smuggle
+// an unmodelled field past the schema the platform proxy validates downstream.
+func rewriteRequestModel(body []byte, model string) ([]byte, error) {
+	var decoded map[string]any
+	if err := json.Unmarshal(body, &decoded); err != nil || decoded == nil {
+		return nil, fmt.Errorf("inference request is not a JSON object")
+	}
+	decoded["model"] = model
+	return json.Marshal(decoded)
 }
