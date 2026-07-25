@@ -1796,6 +1796,31 @@ func validateBenchVersionResult(requested, artifactVersion int, details *protoco
 	return nil
 }
 
+// finishSandboxRun runs deferred, after the scored path has returned. Its job is
+// to attach post-mortem sandbox diagnostics to a failed run and stop the
+// container -- NOT to decide whose fault the failure was. The scored path is the
+// only code with the context to classify: it knows whether the relay preflight
+// failed, whether the platform revoked this run's inference grant, or whether
+// the harness itself misbehaved, and it records that verdict via FailWith before
+// returning.
+//
+// So a classification already on the job is authoritative and is preserved here.
+// This used to overwrite it unconditionally with the generic
+// sandbox_failure/sandbox_runtime/retryable=false envelope, which silently
+// converted every validator-side fault into an agent fault. Downstream that is
+// not cosmetic: ditto-subnet's _sandbox_infrastructure_failure_code() accepts a
+// failure only when kind == "validator_infrastructure" AND retryable is true, so
+// a clobbered run fell through to DittobenchError -> fail_job("scoring_error"),
+// which spends one of the miner's finite attempts and imposes a 6h cooldown for
+// an outage the miner did not cause. A run killed by a platform grant denial --
+// correctly diagnosed by #103 as "lease revoked ... not an upstream provider
+// fault" -- was still being billed to the agent, because the diagnosis was
+// discarded three frames later on this path.
+//
+// Direct sandbox resource evidence (OOM, tmpfs exhaustion) still wins over a
+// prior verdict. That is not a downgrade: those codes are themselves
+// validator_infrastructure, and physical evidence from the cgroup is strictly
+// better than an inference drawn mid-run.
 func (s *server) finishSandboxRun(runID string, handle *sandbox.Handle) {
 	job, ok := s.store.Get(runID)
 	if ok && job.Status == store.StatusFailed {
@@ -1829,6 +1854,20 @@ func (s *server) finishSandboxRun(runID string, handle *sandbox.Handle) {
 			log.Printf(
 				"run %s validator infrastructure failure code=%s oom=%t exit=%d",
 				runID, code, diagnostics.OOMKilled, diagnostics.ExitCode,
+			)
+		} else if prior := job.Failure; prior != nil && prior.Kind != "" {
+			// The scored path already reached a verdict. Keep it, and keep the
+			// message that explains it; only fold in the sandbox diagnostics
+			// this path exists to collect.
+			failure.Kind = prior.Kind
+			failure.Code = prior.Code
+			failure.Retryable = prior.Retryable
+			for key, value := range prior.Diagnostics {
+				failure.Diagnostics[key] = value
+			}
+			log.Printf(
+				"run %s preserving scored-path classification kind=%s code=%s retryable=%t",
+				runID, prior.Kind, prior.Code, prior.Retryable,
 			)
 		}
 		s.store.FailWith(runID, message, failure)
