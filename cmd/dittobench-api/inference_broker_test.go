@@ -977,7 +977,14 @@ func TestInferenceBrokerTrustedProbeUsesControlPlaneSession(t *testing.T) {
 	}
 }
 
-func TestV7InferenceBrokerDelegatesProviderRetryToPlatform(t *testing.T) {
+// TestV7InferenceBrokerRetriesTransientProviderFaultsBoundedly replaces the
+// single-attempt contract #97 introduced. The platform still owns the first
+// line of provider retry, but one attempt here meant a fault it could not
+// absorb discarded the whole run, so v7 now gets a tiny bounded second line.
+// The bound is the point of the test: exactly v7TransientMaxAttempts
+// deliveries, each independently signed, and the run still fails closed once
+// they are exhausted.
+func TestV7InferenceBrokerRetriesTransientProviderFaultsBoundedly(t *testing.T) {
 	const profile = "openrouter-route-0123456789abcdef-v1"
 	requestCount := 0
 	var nonces []string
@@ -1007,11 +1014,15 @@ func TestV7InferenceBrokerDelegatesProviderRetryToPlatform(t *testing.T) {
 	if recorder.Code != http.StatusBadGateway {
 		t.Fatalf("request status = %d, want 502: %s", recorder.Code, recorder.Body.String())
 	}
-	if requestCount != 1 {
-		t.Fatalf("platform deliveries=%d, want 1", requestCount)
+	if requestCount != v7TransientMaxAttempts {
+		t.Fatalf("platform deliveries=%d, want %d", requestCount, v7TransientMaxAttempts)
 	}
-	if len(nonces) != 1 || nonces[0] == "" {
-		t.Fatalf("platform delivery was not independently signed: nonces=%v", nonces)
+	seen := map[string]bool{}
+	for _, nonce := range nonces {
+		if nonce == "" || seen[nonce] {
+			t.Fatalf("platform deliveries were not independently signed: nonces=%v", nonces)
+		}
+		seen[nonce] = true
 	}
 
 	end, err := broker.snapshot(prepared["session_id"])
@@ -1029,8 +1040,15 @@ func TestV7InferenceBrokerDelegatesProviderRetryToPlatform(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if execution.UpstreamAttempts != 1 || execution.Retries != 0 || execution.InfrastructureFailures != 1 {
+	if execution.UpstreamAttempts != v7TransientMaxAttempts ||
+		execution.Retries != v7TransientMaxAttempts-1 || execution.InfrastructureFailures != 1 {
 		t.Fatalf("provider execution accounting = %+v", execution)
+	}
+	// One logical request, three deliveries, one authoritative outcome: the
+	// retries are visible in the ledger and never inflate the request count or
+	// the failure count.
+	if execution.Requests != 1 || execution.GrantDenials != 0 {
+		t.Fatalf("retry must not inflate requests or denials: %+v", execution)
 	}
 	if err := requireCompleteV7Usage(protocol.BenchVersionV7, usage); err == nil {
 		t.Fatal("v7 accepted a run with a provider infrastructure failure")
@@ -1062,7 +1080,8 @@ func TestInferenceBrokerRejectsExhaustedTransientFailures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.Requests != 1 || snapshot.Successes != 0 || snapshot.UpstreamAttempts != 1 || snapshot.InfrastructureFailures != 1 {
+	if snapshot.Requests != 1 || snapshot.Successes != 0 ||
+		snapshot.UpstreamAttempts != v7TransientMaxAttempts || snapshot.InfrastructureFailures != 1 {
 		t.Fatalf("exhausted provider accounting = %+v", snapshot)
 	}
 }
@@ -1366,5 +1385,363 @@ func TestV7BrokerServesBYOKShapedRequests(t *testing.T) {
 	}
 	if strings.Contains(seenAuthorization[0], "attacker-supplied") {
 		t.Fatal("the caller's key reached the platform proxy")
+	}
+}
+
+// --- transient survival vs. integrity fail-closed -------------------------
+//
+// The two directions this change has to hold apart at once: a run must now
+// SURVIVE a transient provider fault, and must still FAIL CLOSED on an
+// integrity fault or a lost lease. Every test below pins one of those.
+
+// TestV7ChatSurvivesOneTransientProviderFault is the whole point of the change.
+// A single 503 used to end an 18-minute run at ~1,067 requests deep. It is now
+// absorbed, the run's usage is booked from the successful attempt only, and the
+// retry is visible in the ledger.
+func TestV7ChatSurvivesOneTransientProviderFault(t *testing.T) {
+	var attempts atomic.Int64
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if attempts.Add(1) == 1 {
+			http.Error(w, "transient", http.StatusServiceUnavailable)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"choices": []map[string]any{{"message": map[string]string{"content": "ok"}}},
+			"usage":   map[string]int{"prompt_tokens": 11, "completion_tokens": 7},
+		})
+	}))
+	defer upstream.Close()
+
+	broker := newInferenceBroker(1)
+	broker.sleep = func(context.Context, time.Duration) error { return nil }
+	proxyURL := configureBrokerUpstream(broker, upstream)
+	prepared := prepareBrokerSession(t, broker)
+	activateBrokerSessionFor(t, broker, prepared, proxyURL, "openrouter", "openrouter-route-0123456789abcdef-v1", llm.V7HarnessModel)
+	claimAndBindBrokerSession(t, broker, prepared["session_id"], "192.0.2.90", protocol.BenchVersionV7)
+	start, err := broker.snapshot(prepared["session_id"])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/inference/id/v1/chat/completions", bytes.NewBufferString(`{"model":"openai/gpt-oss-20b"}`))
+	request.RemoteAddr = "192.0.2.90:4321"
+	request.SetPathValue("rest", "v1/chat/completions")
+	recorder := httptest.NewRecorder()
+	broker.handle(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("transient fault was not absorbed: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if attempts.Load() != 2 {
+		t.Fatalf("platform deliveries=%d, want 2", attempts.Load())
+	}
+
+	end, err := broker.snapshot(prepared["session_id"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Fail-closed must NOT fire: nothing was degraded in the end.
+	if err := relayDegradedSince(start, end); err != nil {
+		t.Fatalf("an absorbed transient fault still failed the run closed: %v", err)
+	}
+	usage, err := relayUsageSince(start, end)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage.Status != "complete" || usage.Successes != 1 {
+		t.Fatalf("absorbed fault did not produce complete usage: %+v", usage)
+	}
+	// The failed attempt booked no tokens: usage is the successful attempt's.
+	if usage.PromptTokens != 11 || usage.CompletionTokens != 7 || usage.TotalTokens != 18 {
+		t.Fatalf("failed attempt leaked into observed usage: %+v", usage)
+	}
+	execution, err := relayExecutionSince(start, end)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if execution.Requests != 1 || execution.UpstreamAttempts != 2 || execution.Retries != 1 ||
+		execution.InfrastructureFailures != 0 || execution.GrantDenials != 0 {
+		t.Fatalf("retry ledger = %+v", execution)
+	}
+}
+
+// TestRetriedRunReportsIdenticalObservedUsageToACleanRun answers the accounting
+// question directly: a miner must never be charged for a provider fault. The
+// retried run and the clean run see the same provider usage, so their scored
+// TokenUsage must be byte-identical; only the attempt ledger may differ.
+func TestRetriedRunReportsIdenticalObservedUsageToACleanRun(t *testing.T) {
+	const retries = v7TransientMaxAttempts - 1
+	run := func(t *testing.T, faults int, sourceIP string) (protocol.TokenUsage, relayExecutionSummary) {
+		t.Helper()
+		var attempts atomic.Int64
+		upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			if attempts.Add(1) <= int64(faults) {
+				http.Error(w, "transient", http.StatusBadGateway)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{
+				"choices": []map[string]any{{"message": map[string]string{"content": "ok"}}},
+				"usage":   map[string]int{"prompt_tokens": 23, "completion_tokens": 5},
+			})
+		}))
+		defer upstream.Close()
+
+		broker := newInferenceBroker(1)
+		broker.sleep = func(context.Context, time.Duration) error { return nil }
+		proxyURL := configureBrokerUpstream(broker, upstream)
+		prepared := prepareBrokerSession(t, broker)
+		activateBrokerSessionFor(t, broker, prepared, proxyURL, "openrouter", "openrouter-route-0123456789abcdef-v1", llm.V7HarnessModel)
+		claimAndBindBrokerSession(t, broker, prepared["session_id"], sourceIP, protocol.BenchVersionV7)
+		start, err := broker.snapshot(prepared["session_id"])
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := httptest.NewRequest(http.MethodPost, "/v1/inference/id/v1/chat/completions", bytes.NewBufferString(`{"model":"openai/gpt-oss-20b"}`))
+		request.RemoteAddr = sourceIP + ":4321"
+		request.SetPathValue("rest", "v1/chat/completions")
+		recorder := httptest.NewRecorder()
+		broker.handle(recorder, request)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("run with %d fault(s) did not complete: %d", faults, recorder.Code)
+		}
+		end, err := broker.snapshot(prepared["session_id"])
+		if err != nil {
+			t.Fatal(err)
+		}
+		usage, err := relayUsageSince(start, end)
+		if err != nil {
+			t.Fatal(err)
+		}
+		execution, err := relayExecutionSince(start, end)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return usage, execution
+	}
+
+	cleanUsage, cleanExecution := run(t, 0, "192.0.2.91")
+	retriedUsage, retriedExecution := run(t, retries, "192.0.2.92")
+
+	// The figure that feeds efficiency: identical. Retried attempts are not
+	// charged to the miner.
+	if cleanUsage != retriedUsage {
+		t.Fatalf("retries changed observed usage:\n clean   = %+v\n retried = %+v", cleanUsage, retriedUsage)
+	}
+	// The audit ledger: different, and by exactly the number of retries.
+	if cleanExecution.Retries != 0 || cleanExecution.UpstreamAttempts != 1 {
+		t.Fatalf("clean run ledger = %+v", cleanExecution)
+	}
+	if retriedExecution.Retries != retries || retriedExecution.UpstreamAttempts != retries+1 {
+		t.Fatalf("retried run ledger = %+v, want %d retries", retriedExecution, retries)
+	}
+	if retriedExecution.Requests != cleanExecution.Requests {
+		t.Fatal("retries inflated the logical request count")
+	}
+}
+
+// TestV7EmbeddingSurvivesOneTransientPlatformFault covers the lane that carries
+// roughly two thirds of a v7 run's inference requests and previously had no
+// retry at all.
+func TestV7EmbeddingSurvivesOneTransientPlatformFault(t *testing.T) {
+	vector := make([]float64, embeddingDimensions)
+	var attempts atomic.Int64
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if attempts.Add(1) == 1 {
+			http.Error(w, "transient", http.StatusServiceUnavailable)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"object": "list", "model": hostedEmbeddingModel,
+			"data":  []map[string]any{{"object": "embedding", "index": 0, "embedding": vector}},
+			"usage": map[string]int{"prompt_tokens": 4, "total_tokens": 4},
+		})
+	}))
+	defer upstream.Close()
+
+	broker := newInferenceBroker(1)
+	broker.sleep = func(context.Context, time.Duration) error { return nil }
+	proxyURL := configureBrokerUpstream(broker, upstream)
+	prepared := prepareBrokerSession(t, broker)
+	activateBrokerSessionFor(t, broker, prepared, proxyURL, "openrouter", "openrouter-route-0123456789abcdef-v1", llm.V7HarnessModel)
+	runID := claimAndBindBrokerSession(t, broker, prepared["session_id"], "192.0.2.93", protocol.BenchVersionV7)
+	if !broker.beginEmbeddingPhase(prepared["session_id"], runID) {
+		t.Fatal("failed to admit v7 embedding phase")
+	}
+	defer broker.endEmbeddingPhase(prepared["session_id"], runID)
+	start, err := broker.snapshot(prepared["session_id"])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	response := callEmbedding(broker, "192.0.2.93", "hosted text")
+	if response.Code != http.StatusOK {
+		t.Fatalf("transient embedding fault was not absorbed: status=%d body=%s", response.Code, response.Body.String())
+	}
+	if attempts.Load() != 2 {
+		t.Fatalf("embedding deliveries=%d, want 2", attempts.Load())
+	}
+	end, err := broker.snapshot(prepared["session_id"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := relayDegradedSince(start, end); err != nil {
+		t.Fatalf("an absorbed transient embedding fault still failed the run closed: %v", err)
+	}
+	execution, err := relayExecutionSince(start, end)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if execution.EmbeddingRetries != 1 || execution.InfrastructureFailures != 0 {
+		t.Fatalf("embedding retry ledger = %+v", execution)
+	}
+}
+
+// TestV7EmbeddingIntegrityFaultIsNeverRetriedAndFailsClosed is the other
+// direction. A provider that answers 200 with the WRONG model is an integrity
+// violation -- exactly what #97 exists to catch. Repeating it could not help,
+// so it must be delivered once and must still discard the run.
+func TestV7EmbeddingIntegrityFaultIsNeverRetriedAndFailsClosed(t *testing.T) {
+	vector := make([]float64, embeddingDimensions)
+	var attempts atomic.Int64
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts.Add(1)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"object": "list", "model": "some-other/embedding-model",
+			"data":  []map[string]any{{"object": "embedding", "index": 0, "embedding": vector}},
+			"usage": map[string]int{"prompt_tokens": 4, "total_tokens": 4},
+		})
+	}))
+	defer upstream.Close()
+
+	broker := newInferenceBroker(1)
+	broker.sleep = func(context.Context, time.Duration) error { return nil }
+	proxyURL := configureBrokerUpstream(broker, upstream)
+	prepared := prepareBrokerSession(t, broker)
+	activateBrokerSessionFor(t, broker, prepared, proxyURL, "openrouter", "openrouter-route-0123456789abcdef-v1", llm.V7HarnessModel)
+	runID := claimAndBindBrokerSession(t, broker, prepared["session_id"], "192.0.2.94", protocol.BenchVersionV7)
+	if !broker.beginEmbeddingPhase(prepared["session_id"], runID) {
+		t.Fatal("failed to admit v7 embedding phase")
+	}
+	defer broker.endEmbeddingPhase(prepared["session_id"], runID)
+	start, err := broker.snapshot(prepared["session_id"])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if response := callEmbedding(broker, "192.0.2.94", "hosted text"); response.Code != http.StatusBadGateway {
+		t.Fatalf("integrity fault status=%d, want 502", response.Code)
+	}
+	if attempts.Load() != 1 {
+		t.Fatalf("integrity fault was retried: deliveries=%d, want 1", attempts.Load())
+	}
+	end, err := broker.snapshot(prepared["session_id"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if end.InfrastructureFailures != 1 || end.EmbeddingRetries != 0 {
+		t.Fatalf("integrity fault accounting = %+v", end)
+	}
+	if err := relayDegradedSince(start, end); err == nil {
+		t.Fatal("an integrity fault no longer fails the run closed")
+	}
+}
+
+// --- lost lease is not a provider fault -----------------------------------
+
+// TestPlatformGrantDenialIsNotCountedAsAnUpstreamProviderFault pins the
+// misdiagnosis that started this. The platform answers 429 only when it
+// declines to reserve capacity for the grant -- a revoked lease, a rewritten or
+// passed ticket deadline, an exhausted budget. It converts every real provider
+// rejection into 502 instead, so a 429 here is never a provider rate limit.
+// It must be counted as a grant denial, reported by name, and never retried.
+func TestPlatformGrantDenialIsNotCountedAsAnUpstreamProviderFault(t *testing.T) {
+	for _, lane := range []string{"chat", "embedding"} {
+		t.Run(lane, func(t *testing.T) {
+			var attempts atomic.Int64
+			upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				attempts.Add(1)
+				http.Error(w, "inference grant unavailable", http.StatusTooManyRequests)
+			}))
+			defer upstream.Close()
+
+			broker := newInferenceBroker(1)
+			broker.sleep = func(context.Context, time.Duration) error { return nil }
+			proxyURL := configureBrokerUpstream(broker, upstream)
+			prepared := prepareBrokerSession(t, broker)
+			activateBrokerSessionFor(t, broker, prepared, proxyURL, "openrouter", "openrouter-route-0123456789abcdef-v1", llm.V7HarnessModel)
+			sourceIP := "192.0.2.95"
+			if lane == "embedding" {
+				sourceIP = "192.0.2.96"
+			}
+			runID := claimAndBindBrokerSession(t, broker, prepared["session_id"], sourceIP, protocol.BenchVersionV7)
+			start, err := broker.snapshot(prepared["session_id"])
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if lane == "chat" {
+				request := httptest.NewRequest(http.MethodPost, "/v1/inference/id/v1/chat/completions", bytes.NewBufferString(`{"model":"openai/gpt-oss-20b"}`))
+				request.RemoteAddr = sourceIP + ":4321"
+				request.SetPathValue("rest", "v1/chat/completions")
+				recorder := httptest.NewRecorder()
+				broker.handle(recorder, request)
+				// The harness-visible response is unchanged from before this
+				// change: the run is discarded either way, and its remaining
+				// requests must not observe a different gateway contract.
+				if recorder.Code != http.StatusBadGateway {
+					t.Fatalf("harness-visible status=%d, want an unchanged 502", recorder.Code)
+				}
+			} else {
+				if !broker.beginEmbeddingPhase(prepared["session_id"], runID) {
+					t.Fatal("failed to admit v7 embedding phase")
+				}
+				defer broker.endEmbeddingPhase(prepared["session_id"], runID)
+				if response := callEmbedding(broker, sourceIP, "hosted text"); response.Code != http.StatusBadGateway {
+					t.Fatalf("harness-visible status=%d, want an unchanged 502", response.Code)
+				}
+			}
+
+			// Never retried: the grant is gone, so another delivery cannot
+			// succeed and would burn a fresh reservation against a dead lease.
+			if attempts.Load() != 1 {
+				t.Fatalf("a denied grant was retried: deliveries=%d, want 1", attempts.Load())
+			}
+			end, err := broker.snapshot(prepared["session_id"])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if end.GrantDenials != 1 {
+				t.Fatalf("grant denial was not recorded: %+v", end)
+			}
+			if end.InfrastructureFailures != 0 {
+				t.Fatalf("a lost lease was miscounted as an upstream provider fault: %+v", end)
+			}
+			// Still fails closed -- #97's rule is intact; only the diagnosis
+			// changed.
+			degraded := relayDegradedSince(start, end)
+			if degraded == nil {
+				t.Fatal("a denied grant no longer fails the run closed")
+			}
+			if strings.Contains(degraded.Error(), "upstream failure") {
+				t.Fatalf("a lost lease is still reported as a provider fault: %v", degraded)
+			}
+			if !strings.Contains(degraded.Error(), "declined this run's inference grant") {
+				t.Fatalf("grant denial was not reported by name: %v", degraded)
+			}
+		})
+	}
+}
+
+// TestLegacyRelayStillTreatsA429AsAProviderFault guards the exception. The
+// frozen model-relay forwards a real provider 429 verbatim, so on that path a
+// 429 IS an upstream fault and its historical accounting must not move.
+func TestLegacyRelayStillTreatsA429AsAProviderFault(t *testing.T) {
+	if platformDeniesGrant("http://host.docker.internal:11434", http.StatusTooManyRequests) {
+		t.Fatal("a legacy relay 429 was reclassified as a platform grant denial")
+	}
+	if !platformDeniesGrant("", http.StatusTooManyRequests) {
+		t.Fatal("a ticket-path 429 was not classified as a platform grant denial")
+	}
+	if platformDeniesGrant("", http.StatusBadGateway) {
+		t.Fatal("a platform 502 must stay an upstream provider fault")
 	}
 }
