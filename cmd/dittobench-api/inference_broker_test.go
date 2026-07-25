@@ -1067,9 +1067,23 @@ func TestInferenceBrokerRejectsExhaustedTransientFailures(t *testing.T) {
 	}
 }
 
-func TestInferenceBrokerRejectsWrongVersionModel(t *testing.T) {
-	upstream := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		t.Fatal("wrong-model request reached upstream")
+// TestInferenceBrokerServesTheTicketModelNotTheRequestedOne pins version
+// isolation under the substitution rule. The caller no longer selects a model
+// at all: whatever it sends, the upstream receives the session's own model. A
+// pre-v7 harness carrying the stale qwen/qwen3-32b default is therefore scored
+// on the v7 model rather than failing closed with an error it cannot act on,
+// and a caller still cannot reach a model its ticket does not pin.
+func TestInferenceBrokerServesTheTicketModelNotTheRequestedOne(t *testing.T) {
+	var delivered []string
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var seen struct {
+			Model string `json:"model"`
+		}
+		_ = json.Unmarshal(body, &seen)
+		delivered = append(delivered, seen.Model)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"usage":{"prompt_tokens":3,"completion_tokens":4},"choices":[{"message":{"content":"OK"}}]}`))
 	}))
 	defer upstream.Close()
 	broker := newInferenceBroker(1)
@@ -1077,13 +1091,45 @@ func TestInferenceBrokerRejectsWrongVersionModel(t *testing.T) {
 	prepared := prepareBrokerSession(t, broker)
 	activateBrokerSessionFor(t, broker, prepared, proxyURL, "amazon-bedrock", "openrouter-route-0123456789abcdef-v1", llm.V7HarnessModel)
 	claimAndBindBrokerSession(t, broker, prepared["session_id"], "192.0.2.40", protocol.BenchVersionV7)
-	request := httptest.NewRequest(http.MethodPost, "/v1/inference/id/v1/chat/completions", bytes.NewBufferString(`{"model":"qwen/qwen3-32b"}`))
+	request := httptest.NewRequest(http.MethodPost, "/v1/inference/id/v1/chat/completions",
+		bytes.NewBufferString(`{"model":"qwen/qwen3-32b","temperature":0}`))
 	request.RemoteAddr = "192.0.2.40:4321"
 	request.SetPathValue("rest", "v1/chat/completions")
 	recorder := httptest.NewRecorder()
 	broker.handle(recorder, request)
-	if recorder.Code != http.StatusUnauthorized {
-		t.Fatalf("wrong model status = %d", recorder.Code)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("substituted request status = %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if len(delivered) != 1 || delivered[0] != llm.V7HarnessModel {
+		t.Fatalf("upstream received %v, want only the ticket model %q", delivered, llm.V7HarnessModel)
+	}
+	for _, model := range delivered {
+		if model == "qwen/qwen3-32b" {
+			t.Fatal("the caller's model reached the platform proxy")
+		}
+	}
+}
+
+// TestInferenceBrokerRejectsUnparseableRequestBody keeps the substitution path
+// fail-closed on input it cannot safely rewrite.
+func TestInferenceBrokerRejectsUnparseableRequestBody(t *testing.T) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("unparseable request reached upstream")
+	}))
+	defer upstream.Close()
+	broker := newInferenceBroker(1)
+	proxyURL := configureBrokerUpstream(broker, upstream)
+	prepared := prepareBrokerSession(t, broker)
+	activateBrokerSessionFor(t, broker, prepared, proxyURL, "groq", "openrouter-route-0123456789abcdef-v1", llm.V7HarnessModel)
+	claimAndBindBrokerSession(t, broker, prepared["session_id"], "192.0.2.41", protocol.BenchVersionV7)
+	request := httptest.NewRequest(http.MethodPost, "/v1/inference/id/v1/chat/completions",
+		bytes.NewBufferString(`["not","an","object"]`))
+	request.RemoteAddr = "192.0.2.41:4321"
+	request.SetPathValue("rest", "v1/chat/completions")
+	recorder := httptest.NewRecorder()
+	broker.handle(recorder, request)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("unparseable body status = %d, want 400", recorder.Code)
 	}
 }
 
