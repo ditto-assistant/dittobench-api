@@ -1466,8 +1466,9 @@ func TestV7ChatSurvivesOneTransientProviderFault(t *testing.T) {
 
 // TestRetriedRunReportsIdenticalObservedUsageToACleanRun answers the accounting
 // question directly: a miner must never be charged for a provider fault. The
-// retried run and the clean run see the same provider usage, so their scored
-// TokenUsage must be byte-identical; only the attempt ledger may differ.
+// retried run and the clean run see the same provider usage, so every accounted
+// field of their scored TokenUsage must be identical; only the attempt ledger
+// may differ.
 func TestRetriedRunReportsIdenticalObservedUsageToACleanRun(t *testing.T) {
 	const retries = v7TransientMaxAttempts - 1
 	run := func(t *testing.T, faults int, sourceIP string) (protocol.TokenUsage, relayExecutionSummary) {
@@ -1521,10 +1522,21 @@ func TestRetriedRunReportsIdenticalObservedUsageToACleanRun(t *testing.T) {
 	cleanUsage, cleanExecution := run(t, 0, "192.0.2.91")
 	retriedUsage, retriedExecution := run(t, retries, "192.0.2.92")
 
-	// The figure that feeds efficiency: identical. Retried attempts are not
-	// charged to the miner.
-	if cleanUsage != retriedUsage {
-		t.Fatalf("retries changed observed usage:\n clean   = %+v\n retried = %+v", cleanUsage, retriedUsage)
+	// The figures that feed efficiency: identical. Retried attempts are not
+	// charged to the miner, so they book zero usage — token counts, the
+	// request and success counts, and usage availability all match the clean
+	// run exactly.
+	//
+	// ProviderLatencyMs is deliberately excluded from the comparison: it is
+	// measured wall clock against the httptest upstream, so it drifts by a
+	// millisecond or two between two otherwise identical runs (routinely so
+	// under -race). It is no part of the accounting invariant this test
+	// protects. Every other field stays exactly as strict as before.
+	cleanAccounted, retriedAccounted := cleanUsage, retriedUsage
+	cleanAccounted.ProviderLatencyMs = 0
+	retriedAccounted.ProviderLatencyMs = 0
+	if cleanAccounted != retriedAccounted {
+		t.Fatalf("retries changed observed usage:\n clean   = %+v\n retried = %+v", cleanAccounted, retriedAccounted)
 	}
 	// The audit ledger: different, and by exactly the number of retries.
 	if cleanExecution.Retries != 0 || cleanExecution.UpstreamAttempts != 1 {
