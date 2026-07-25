@@ -149,3 +149,62 @@ func TestHarnessSandboxEnvLockCannotBeOverridden(t *testing.T) {
 		t.Fatalf("req.Env overrode the locked DB path: %q", env["DITTOBENCH_DB"])
 	}
 }
+
+// TestV7BYOKCompatSelectorsPointAtTheBroker pins the backwards-compatibility
+// contract: a harness written against the pre-v7 "bring your own key" shape
+// reads a conventional OpenAI/OpenRouter selector, so every one of those
+// selectors must resolve to the same ticket-bound broker gateway that
+// DITTOBENCH_INFERENCE_BASE_URL resolves to. No miner change, one route.
+func TestV7BYOKCompatSelectorsPointAtTheBroker(t *testing.T) {
+	env := harnessSandboxEnv(nil, protocol.BenchVersionV7, "session-route")
+	gateway := env["DITTOBENCH_INFERENCE_BASE_URL"]
+	if gateway == "" {
+		t.Fatal("v7 must set the platform gateway")
+	}
+	for _, key := range byokCompatEnvKeys {
+		if env[key] != gateway {
+			t.Fatalf("%s = %q, want the broker gateway %q", key, env[key], gateway)
+		}
+	}
+	for _, key := range []string{"OPENAI_API_KEY", "OPENROUTER_API_KEY"} {
+		if env[key] != brokerPlaceholderKey {
+			t.Fatalf("%s = %q, want the non-secret placeholder", key, env[key])
+		}
+	}
+}
+
+// TestV7CompatSelectorsCannotBeRedirected pins that the new aliases joined the
+// lock: a hostile req.Env may not repoint them at an attacker host, which would
+// otherwise be a way around the locked model.
+func TestV7CompatSelectorsCannotBeRedirected(t *testing.T) {
+	hostile := map[string]string{
+		"OPENAI_BASE_URL":     "http://attacker.example/v1",
+		"OPENAI_API_BASE":     "http://attacker.example/v1",
+		"OPENROUTER_BASE_URL": "http://attacker.example/v1",
+		"OPENROUTER_API_KEY":  "sk-attacker",
+		"OPENAI_API_KEY":      "sk-attacker",
+	}
+	env := harnessSandboxEnv(hostile, protocol.BenchVersionV7, "session-route")
+	gateway := env["DITTOBENCH_INFERENCE_BASE_URL"]
+	for _, key := range byokCompatEnvKeys {
+		if env[key] != gateway {
+			t.Fatalf("req.Env redirected %s to %q", key, env[key])
+		}
+	}
+	for _, key := range []string{"OPENAI_API_KEY", "OPENROUTER_API_KEY"} {
+		if env[key] != brokerPlaceholderKey {
+			t.Fatalf("req.Env kept a real key in %s: %q", key, env[key])
+		}
+	}
+}
+
+// TestLegacyVersionsKeepNoCompatSelectors pins that the aliases are a v7-only
+// addition: historical versions replay exactly as they were scored.
+func TestLegacyVersionsKeepNoCompatSelectors(t *testing.T) {
+	env := harnessSandboxEnv(nil, protocol.BenchVersionV6, "legacy-session")
+	for _, key := range append(append([]string{}, byokCompatEnvKeys...), "OPENAI_API_KEY", "OPENROUTER_API_KEY") {
+		if _, ok := env[key]; ok {
+			t.Fatalf("v6 env gained %s; historical replay must not change", key)
+		}
+	}
+}

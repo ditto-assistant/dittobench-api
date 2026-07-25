@@ -2071,9 +2071,33 @@ var lockedEnvKeys = map[string]bool{
 	"CHUTES_BASE_URL":               true,
 	"OPENAI_API_KEY":                true,
 	"OPENAI_BASE_URL":               true,
+	"OPENAI_API_BASE":               true,
+	"OPENROUTER_BASE_URL":           true,
 	"DITTOBENCH_INFERENCE_BASE_URL": true,
 	"DITTOBENCH_DB":                 true,
 }
+
+// byokCompatEnvKeys are the conventional OpenAI/OpenRouter SDK selectors a
+// pre-v7 "bring your own key" harness reads. Under v7 they are pointed at the
+// ticket-bound local broker so a harness written against the generic
+// OpenAI-compatible contract reaches the locked model without being rewritten
+// for DITTOBENCH_INFERENCE_BASE_URL.
+//
+// The paired key is the fixed non-secret placeholder "ticket": the broker's
+// data plane authorizes on the session route, the bound run id and the bound
+// source IP, and never reads the caller's Authorization header. Nothing here is
+// a credential, so nothing here is exfiltratable — a harness that ships this
+// value off-box gains no ability to call the platform proxy from anywhere else.
+var byokCompatEnvKeys = []string{
+	"OPENAI_BASE_URL",
+	"OPENAI_API_BASE",
+	"OPENROUTER_BASE_URL",
+}
+
+// brokerPlaceholderKey is the non-secret value handed to compatibility key
+// selectors. It exists so a harness that hard-requires a key present boots
+// instead of exiting before health; it authorizes nothing.
+const brokerPlaceholderKey = "ticket"
 
 // sandboxRuntimeEnv applies filesystem invariants shared by practice and
 // canonical scoring without changing the practice endpoint's provider env.
@@ -2120,6 +2144,16 @@ func harnessSandboxEnv(reqEnv map[string]string, benchVersion int, inferenceSess
 	if benchVersion >= protocol.BenchVersionV7 {
 		env["DITTOBENCH_PROVIDER"] = platformLockedProvider
 		env["DITTOBENCH_INFERENCE_BASE_URL"] = gateway
+		// Backwards compatibility for harnesses built against the BYOK contract:
+		// point every conventional OpenAI/OpenRouter selector at the same
+		// ticket-bound broker. These are aliases of the locked gateway, not an
+		// additional route — the broker still binds run id, source IP and the
+		// locked model, so an alias cannot widen what the sandbox may reach.
+		for _, key := range byokCompatEnvKeys {
+			env[key] = gateway
+		}
+		env["OPENAI_API_KEY"] = brokerPlaceholderKey
+		env["OPENROUTER_API_KEY"] = brokerPlaceholderKey
 	} else {
 		env["DITTOBENCH_PROVIDER"] = legacyLockedProvider
 		env["CHUTES_BASE_URL"] = gateway
