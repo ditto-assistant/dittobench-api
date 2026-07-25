@@ -89,6 +89,16 @@ caller-supplied model or key. The locked values are applied after the request's
 own environment, so a request cannot override them, and the run details report
 the model that actually served the run.
 
+Neither of the broker's two doors trusts the `model` string in a harness
+request, and neither rejects on it. The chat door rewrites the field to the
+ticket's model before forwarding (#102); the embedding door discards the
+harness body outright and marshals a fresh upstream request pinned to
+`embeddinggemma` on the v2-v6 local lane or `perplexity/pplx-embed-v1-0.6b` on
+hosted v7. The lock is therefore in what the broker SENDS, not in what it
+accepts, which is why an unrecognised model name costs a harness nothing but a
+log line naming it. The platform proxy re-locks the same values independently
+(ditto-platform#428) as a backstop that should never fire.
+
 ## Config surface
 
 The locked model id and the crate provider are both frozen in code
@@ -100,7 +110,7 @@ remaining env is deployment config: where the gateway serves that model.
 |-----|---------|--------|
 | `HARNESS_GATEWAY_URL` | `http://host.docker.internal:11434` | the CHAT gateway base URL |
 | `HARNESS_EMBED_URL` | `http://host.docker.internal:11434` | trusted scorer-to-Ollama upstream; scored harnesses receive the source-bound operation broker |
-| `DITTOBENCH_EMBEDDING_UPSTREAM_URL` | `http://host.docker.internal:11434/api/embed` | broker-only upstream for locked `embeddinggemma` embedding calls |
+| `DITTOBENCH_EMBEDDING_UPSTREAM_URL` | `http://host.docker.internal:11434/api/embed` | broker-only upstream; the broker forwards the locked `embeddinggemma` regardless of the model the harness names |
 
 Scoring is judge-free (see `docs/judge-determinism.md`), so the locked model is
 the ONLY model in a run. The locked keys also cover the Chutes and OpenAI
