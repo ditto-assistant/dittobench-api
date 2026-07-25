@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -81,3 +82,64 @@ func TestFinishSandboxRunClassifiesOOMBeforeStop(t *testing.T) {
 }
 
 func pointer[T any](value T) *T { return &value }
+
+// A run the scored path already classified as validator infrastructure must
+// keep that classification through the deferred sandbox teardown. Overwriting
+// it with the generic sandbox_runtime envelope is what billed platform-side
+// lease revocations to the miner: ditto-subnet only honours a failure whose
+// kind is "validator_infrastructure" AND whose retryable is true, so a
+// downgraded run became fail_job("scoring_error") and spent a real attempt.
+func TestFinishSandboxRunPreservesScoredPathInfrastructureVerdict(t *testing.T) {
+	backend := &diagnosticSandbox{diagnostics: sandbox.RuntimeDiagnostics{
+		Running:      true,
+		ExitCode:     0,
+		MemoryEvents: map[string]uint64{},
+	}}
+	s := &server{store: store.New(), sandbox: backend}
+	s.store.Create("run-denied", "sandbox", store.StatusRunning, 7, 283)
+	s.failRelayUnavailable(
+		"run-denied",
+		errors.New("platform declined this run's inference grant 469 time(s) during benchmark"),
+	)
+
+	s.finishSandboxRun("run-denied", &sandbox.Handle{ContainerID: "private"})
+
+	job, _ := s.store.Get("run-denied")
+	if job.Failure == nil {
+		t.Fatal("failure envelope missing")
+	}
+	if job.Failure.Kind != "validator_infrastructure" {
+		t.Fatalf("kind = %q, want validator_infrastructure", job.Failure.Kind)
+	}
+	if job.Failure.Code != "model_relay_unavailable" {
+		t.Fatalf("code = %q, want model_relay_unavailable", job.Failure.Code)
+	}
+	if !job.Failure.Retryable {
+		t.Fatal("a platform lease denial must stay retryable, or the miner is charged")
+	}
+	if !strings.Contains(job.Error, "locked model relay unavailable") {
+		t.Fatalf("scored-path message lost: %q", job.Error)
+	}
+	// The diagnostics this path exists to collect are still folded in.
+	if _, ok := job.Failure.Diagnostics["exit_code"]; !ok {
+		t.Fatalf("sandbox diagnostics not attached: %+v", job.Failure.Diagnostics)
+	}
+}
+
+// With no prior verdict the generic sandbox envelope is still the right answer.
+func TestFinishSandboxRunStillClassifiesUnattributedFailures(t *testing.T) {
+	backend := &diagnosticSandbox{diagnostics: sandbox.RuntimeDiagnostics{
+		ExitCode:     1,
+		MemoryEvents: map[string]uint64{},
+	}}
+	s := &server{store: store.New(), sandbox: backend}
+	s.store.Create("run-plain", "sandbox", store.StatusRunning, 7, 283)
+	s.store.Fail("run-plain", "harness exited non-zero")
+
+	s.finishSandboxRun("run-plain", &sandbox.Handle{ContainerID: "private"})
+
+	job, _ := s.store.Get("run-plain")
+	if job.Failure == nil || job.Failure.Kind != "sandbox_failure" || job.Failure.Retryable {
+		t.Fatalf("unattributed failure must stay agent-billed: %+v", job.Failure)
+	}
+}
