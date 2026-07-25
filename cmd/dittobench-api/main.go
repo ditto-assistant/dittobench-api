@@ -30,6 +30,7 @@ import (
 	"github.com/ditto-assistant/dittobench-api/internal/llm"
 	"github.com/ditto-assistant/dittobench-api/internal/netguard"
 	"github.com/ditto-assistant/dittobench-api/internal/ratelimit"
+	"github.com/ditto-assistant/dittobench-api/internal/release"
 	"github.com/ditto-assistant/dittobench-api/internal/runner"
 	"github.com/ditto-assistant/dittobench-api/internal/sandbox"
 	"github.com/ditto-assistant/dittobench-api/internal/scorer"
@@ -153,6 +154,13 @@ type server struct {
 	requireTicketInference bool
 	softwareVersion        string
 	sourceRevision         string
+	// sourceRevisionOrigin records whether sourceRevision was derived from the
+	// compiled binary or merely asserted by the environment, and
+	// sourceRevisionMismatch records that the two disagreed. Both are reported
+	// so a validator can tell a trustworthy deployment from a stale one.
+	sourceRevisionOrigin   release.Origin
+	sourceRevisionMismatch bool
+	softwareVersionOrigin  release.Origin
 	limiter                *ratelimit.Limiter
 	runSlots               chan struct{} // bounds concurrent run_size jobs
 	memorySlots            chan struct{} // bounds embedding-heavy memory phases
@@ -167,7 +175,21 @@ type server struct {
 
 func main() {
 	port := flag.Int("port", 8000, "HTTP listen port (ditto-subnet API convention)")
+	printVersion := flag.Bool("version", false, "print this binary's release identity and exit")
 	flag.Parse()
+
+	// Release identity is answerable without a server, a Docker daemon, or a
+	// network: `docker run <image> version` must tell an operator what a
+	// container actually IS. The default ENTRYPOINT already carries `-port 8000`,
+	// so the subcommand arrives as a trailing argument after flag parsing.
+	identity := release.Resolve(os.Getenv)
+	if *printVersion || versionCommandRequested(flag.Args()) {
+		if err := writeVersion(os.Stdout, identity, versionJSONRequested(flag.Args())); err != nil {
+			log.Fatalf("write version: %v", err)
+		}
+		return
+	}
+
 	if maxConcurrentRuns > 8 {
 		log.Fatalf("DITTOBENCH_MAX_CONCURRENT_RUNS exceeds the supported safety bound of 8")
 	}
@@ -187,8 +209,7 @@ func main() {
 	allowPrivate := envBool("DITTOBENCH_ALLOW_PRIVATE_HARNESS")
 	allowScreenedImages := envBool("DITTOBENCH_ALLOW_SCREENED_IMAGES")
 	requireTicketInference := envBool("DITTOBENCH_REQUIRE_TICKET_INFERENCE")
-	softwareVersion := strings.TrimSpace(os.Getenv("DITTOBENCH_SOFTWARE_VERSION"))
-	sourceRevision := strings.TrimSpace(os.Getenv("DITTOBENCH_SOURCE_SHA"))
+	logReleaseIdentity(identity)
 	runner.Configure(allowPrivate)
 	if allowPrivate {
 		log.Printf("WARNING: DITTOBENCH_ALLOW_PRIVATE_HARNESS set — SSRF guard relaxed (local/dev only)")
@@ -213,8 +234,11 @@ func main() {
 		allowPrivate:           allowPrivate,
 		allowScreenedImages:    allowScreenedImages,
 		requireTicketInference: requireTicketInference,
-		softwareVersion:        softwareVersion,
-		sourceRevision:         sourceRevision,
+		softwareVersion:        identity.SoftwareVersion,
+		sourceRevision:         identity.SourceRevision,
+		sourceRevisionOrigin:   identity.SourceRevisionOrigin,
+		sourceRevisionMismatch: identity.SourceRevisionMismatch,
+		softwareVersionOrigin:  identity.SoftwareVersionOrigin,
 		limiter:                ratelimit.New(submitsPerWindow, submitWindow),
 		runSlots:               make(chan struct{}, maxConcurrentRuns),
 		memorySlots:            memorySlots,
@@ -301,20 +325,25 @@ type capabilitiesResponse struct {
 	FullRunCapacity        int                             `json:"full_run_capacity"`
 	MemoryPhaseCapacity    int                             `json:"memory_phase_capacity"`
 	V7Calibration          efficiency.CalibrationReadiness `json:"v7_calibration"`
+	// SourceRevisionOrigin is "binary" when source_revision was compiled into
+	// the running binary and "env" when it was only asserted by the process
+	// environment. Additive: an older scorer omits it, which a consumer should
+	// read as unknown provenance.
+	SourceRevisionOrigin release.Origin `json:"source_revision_origin,omitempty"`
+	// SourceRevisionMismatch is true when the binary and the environment both
+	// named a revision and disagreed — the signature of a container recreated
+	// against a cached image. The binary-derived value is still reported; the
+	// deployment should be treated as untrustworthy until the image is
+	// refreshed.
+	SourceRevisionMismatch bool `json:"source_revision_mismatch"`
+	// SoftwareVersionOrigin mirrors SourceRevisionOrigin for software_version.
+	SoftwareVersionOrigin release.Origin `json:"software_version_origin,omitempty"`
 }
 
-// handleCapabilities reports public release metadata to a co-located validator.
-// Identity is supplied by the immutable release descriptor at deploy time and
-// the validator accepts a v3 claim only when both fields match that descriptor.
-// A bearer token would not authenticate the scorer: the scorer itself would hold
-// the token and could use it while lying. Keeping this read-only response
-// secretless avoids an operator cutover without weakening the identity binding.
-func (s *server) handleCapabilities(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Cache-Control", "no-store")
-	if s.softwareVersion == "" || !canonicalSourceRevision(s.sourceRevision) {
-		writeError(w, http.StatusServiceUnavailable, "scorer release identity unavailable")
-		return
-	}
+// supportedBenchVersions is the capability set this build can administer. It is
+// shared with the version command so an operator can ask an unstarted container
+// exactly what a validator would negotiate with it.
+func supportedBenchVersions() []int {
 	versions := []int{protocol.BenchVersionV2, protocol.BenchVersionV3, protocol.BenchVersionV4}
 	if efficiency.ProductionReady() {
 		versions = append(versions, protocol.BenchVersionV5)
@@ -330,18 +359,37 @@ func (s *server) handleCapabilities(w http.ResponseWriter, _ *http.Request) {
 	// (backroom-controlled active bench, rollback to v6 supported); the
 	// validator scores whatever bench the platform sends, provided it advertises
 	// support. There is deliberately no validator-side activation flag.
-	v7Calibration := efficiency.V7CalibrationReadiness()
 	if efficiency.ProductionReadyForVersion(protocol.BenchVersionV7) &&
-		efficiency.ValidV7CalibrationReadiness(v7Calibration) {
+		efficiency.ValidV7CalibrationReadiness(efficiency.V7CalibrationReadiness()) {
 		versions = append(versions, protocol.BenchVersionV7)
+	}
+	return versions
+}
+
+// handleCapabilities reports public release metadata to a co-located validator.
+// Identity is derived from the compiled binary (see internal/release), falling
+// back to the deploy-time environment only for an image that embedded nothing,
+// and the validator accepts a v3 claim only when both fields match the immutable
+// release descriptor.
+// A bearer token would not authenticate the scorer: the scorer itself would hold
+// the token and could use it while lying. Keeping this read-only response
+// secretless avoids an operator cutover without weakening the identity binding.
+func (s *server) handleCapabilities(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	if s.softwareVersion == "" || !canonicalSourceRevision(s.sourceRevision) {
+		writeError(w, http.StatusServiceUnavailable, "scorer release identity unavailable")
+		return
 	}
 	writeJSON(w, http.StatusOK, capabilitiesResponse{
 		SoftwareVersion:        s.softwareVersion,
 		SourceRevision:         s.sourceRevision,
-		SupportedBenchVersions: versions,
+		SupportedBenchVersions: supportedBenchVersions(),
 		FullRunCapacity:        maxConcurrentRuns,
 		MemoryPhaseCapacity:    maxConcurrentMemoryPhases,
-		V7Calibration:          v7Calibration,
+		V7Calibration:          efficiency.V7CalibrationReadiness(),
+		SourceRevisionOrigin:   s.sourceRevisionOrigin,
+		SourceRevisionMismatch: s.sourceRevisionMismatch,
+		SoftwareVersionOrigin:  s.softwareVersionOrigin,
 	})
 }
 

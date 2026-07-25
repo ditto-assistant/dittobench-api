@@ -17,6 +17,18 @@ integer `bench_version` on `POST /v2/score`. The accepted response, polled job,
 and completed `report.details` all echo the selected value. A validator must
 reject an omitted, unsupported, or contradictory value.
 
+The reported `source_revision` is derived from the compiled scorer binary.
+Two additive fields qualify it, and a consumer that does not know them keeps its
+existing behavior:
+
+- `source_revision_origin`: `"binary"` when the revision was compiled in and is
+  therefore proven, `"env"` when the image embedded nothing and the value is only
+  asserted by `DITTOBENCH_SOURCE_SHA`. Absent on scorers older than this field.
+- `source_revision_mismatch`: `true` when the binary and the environment named
+  different revisions — the signature of a container recreated against a cached
+  image. The binary-derived revision is still reported; a validator should treat
+  itself as degraded rather than trust the deployment.
+
 During the mixed-fleet migration only, `POST /v1/score` and the public practice
 `POST /v1/submit` map an omitted version to v2. This is an exact legacy path;
 it must not silently advance to the current version. Version 3 has its own
