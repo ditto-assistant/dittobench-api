@@ -2083,6 +2083,9 @@ var lockedEnvKeys = map[string]bool{
 // OpenAI-compatible contract reaches the locked model without being rewritten
 // for DITTOBENCH_INFERENCE_BASE_URL.
 //
+// These are a secondary net. The selector that actually reaches every harness
+// shipped to date is DITTOBENCH_PROVIDER: see harnessSandboxEnv.
+//
 // The paired key is the fixed non-secret placeholder "ticket": the broker's
 // data plane authorizes on the session route, the bound run id and the bound
 // source IP, and never reads the caller's Authorization header. Nothing here is
@@ -2142,11 +2145,30 @@ func harnessSandboxEnv(reqEnv map[string]string, benchVersion int, inferenceSess
 	// The lock, applied last so it wins over caller env. Embeddings hit the local
 	// Ollama endpoint independently. No platform credential enters the sandbox.
 	if benchVersion >= protocol.BenchVersionV7 {
-		env["DITTOBENCH_PROVIDER"] = platformLockedProvider
+		// Select the generic OpenAI-compatible adapter, not the v7-only
+		// "platform" one. Every harness shipped against this benchmark — the
+		// current starter kit and every pre-v7 fork of it — implements a
+		// `chutes` arm that takes its base URL verbatim from CHUTES_BASE_URL and
+		// its key from CHUTES_API_KEY (or OPENAI_API_KEY). Only harnesses
+		// rebased after the v7 cutover implement a `platform` arm; the rest fall
+		// through their `_ =>` default to a compiled-in OpenRouter URL, which
+		// the sandbox egress chain denies, and burn the whole ticket on timeouts.
+		//
+		// Selecting `chutes` costs nothing for a v7-aware harness: across every
+		// blocked submission the Platform and Chutes arms build the identical
+		// OpenAI-compatible client (base URL + key + model) and nothing else in
+		// those harnesses branches on the provider name. This is also exactly
+		// what the screener already injects, so the scored environment now
+		// matches the environment the image passed screening in.
+		//
+		// DITTOBENCH_INFERENCE_BASE_URL stays set so the documented v7 selector
+		// keeps working for anything that reads it unconditionally.
+		env["DITTOBENCH_PROVIDER"] = legacyLockedProvider
+		env["CHUTES_BASE_URL"] = gateway
+		env["CHUTES_API_KEY"] = brokerPlaceholderKey
 		env["DITTOBENCH_INFERENCE_BASE_URL"] = gateway
-		// Backwards compatibility for harnesses built against the BYOK contract:
-		// point every conventional OpenAI/OpenRouter selector at the same
-		// ticket-bound broker. These are aliases of the locked gateway, not an
+		// Secondary net for a harness that configures itself from the generic
+		// SDK env names instead. Aliases of the same locked gateway, not an
 		// additional route — the broker still binds run id, source IP and the
 		// locked model, so an alias cannot widen what the sandbox may reach.
 		for _, key := range byokCompatEnvKeys {
