@@ -263,7 +263,7 @@ Config for the `run_size` path (all optional):
 | ----------------------- | ------------------ | ---------------------------------------------------- |
 | `HARNESS_GATEWAY_URL` env | `http://host.docker.internal:11434` | the chat gateway serving the locked model |
 | `HARNESS_EMBED_URL` env | `http://host.docker.internal:11434` | trusted scorer-to-Ollama upstream; scored harnesses receive the source-bound broker instead |
-| `DITTOBENCH_EMBEDDING_UPSTREAM_URL` env | `http://host.docker.internal:11434/api/embed` | broker-only embedding upstream; only locked `embeddinggemma` `/api/embed` calls are exposed |
+| `DITTOBENCH_EMBEDDING_UPSTREAM_URL` env | `http://host.docker.internal:11434/api/embed` | broker-only embedding upstream; only the `/api/embed` operation is exposed, and it always forwards the locked `embeddinggemma` whatever model the harness names |
 
 The locked model is scored against every harness; its id and provider are frozen
 in code (`internal/llm`, `cmd/dittobench-api`), not env-tunable

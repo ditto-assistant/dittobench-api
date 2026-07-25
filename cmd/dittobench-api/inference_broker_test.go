@@ -201,8 +201,15 @@ func writeTestEmbedding(w http.ResponseWriter, inputs int) {
 }
 
 func callEmbedding(broker *inferenceBroker, source, input string) *httptest.ResponseRecorder {
+	return callEmbeddingAs(broker, source, embeddingModel, input)
+}
+
+// callEmbeddingAs is callEmbedding with the harness's `model` string under the
+// test's control. The literal `embeddinggemma` above is the string every
+// shipped harness sends; this variant exists to exercise the ones that do not.
+func callEmbeddingAs(broker *inferenceBroker, source, model, input string) *httptest.ResponseRecorder {
 	request := httptest.NewRequest(http.MethodPost, embeddingAPIPath, bytes.NewBufferString(
-		`{"model":"embeddinggemma","input":[`+strconv.Quote(input)+`]}`,
+		`{"model":`+strconv.Quote(model)+`,"input":[`+strconv.Quote(input)+`]}`,
 	))
 	request.RemoteAddr = source + ":4321"
 	recorder := httptest.NewRecorder()
@@ -338,7 +345,7 @@ func TestV7EmbeddingBrokerCountsPlatformFailureAsInfrastructure(t *testing.T) {
 	}
 }
 
-func TestEmbeddingBrokerRejectsSiblingModelAndManagementProbes(t *testing.T) {
+func TestEmbeddingBrokerRejectsMalformedPayloadsAndManagementProbes(t *testing.T) {
 	var upstreamCalls atomic.Int64
 	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		upstreamCalls.Add(1)
@@ -356,8 +363,14 @@ func TestEmbeddingBrokerRejectsSiblingModelAndManagementProbes(t *testing.T) {
 		ip     string
 		status int
 	}{
-		{http.MethodPost, embeddingAPIPath, `{"model":"other","input":["x"]}`, "192.0.2.61", http.StatusBadRequest},
+		// The model name is no longer an allowlist (see
+		// TestEmbeddingBrokerSubstitutesAnyRequestedModel), but every other
+		// field is still validated exactly as strictly as before.
 		{http.MethodPost, embeddingAPIPath, `{"model":"embeddinggemma","input":["x"],"keep_alive":"24h"}`, "192.0.2.61", http.StatusBadRequest},
+		{http.MethodPost, embeddingAPIPath, `{"model":"other","input":["x"],"keep_alive":"24h"}`, "192.0.2.61", http.StatusBadRequest},
+		{http.MethodPost, embeddingAPIPath, `{"model":"other","input":[]}`, "192.0.2.61", http.StatusBadRequest},
+		{http.MethodPost, embeddingAPIPath, `{"model":"other","input":["x"]} {"model":"other","input":["y"]}`, "192.0.2.61", http.StatusBadRequest},
+		{http.MethodPost, embeddingAPIPath, `not json`, "192.0.2.61", http.StatusBadRequest},
 		{http.MethodPost, "/api/pull", `{"model":"embeddinggemma"}`, "192.0.2.61", http.StatusNotFound},
 		{http.MethodGet, embeddingAPIPath, "", "192.0.2.61", http.StatusNotFound},
 		{http.MethodPost, embeddingAPIPath, `{"model":"embeddinggemma","input":["x"]}`, "192.0.2.62", http.StatusUnauthorized},

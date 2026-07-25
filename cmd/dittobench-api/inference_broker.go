@@ -952,9 +952,11 @@ func (b *inferenceBroker) handleEmbedding(w http.ResponseWriter, r *http.Request
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
 	var payload embeddingRequest
+	// Everything about the payload is still validated strictly -- unknown
+	// fields, trailing JSON, input count, per-input size -- except the model
+	// name, which is no longer an allowlist. See servedModel below.
 	if decoder.Decode(&payload) != nil || decoder.Decode(&struct{}{}) != io.EOF ||
-		payload.Model != embeddingModel || len(payload.Input) == 0 ||
-		len(payload.Input) > embeddingMaximumInputs {
+		len(payload.Input) == 0 || len(payload.Input) > embeddingMaximumInputs {
 		writeError(w, http.StatusBadRequest, "invalid embedding request")
 		return
 	}
@@ -984,7 +986,45 @@ func (b *inferenceBroker) handleEmbedding(w http.ResponseWriter, r *http.Request
 	session.embeddingRequests++
 	session.embeddingInputs += uint64(len(payload.Input))
 	session.embeddingInputBytes += uint64(inputBytes)
+	runID := session.boundRunID
 	session.mu.Unlock()
+
+	// The model is a property of the ticket, not of the request -- the same
+	// premise #102 applied to the chat door, now applied to this one.
+	//
+	// It is a stronger premise here than it is there. The chat door at least
+	// forwards the caller's body and has to rewrite the field out of it; this
+	// door never forwards the caller's body at all. Both lanes below marshal a
+	// brand-new upstream request pinned to a constant -- embeddinggemma for the
+	// v2-v6 local Ollama lane, perplexity/pplx-embed-v1-0.6b for hosted v7 --
+	// so payload.Model has never reached an upstream and is not read again past
+	// this point. Rejecting on it bought no isolation whatsoever; it only meant
+	// the two doors disagreed about the same miner-authored string, and a
+	// harness naming an ordinary Ollama tag (`embeddinggemma:latest`) lost its
+	// entire run at the first of ~671 embedding calls with a 400 it could not
+	// act on.
+	//
+	// Substituting is not a relaxation of the lock: what the broker SENDS is
+	// unchanged, and the platform proxy re-locks the same value independently
+	// (ditto-platform#428). A mismatch is logged exactly as chat logs it,
+	// because a harness that names a model it was not granted is a signal worth
+	// keeping even once it stops being an error.
+	//
+	// The mismatch is measured against embeddingModel, not against servedModel.
+	// embeddingModel is the name this door has always published -- it is what
+	// the harness contract asks for and what all twelve shipped harnesses send
+	// verbatim -- whereas servedModel is the implementation behind it, and under
+	// v7 no conforming harness can name that. Comparing against the served name
+	// would log all ~671 calls of every well-behaved v7 run. Comparing against
+	// the published one logs exactly the harnesses that named something nobody
+	// told them to name, which is the signal.
+	servedModel := embeddingModel
+	if benchVersion >= 7 {
+		servedModel = hostedEmbeddingModel
+	}
+	if payload.Model != embeddingModel {
+		logSubstitutedModel(runID, payload.Model, servedModel)
+	}
 
 	// v2-v6 retain the frozen global Ollama lane. Hosted v7 requests are already
 	// isolated and serialized per ticket above, so unrelated evaluations must
@@ -1355,8 +1395,7 @@ func (b *inferenceBroker) proxy(w http.ResponseWriter, r *http.Request, session 
 			writeError(w, http.StatusBadRequest, "invalid inference request")
 			return
 		}
-		log.Printf("run %s: harness requested model %q; serving the ticket model %q",
-			session.boundRunID, modelRequest.Model, session.requestModel)
+		logSubstitutedModel(session.boundRunID, modelRequest.Model, session.requestModel)
 		body = rewritten
 	}
 	grantID, bearer, proxyURL, generation := session.grantID, session.bearer, session.proxyURL, session.generation
@@ -1597,4 +1636,18 @@ func rewriteRequestModel(body []byte, model string) ([]byte, error) {
 	}
 	decoded["model"] = model
 	return json.Marshal(decoded)
+}
+
+// logSubstitutedModel records that a harness asked for a model other than the
+// one its ticket serves. Both broker doors call this and emit the identical
+// sentence, because on both doors the caller's model string is decorative: chat
+// rewrites it out of the body before forwarding (rewriteRequestModel above),
+// and embeddings discard the caller's body entirely and build a fresh upstream
+// request pinned to their own constant. What the string is still good for is
+// telling an operator that a harness is not reading its injected configuration,
+// or is probing for a model it was not granted -- so it is worth one line, and
+// worth having that line be the same line on both routes.
+func logSubstitutedModel(runID, requested, served string) {
+	log.Printf("run %s: harness requested model %q; serving the ticket model %q",
+		runID, requested, served)
 }
