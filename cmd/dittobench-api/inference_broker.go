@@ -26,6 +26,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -113,26 +114,31 @@ type brokerSession struct {
 	inFlight              int
 	embeddingPhaseStarted bool
 	embeddingPhaseActive  bool
-	embeddingInFlight     bool
-	embeddingCancel       context.CancelFunc
-	embeddingDone         chan struct{}
-	embeddingRetries      uint64
-	embeddingRequests     uint64
-	embeddingInputs       uint64
-	embeddingInputBytes   uint64
-	requests              uint64
-	successes             uint64
-	failures              uint64
-	grantDenials          uint64
-	usageAvailable        uint64
-	usageUnavailable      uint64
-	promptTokens          uint64
-	promptBytes           uint64
-	completionTokens      uint64
-	providerLatency       uint64
-	callerCancels         uint64
-	upstreamAttempts      uint64
-	cancels               map[string]context.CancelFunc
+	embeddingInFlight     int
+	embeddingConcurrency  int
+	// embeddingCalls tracks every in-flight embedding call so the phase can be
+	// ended -- and every one of them revoked -- as a set. It was a single
+	// (cancel, done) pair while the lane admitted one request at a time; a
+	// hostile harness leaving background calls open must not survive
+	// endEmbeddingPhase just because a sibling call replaced the field.
+	embeddingCalls      map[chan struct{}]context.CancelFunc
+	embeddingRetries    uint64
+	embeddingRequests   uint64
+	embeddingInputs     uint64
+	embeddingInputBytes uint64
+	requests            uint64
+	successes           uint64
+	failures            uint64
+	grantDenials        uint64
+	usageAvailable      uint64
+	usageUnavailable    uint64
+	promptTokens        uint64
+	promptBytes         uint64
+	completionTokens    uint64
+	providerLatency     uint64
+	callerCancels       uint64
+	upstreamAttempts    uint64
+	cancels             map[string]context.CancelFunc
 }
 
 func newInferenceBrokerHTTPServer(addr string, handler http.Handler) *http.Server {
@@ -210,6 +216,57 @@ type platformEmbeddingTransient struct {
 
 func (e platformEmbeddingTransient) Error() string { return e.err.Error() }
 func (e platformEmbeddingTransient) Unwrap() error { return e.err }
+
+// platformEmbeddingAtCapacity marks a platform refusal that is pure
+// backpressure: the ticket's lease is healthy and the embedding lane was
+// momentarily full. It is NOT a fault, so it is neither counted against the
+// transient-retry budget nor written to the retry ledger -- waiting out a
+// queue is not the same event as surviving a provider blip, and conflating
+// them would make a throttled run indistinguishable from a degraded one.
+//
+// The platform signals it with 503 plus Retry-After, deliberately distinct from
+// the 502 it returns when a provider genuinely failed and the 429 it reserves
+// for a revoked lease. Recognising it is what lets an operator lower the
+// concurrency board under live runs without destroying them; a build that does
+// not recognise it still survives, because 503 already falls in the transient
+// class above.
+type platformEmbeddingAtCapacity struct {
+	retryAfter time.Duration
+}
+
+func (platformEmbeddingAtCapacity) Error() string {
+	return "embedding platform lane is at capacity"
+}
+
+// platformEmbeddingCapacityMaxWaits bounds how long one embedding call will
+// queue behind platform backpressure. The request context already caps the call
+// at 65s; this is the second bound, so a platform pinned at zero headroom
+// surfaces as a failed run in bounded time rather than holding every case open
+// until the deadline.
+const platformEmbeddingCapacityMaxWaits = 12
+
+// platformEmbeddingIsAtCapacity recognises the platform's backpressure answer.
+// Both conditions are required: 503 alone is the generic transient class, and
+// the platform sets Retry-After only when the refusal came from a concurrency
+// or rate limit rather than a failed dependency.
+func platformEmbeddingIsAtCapacity(response *http.Response) bool {
+	return response.StatusCode == http.StatusServiceUnavailable &&
+		strings.TrimSpace(response.Header.Get("Retry-After")) != ""
+}
+
+// retryAfterDuration reads the delta-seconds form of Retry-After, clamped to a
+// range a benchmark can actually wait out. A hostile or misconfigured value can
+// only cost this one call its bounded pause, never the run's deadline.
+func retryAfterDuration(header string) time.Duration {
+	seconds, err := strconv.Atoi(strings.TrimSpace(header))
+	if err != nil || seconds < 1 {
+		return 250 * time.Millisecond
+	}
+	if seconds > 5 {
+		seconds = 5
+	}
+	return time.Duration(seconds) * time.Second
+}
 
 // platformDeniesGrant reports whether a ticket-scoped platform response is a
 // grant denial. Legacy relay sessions are excluded: they talk to the frozen
@@ -314,22 +371,22 @@ func (b *inferenceBroker) endEmbeddingPhase(id, runID string) {
 		return
 	}
 	session.mu.Lock()
-	var cancel context.CancelFunc
-	var done chan struct{}
+	var pending []chan struct{}
 	if session.boundRunID == runID {
 		session.embeddingPhaseActive = false
-		cancel = session.embeddingCancel
-		done = session.embeddingDone
+		for done, cancel := range session.embeddingCalls {
+			pending = append(pending, done)
+			cancel()
+		}
 	}
 	session.mu.Unlock()
-	// A hostile harness may return from its scored request while leaving a
-	// background embedding call open. Revoke that exact call and wait for its
-	// cleanup to release any historical local-embedding slot before the scorer
-	// releases memory-phase admission to a sibling.
-	if cancel != nil {
-		cancel()
-	}
-	if done != nil {
+	// A hostile harness may return from its scored request while leaving
+	// background embedding calls open. Revoke every one of them and wait for
+	// their cleanup to release any historical local-embedding slot before the
+	// scorer releases memory-phase admission to a sibling. Cancelling under the
+	// lock is safe -- the cancel funcs do not take it -- and it closes the race
+	// where a call admitted between the snapshot and the cancels would escape.
+	for _, done := range pending {
 		<-done
 	}
 }
@@ -649,6 +706,12 @@ func (b *inferenceBroker) claimRun(id, runID string, identity brokerTicketIdenti
 	session.requestModel = session.model
 	session.boundRunID = runID
 	session.benchVersion = benchVersion
+	// Only the hosted lane widens. v2-v6 embeddings still land on the one
+	// Ollama container this host runs, so they keep the single-slot lane they
+	// have always had; leaving embeddingConcurrency at zero is that lane.
+	if benchVersion >= 7 {
+		session.embeddingConcurrency = v7EmbeddingSessionConcurrency
+	}
 	return true
 }
 
@@ -669,6 +732,19 @@ func (b *inferenceBroker) bindSource(id, runID, sourceIP string) bool {
 	return true
 }
 
+// embeddingLaneLocked is how many embedding calls this session may have in
+// flight. Caller holds session.mu.
+//
+// Zero means "never set", which is every pre-v7 and legacy session, and it
+// resolves to one -- byte-identical to the single-slot bool this replaced. Only
+// claimRun widens it, and only for v7.
+func (session *brokerSession) embeddingLaneLocked() int {
+	if session.embeddingConcurrency < 1 {
+		return 1
+	}
+	return session.embeddingConcurrency
+}
+
 func (session *brokerSession) activeLocked(now time.Time) bool {
 	return session.boundRunID != "" && session.expectedSourceIP != "" &&
 		session.expiresAt.After(now) && (session.bearer != "" || session.legacyGateway != "")
@@ -679,8 +755,11 @@ func destroyBrokerSession(session *brokerSession) {
 		return
 	}
 	session.mu.Lock()
-	embeddingCancel := session.embeddingCancel
-	embeddingDone := session.embeddingDone
+	pending := make([]chan struct{}, 0, len(session.embeddingCalls))
+	for done, cancel := range session.embeddingCalls {
+		pending = append(pending, done)
+		cancel()
+	}
 	for _, cancel := range session.cancels {
 		cancel()
 	}
@@ -694,11 +773,8 @@ func destroyBrokerSession(session *brokerSession) {
 	session.requestModel = ""
 	session.embeddingPhaseActive = false
 	session.mu.Unlock()
-	if embeddingCancel != nil {
-		embeddingCancel()
-	}
-	if embeddingDone != nil {
-		<-embeddingDone
+	for _, done := range pending {
+		<-done
 	}
 }
 
@@ -839,7 +915,7 @@ func (b *inferenceBroker) handleEmbedding(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusConflict, "embedding phase unavailable")
 		return
 	}
-	if session.embeddingInFlight {
+	if session.embeddingInFlight >= session.embeddingLaneLocked() {
 		session.mu.Unlock()
 		cancel()
 		w.Header().Set("Retry-After", "1")
@@ -847,9 +923,11 @@ func (b *inferenceBroker) handleEmbedding(w http.ResponseWriter, r *http.Request
 		return
 	}
 	done := make(chan struct{})
-	session.embeddingInFlight = true
-	session.embeddingCancel = cancel
-	session.embeddingDone = done
+	session.embeddingInFlight++
+	if session.embeddingCalls == nil {
+		session.embeddingCalls = make(map[chan struct{}]context.CancelFunc)
+	}
+	session.embeddingCalls[done] = cancel
 	session.mu.Unlock()
 	slotAcquired := false
 	defer func() {
@@ -857,10 +935,9 @@ func (b *inferenceBroker) handleEmbedding(w http.ResponseWriter, r *http.Request
 			<-b.embeddingSlots
 		}
 		session.mu.Lock()
-		if session.embeddingDone == done {
-			session.embeddingInFlight = false
-			session.embeddingCancel = nil
-			session.embeddingDone = nil
+		if _, tracked := session.embeddingCalls[done]; tracked {
+			delete(session.embeddingCalls, done)
+			session.embeddingInFlight--
 		}
 		session.mu.Unlock()
 		cancel()
@@ -986,30 +1063,58 @@ func (b *inferenceBroker) forwardPlatformEmbeddingWithRetry(
 	ctx context.Context, session *brokerSession, inputs []string,
 ) (embeddingResponse, error) {
 	var lastErr error
-	for attempt := 1; attempt <= v7TransientMaxAttempts; attempt++ {
-		if attempt > 1 {
-			if b.sleep(ctx, b.retry.backoff(attempt-1)) != nil {
-				break
-			}
-			session.mu.Lock()
-			session.embeddingRetries++
-			retries := session.embeddingRetries
-			runID := session.boundRunID
-			session.mu.Unlock()
-			log.Printf(
-				"run %s: retrying v7 embedding attempt %d/%d after a transient platform fault (%v); run retry ledger=%d",
-				runID, attempt, v7TransientMaxAttempts, lastErr, retries,
-			)
-		}
+	capacityWaits := 0
+	for attempt := 1; attempt <= v7TransientMaxAttempts; {
 		decoded, err := b.forwardPlatformEmbedding(ctx, session, inputs)
 		if err == nil {
 			return decoded, nil
 		}
 		lastErr = err
+
+		// Backpressure first. A capacity wait does NOT consume a transient
+		// attempt and does NOT touch the retry ledger: the platform is telling
+		// this call to queue, which is a scheduling event, not a fault. Folding
+		// it into the fault budget would spend the run's three real recovery
+		// attempts on a healthy platform that was merely busy.
+		var atCapacity platformEmbeddingAtCapacity
+		if errors.As(err, &atCapacity) {
+			if capacityWaits >= platformEmbeddingCapacityMaxWaits || ctx.Err() != nil {
+				return embeddingResponse{}, err
+			}
+			capacityWaits++
+			session.mu.Lock()
+			runID := session.boundRunID
+			session.mu.Unlock()
+			log.Printf(
+				"run %s: platform embedding lane is at capacity; waiting %s (wait %d/%d) -- healthy lease, not a fault",
+				runID, atCapacity.retryAfter, capacityWaits, platformEmbeddingCapacityMaxWaits,
+			)
+			if b.sleep(ctx, atCapacity.retryAfter) != nil {
+				break
+			}
+			continue
+		}
+
 		var transient platformEmbeddingTransient
 		if !errors.As(err, &transient) || ctx.Err() != nil {
 			return embeddingResponse{}, err
 		}
+		attempt++
+		if attempt > v7TransientMaxAttempts {
+			break
+		}
+		if b.sleep(ctx, b.retry.backoff(attempt-1)) != nil {
+			break
+		}
+		session.mu.Lock()
+		session.embeddingRetries++
+		retries := session.embeddingRetries
+		runID := session.boundRunID
+		session.mu.Unlock()
+		log.Printf(
+			"run %s: retrying v7 embedding attempt %d/%d after a transient platform fault (%v); run retry ledger=%d",
+			runID, attempt, v7TransientMaxAttempts, lastErr, retries,
+		)
 	}
 	return embeddingResponse{}, lastErr
 }
@@ -1113,6 +1218,14 @@ func (b *inferenceBroker) forwardPlatformEmbedding(ctx context.Context, session 
 	defer response.Body.Close()
 	responseBody, err := io.ReadAll(io.LimitReader(response.Body, embeddingResponseLimit+1))
 	if err != nil || len(responseBody) > embeddingResponseLimit || response.StatusCode < 200 || response.StatusCode >= 300 {
+		if err == nil && platformEmbeddingIsAtCapacity(response) {
+			// Backpressure, not a fault. Checked before the 5xx branch below
+			// because it IS a 5xx; the Retry-After header is what tells the two
+			// apart, and the platform sets it on this path only.
+			return embeddingResponse{}, platformEmbeddingAtCapacity{
+				retryAfter: retryAfterDuration(response.Header.Get("Retry-After")),
+			}
+		}
 		if err != nil || response.StatusCode >= 500 {
 			// The platform returns 5xx after its own bounded provider loop has
 			// already given up, and a truncated read produced no outcome

@@ -75,6 +75,28 @@ var (
 	// concurrent seed waves into deterministic Ollama timeouts; capable hosts may
 	// raise this independently after qualification.
 	maxConcurrentMemoryPhases = envIntDefault("DITTOBENCH_MAX_CONCURRENT_MEMORY_PHASES", 1)
+	// v7 cases ran strictly one at a time, and the stated reason was not that
+	// harnesses are unsafe to run in parallel -- v2-v6 have run four-wide for a
+	// long time on the same machinery -- but that "running cases in parallel
+	// would manufacture 429s", because the hosted embedding lane admitted one
+	// request per ticket. That lane was sized for a local Ollama container that
+	// v7 no longer touches (#93), so the reason for this 1 is gone with it.
+	//
+	// Four, matching the long-standing v2-v6 default that every shipped harness
+	// has been exercised against, rather than a larger number the fleet has no
+	// evidence for. Every layer beneath it is now wide enough not to be the
+	// bottleneck, and the platform's concurrency board can throttle from
+	// backroom without a release if it turns out to be too much.
+	v7CaseConcurrency = envIntDefault("DITTOBENCH_V7_CASE_CONCURRENCY", 4)
+	// How many embedding calls ONE v7 run may have in flight. Two per concurrent
+	// case, so a case doing a retrieve burst is not blocked by its siblings, and
+	// so a harness that parallelises its own /seed ingestion gets some benefit
+	// even while cases are sequential.
+	//
+	// Deliberately below the platform's per-ticket ceiling (12). The binding
+	// limit should be this local semaphore, not a network round trip that comes
+	// back as a decline.
+	v7EmbeddingSessionConcurrency = envIntDefault("DITTOBENCH_V7_EMBEDDING_CONCURRENCY", 8)
 )
 
 // envIntDefault reads a positive int from key, returning def when unset or invalid.
@@ -134,12 +156,19 @@ func runBounded(ctx context.Context, n, concurrency int, fn func(i int)) {
 }
 
 func caseConcurrencyForVersion(benchVersion int) int {
-	// Hosted v7 embeddings are intentionally admitted one request at a time per
-	// ticket. The reference harness retrieves before every model turn, so running
-	// cases in parallel would manufacture 429s rather than measure the agent.
+	// v7 used to return 1 because hosted embeddings were admitted one request at
+	// a time per ticket, so parallel cases would have manufactured 429s rather
+	// than measured the agent. The lane is no longer one wide (the broker session
+	// admits v7EmbeddingSessionConcurrency, the platform admits more still), so
+	// the 429s that reason was avoiding cannot happen and the serialisation buys
+	// nothing but wall-clock.
+	//
+	// Determinism is unaffected: per-case results are written by index and the
+	// transcript sorts cases by case_id before hashing, explicitly so the bytes
+	// do not depend on completion order. Wave boundaries remain barriers.
 	// Historical versions retain their frozen provider-tuned concurrency.
 	if benchVersion >= protocol.BenchVersionV7 {
-		return 1
+		return v7CaseConcurrency
 	}
 	return caseConcurrency
 }
