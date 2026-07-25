@@ -148,13 +148,50 @@ immutable signed stack descriptor supplied by Compose:
 {
   "software_version": "0.10.0",
   "source_revision": "0123456789abcdef0123456789abcdef01234567",
+  "source_revision_origin": "binary",
+  "source_revision_mismatch": false,
   "supported_bench_versions": [2, 3]
 }
 ```
 
-`DITTOBENCH_SOFTWARE_VERSION` and `DITTOBENCH_SOURCE_SHA` must identify the
-deployed image's release and exact 40-character source commit. The endpoint
-fails closed with 503 when either identity is absent or malformed. Validators
+Release identity is **derived from the compiled binary**, not asserted by the
+environment. The image build links it in:
+
+```sh
+docker build --target sandbox \
+  --build-arg DITTOBENCH_SOURCE_SHA=<40-hex commit> \
+  --build-arg DITTOBENCH_SOFTWARE_VERSION=<release> .
+```
+
+`DITTOBENCH_SOFTWARE_VERSION` / `DITTOBENCH_SOURCE_SHA` remain as a **fallback**
+used only when the image embedded nothing — they keep pre-existing images
+working, but an environment variable can only ever state what an operator
+*believes* is running. Recreating a container applies a new variable while
+reusing the cached image, so the scorer would advertise a revision whose code it
+does not contain. Two additive fields let a consumer tell the cases apart:
+
+| field | meaning |
+| --- | --- |
+| `source_revision_origin` | `"binary"` (proven, compiled in) or `"env"` (asserted). Absent on scorers older than this field. |
+| `source_revision_mismatch` | `true` when the binary and the environment named different revisions. The binary-derived value is still reported; treat the deployment as stale. |
+
+`software_version_origin` reports the same distinction for the release string. A
+mismatch never blocks startup — it is surfaced loudly in the log and in this
+response so the subnet can degrade the validator instead of scoring blind.
+
+Ask a container what it actually is, without starting it:
+
+```sh
+docker run --rm <image> version          # human-readable
+docker run --rm <image> version -json    # machine-readable
+```
+
+It prints the embedded and asserted revisions, which one won, whether they
+disagree, the release version, the supported bench versions, and the v7
+calibration manifest digest with whether v7 is advertised.
+
+The endpoint fails closed with 503 when the winning identity is absent or
+malformed (including a deliberately stamped-but-malformed build). Validators
 also fall back to v2 for an older scorer (404), an unreachable endpoint, a
 malformed response, or any descriptor identity mismatch. This makes scorer and
 validator upgrades order-independent without an `.env` cutover.

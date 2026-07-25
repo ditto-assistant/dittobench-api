@@ -40,7 +40,9 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        target: [runtime, sandbox]
+        # ditto-subnet's release workflow builds `sandbox` (the scorer) and
+        # `relay` (the model-pinning gateway); Cloud Run deploys `runtime`.
+        target: [runtime, sandbox, relay]
     steps:
       - uses: actions/checkout@v4
       - name: Set up Docker Buildx
@@ -52,6 +54,50 @@ jobs:
           target: ${{ matrix.target }}
           push: false
           load: false
+
+  # The linker SILENTLY ignores `-X <path>.<var>` when the path is wrong, so a
+  # renamed package or a mistyped ldflag would stop embedding provenance without
+  # breaking any build — and the scorer would quietly fall back to the
+  # operator-asserted DITTOBENCH_SOURCE_SHA, which is exactly the failure this
+  # mechanism exists to prevent. Prove end-to-end that a built image reports the
+  # revision it was compiled with.
+  provenance:
+    name: image reports its own source revision
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build the scorer image with a stamped identity
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: sandbox
+          push: false
+          load: true
+          tags: dittobench-api:provenance-ci
+          build-args: |
+            DITTOBENCH_SOURCE_SHA=${{ github.event.pull_request.head.sha }}
+            DITTOBENCH_SOFTWARE_VERSION=ci-${{ github.run_id }}
+      - name: The binary must report the revision it was built from
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # A conflicting environment variable must lose to the compiled value
+          # and be surfaced as a mismatch.
+          report="$(docker run --rm \
+            -e DITTOBENCH_SOURCE_SHA=0000000000000000000000000000000000000001 \
+            dittobench-api:provenance-ci version -json)"
+          echo "$report"
+          test "$(jq -r .source_revision <<<"$report")" = "$EXPECTED_SHA"
+          test "$(jq -r .source_revision_origin <<<"$report")" = binary
+          test "$(jq -r .source_revision_mismatch <<<"$report")" = true
+          test "$(jq -r .software_version <<<"$report")" = "ci-${{ github.run_id }}"
+          # Without a conflicting variable there is nothing to flag.
+          clean="$(docker run --rm dittobench-api:provenance-ci version -json)"
+          test "$(jq -r .source_revision_mismatch <<<"$clean")" = false
 
   # Auto-deploy to Cloud Run on merge to main. Authenticates via the org's
   # Workload Identity Federation (same provider/SA the backend uses); no secrets.
@@ -86,6 +132,12 @@ jobs:
         with:
           context: .
           push: true
+          # Stamp the commit into the binary so the deployed image can answer
+          # `version` truthfully. DITTOBENCH_SOFTWARE_VERSION is deliberately
+          # left unset: hosted practice has no release descriptor to bind to, so
+          # /v1/capabilities keeps failing closed exactly as it does today.
+          build-args: |
+            DITTOBENCH_SOURCE_SHA=${{ github.sha }}
           tags: |
             ${{ env.IMAGE }}:${{ github.sha }}
             ${{ env.IMAGE }}:latest

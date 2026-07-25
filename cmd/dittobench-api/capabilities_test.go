@@ -9,10 +9,26 @@ import (
 
 	"github.com/ditto-assistant/dittobench-api/internal/efficiency"
 	"github.com/ditto-assistant/dittobench-api/internal/llm"
+	"github.com/ditto-assistant/dittobench-api/internal/release"
 	"github.com/ditto-assistant/dittobench-datagen/protocol"
 )
 
 const testSourceRevision = "0123456789abcdef0123456789abcdef01234567"
+
+// capabilitiesOf serves /v1/capabilities from s and decodes a 200 response.
+func capabilitiesOf(t *testing.T, s *server) capabilitiesResponse {
+	t.Helper()
+	rr := httptest.NewRecorder()
+	s.handleCapabilities(rr, httptest.NewRequest(http.MethodGet, "/v1/capabilities", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var got capabilitiesResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	return got
+}
 
 func TestCapabilitiesReportBoundReleaseIdentity(t *testing.T) {
 	s := &server{softwareVersion: "0.10.0", sourceRevision: testSourceRevision}
@@ -145,5 +161,121 @@ func TestCapabilitiesFailClosedOnUnboundIdentity(t *testing.T) {
 		if rr.Code != http.StatusServiceUnavailable {
 			t.Fatalf("revision %q: expected 503, got %d", revision, rr.Code)
 		}
+	}
+	// Fail-closed still applies when the malformed value came from the binary:
+	// an explicitly stamped-but-broken build must not serve an identity.
+	s := &server{
+		softwareVersion:      "0.10.0",
+		sourceRevision:       "not-a-sha",
+		sourceRevisionOrigin: release.OriginBinary,
+	}
+	rr := httptest.NewRecorder()
+	s.handleCapabilities(rr, httptest.NewRequest(http.MethodGet, "/v1/capabilities", nil))
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 for a malformed embedded revision, got %d", rr.Code)
+	}
+	if !strings.Contains(rr.Body.String(), "scorer release identity unavailable") {
+		t.Fatalf("the established 503 body must not change: %s", rr.Body.String())
+	}
+}
+
+// The subnet reads source_revision_origin to tell a proven revision from an
+// asserted one.
+func TestCapabilitiesReportProvenanceOrigin(t *testing.T) {
+	binary := capabilitiesOf(t, &server{
+		softwareVersion:       "0.10.0",
+		sourceRevision:        testSourceRevision,
+		sourceRevisionOrigin:  release.OriginBinary,
+		softwareVersionOrigin: release.OriginBinary,
+	})
+	if binary.SourceRevisionOrigin != release.OriginBinary {
+		t.Fatalf("source_revision_origin = %q, want binary", binary.SourceRevisionOrigin)
+	}
+	if binary.SoftwareVersionOrigin != release.OriginBinary {
+		t.Fatalf("software_version_origin = %q, want binary", binary.SoftwareVersionOrigin)
+	}
+	if binary.SourceRevisionMismatch {
+		t.Fatal("an agreeing deployment must not be flagged")
+	}
+
+	asserted := capabilitiesOf(t, &server{
+		softwareVersion:       "0.10.0",
+		sourceRevision:        testSourceRevision,
+		sourceRevisionOrigin:  release.OriginEnv,
+		softwareVersionOrigin: release.OriginEnv,
+	})
+	if asserted.SourceRevisionOrigin != release.OriginEnv {
+		t.Fatalf("source_revision_origin = %q, want env", asserted.SourceRevisionOrigin)
+	}
+	if asserted.SourceRevision != testSourceRevision {
+		t.Fatalf("the env fallback must still report a revision, got %q", asserted.SourceRevision)
+	}
+}
+
+// The incident, as a validator sees it: the scorer keeps serving (it must not
+// refuse to start or 503), reports the revision it was actually built from, and
+// marks itself so the subnet can degrade it.
+func TestCapabilitiesFlagMismatchWithoutRefusingService(t *testing.T) {
+	got := capabilitiesOf(t, &server{
+		softwareVersion:        "0.10.0",
+		sourceRevision:         testSourceRevision,
+		sourceRevisionOrigin:   release.OriginBinary,
+		sourceRevisionMismatch: true,
+	})
+	if !got.SourceRevisionMismatch {
+		t.Fatal("a disagreeing deployment must be flagged in capabilities")
+	}
+	if got.SourceRevision != testSourceRevision || got.SourceRevisionOrigin != release.OriginBinary {
+		t.Fatalf("the binary-derived revision must still win: %+v", got)
+	}
+	if len(got.SupportedBenchVersions) == 0 {
+		t.Fatal("a flagged scorer still negotiates normally")
+	}
+}
+
+// Older ditto-subnet releases parse this response. Every pre-existing key must
+// keep its name, type, and meaning; the new keys are purely additive.
+func TestCapabilitiesRemainsBackwardCompatible(t *testing.T) {
+	s := &server{
+		softwareVersion:        "0.10.0",
+		sourceRevision:         testSourceRevision,
+		sourceRevisionOrigin:   release.OriginBinary,
+		sourceRevisionMismatch: true,
+	}
+	rr := httptest.NewRecorder()
+	s.handleCapabilities(rr, httptest.NewRequest(http.MethodGet, "/v1/capabilities", nil))
+	var raw map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{
+		"software_version", "source_revision", "supported_bench_versions",
+		"full_run_capacity", "memory_phase_capacity", "v7_calibration",
+	} {
+		if _, ok := raw[key]; !ok {
+			t.Fatalf("capabilities dropped the established key %q: %s", key, rr.Body.String())
+		}
+	}
+	if raw["source_revision"] != testSourceRevision {
+		t.Fatalf("source_revision must stay a bare string revision: %v", raw["source_revision"])
+	}
+	// New keys, and only these.
+	added := map[string]bool{
+		"source_revision_origin": true, "source_revision_mismatch": true,
+		"software_version_origin": true,
+	}
+	known := map[string]bool{
+		"software_version": true, "source_revision": true, "supported_bench_versions": true,
+		"full_run_capacity": true, "memory_phase_capacity": true, "v7_calibration": true,
+	}
+	for key := range raw {
+		if !known[key] && !added[key] {
+			t.Fatalf("unexpected capability key %q — consumers parse this response", key)
+		}
+	}
+	// source_revision_mismatch is always present so a consumer never has to
+	// guess whether false means "fine" or "old scorer".
+	if _, ok := raw["source_revision_mismatch"]; !ok {
+		t.Fatal("source_revision_mismatch must always be emitted")
 	}
 }
