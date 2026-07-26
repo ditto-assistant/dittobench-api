@@ -195,6 +195,9 @@ type toolRoute struct {
 // reason change.
 type platformGrantDenied struct {
 	status int
+	// code is the platform's decline code, or 0 when it did not send one.
+	// Reporting only -- the action for every terminal decline is identical.
+	code int
 }
 
 // Error deliberately preserves the historical wording so the marker-based
@@ -245,13 +248,19 @@ func (platformEmbeddingAtCapacity) Error() string {
 // until the deadline.
 const platformEmbeddingCapacityMaxWaits = 12
 
+// platformChatCapacityMaxWaits bounds how long one chat completion will queue
+// behind platform backpressure, for the same reason its embedding twin exists:
+// the request context already caps the call, and this is the second bound so a
+// platform pinned at zero headroom surfaces as a failed run in bounded time
+// rather than holding every check open until the ticket deadline.
+const platformChatCapacityMaxWaits = 12
+
 // platformEmbeddingIsAtCapacity recognises the platform's backpressure answer.
 // Both conditions are required: 503 alone is the generic transient class, and
 // the platform sets Retry-After only when the refusal came from a concurrency
 // or rate limit rather than a failed dependency.
 func platformEmbeddingIsAtCapacity(response *http.Response) bool {
-	return response.StatusCode == http.StatusServiceUnavailable &&
-		strings.TrimSpace(response.Header.Get("Retry-After")) != ""
+	return platformIsAtCapacity(response)
 }
 
 // retryAfterDuration reads the delta-seconds form of Retry-After, clamped to a
@@ -274,6 +283,82 @@ func retryAfterDuration(header string) time.Duration {
 // 429 IS an upstream fault and must keep its existing accounting.
 func platformDeniesGrant(legacyGateway string, status int) bool {
 	return legacyGateway == "" && status == http.StatusTooManyRequests
+}
+
+// Platform decline codes, from the `error_code` field of the platform's error
+// envelope (ditto-platform ditto/api_server/middleware/error_envelope.py).
+//
+// These exist because the status code was never a wide enough channel. A 429
+// on this path has meant three unrelated things -- the lease is dead, the
+// lease's request budget is spent, or the lane was momentarily full -- and this
+// broker classified on status alone, so all three were read as a dead lease.
+// That is what discarded `banblackycat`: 17 capacity declines against a lease
+// that was still perfectly alive.
+//
+// The status remains a coarse hint (retryable vs terminal) and stays correct on
+// its own, which is what lets a platform emitting these codes keep working
+// against a broker that has never heard of them. The code is the precise
+// signal, and it is only ever *additional* information.
+const (
+	platformDeclineUnspecified     = 4100
+	platformDeclineGrantRevoked    = 4101
+	platformDeclineBudgetExhausted = 4102
+	platformDeclineAtCapacity      = 4103
+)
+
+// platformDeclineCode extracts the platform's decline code from an error body,
+// returning 0 when the body is absent, unparseable, or carries no code.
+//
+// Zero is the "say nothing" answer on purpose. Every caller must already have a
+// correct status-only behaviour to fall back on, because the fleet runs pinned
+// builds against a platform that may be older or newer than this one. A body
+// this cannot parse must never be able to change a decision.
+func platformDeclineCode(body []byte) int {
+	if len(body) == 0 || len(body) > 64<<10 {
+		return 0
+	}
+	var envelope struct {
+		ErrorCode int `json:"error_code"`
+	}
+	if json.Unmarshal(body, &envelope) != nil {
+		return 0
+	}
+	switch envelope.ErrorCode {
+	case platformDeclineUnspecified, platformDeclineGrantRevoked,
+		platformDeclineBudgetExhausted, platformDeclineAtCapacity:
+		return envelope.ErrorCode
+	default:
+		return 0
+	}
+}
+
+// platformDeclineReason renders a decline code for an operator reading logs.
+func platformDeclineReason(code int) string {
+	switch code {
+	case platformDeclineGrantRevoked:
+		return "the lease was revoked"
+	case platformDeclineBudgetExhausted:
+		return "the lease spent its request budget"
+	case platformDeclineAtCapacity:
+		return "the lane is at capacity"
+	case platformDeclineUnspecified:
+		return "the platform declined the reservation"
+	default:
+		return "the platform did not say why"
+	}
+}
+
+// platformIsAtCapacity recognises the platform's backpressure answer on any
+// lane. Both conditions are required: 503 alone is the generic transient class,
+// and the platform sets Retry-After only when the refusal came from a
+// concurrency or rate limit rather than a failed dependency.
+//
+// The body is consulted only to *confirm*, never to reject: a platform that
+// sets the header without the code is still telling the truth about
+// backpressure, and older platforms did exactly that.
+func platformIsAtCapacity(response *http.Response) bool {
+	return response.StatusCode == http.StatusServiceUnavailable &&
+		strings.TrimSpace(response.Header.Get("Retry-After")) != ""
 }
 
 type brokerRetryConfig struct {
@@ -1060,8 +1145,9 @@ func (b *inferenceBroker) handleEmbedding(w http.ResponseWriter, r *http.Request
 			if errors.As(err, &denied) {
 				session.grantDenials++
 				log.Printf(
-					"run %s: platform declined the embedding grant (429); ticket deadline held locally is %s (in %s) -- this is a lease denial, not a provider fault (denial #%d)",
-					session.boundRunID, session.ticketDeadline.UTC().Format(time.RFC3339),
+					"run %s: platform declined the embedding grant (429: %s); ticket deadline held locally is %s (in %s) -- this is a lease denial, not a provider fault (denial #%d)",
+					session.boundRunID, platformDeclineReason(denied.code),
+					session.ticketDeadline.UTC().Format(time.RFC3339),
 					time.Until(session.ticketDeadline).Truncate(time.Second), session.grantDenials,
 				)
 			} else {
@@ -1280,7 +1366,10 @@ func (b *inferenceBroker) forwardPlatformEmbedding(ctx context.Context, session 
 			// reservation. Typed so the caller neither retries it nor books it
 			// as an upstream failure; the message is unchanged so the existing
 			// marker-based classification still matches.
-			return embeddingResponse{}, platformGrantDenied{status: response.StatusCode}
+			return embeddingResponse{}, platformGrantDenied{
+				status: response.StatusCode,
+				code:   platformDeclineCode(responseBody),
+			}
 		}
 		return embeddingResponse{}, fmt.Errorf("embedding platform returned %d", response.StatusCode)
 	}
@@ -1441,6 +1530,7 @@ func (b *inferenceBroker) proxy(w http.ResponseWriter, r *http.Request, session 
 	if maxAttempts < 1 {
 		maxAttempts = 1
 	}
+	capacityWaits := 0
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if attempt > 1 && b.sleep(requestCtx, b.retry.backoff(attempt-1)) != nil {
 			break
@@ -1475,6 +1565,8 @@ func (b *inferenceBroker) proxy(w http.ResponseWriter, r *http.Request, session 
 			}
 			continue
 		}
+		atCapacity := legacyGateway == "" && platformIsAtCapacity(resp)
+		capacityPause := retryAfterDuration(resp.Header.Get("Retry-After"))
 		candidateBody, readErr := io.ReadAll(io.LimitReader(resp.Body, (16<<20)+1))
 		_ = resp.Body.Close()
 		responseStatus = resp.StatusCode
@@ -1482,10 +1574,29 @@ func (b *inferenceBroker) proxy(w http.ResponseWriter, r *http.Request, session 
 			continue
 		}
 		responseBody = candidateBody
-		// Auth class: the platform declined the grant. The lease is gone (or its
-		// budget is), so every further attempt would fail identically while
+		// Backpressure, not a fault: the lease is healthy and the lane was
+		// momentarily full. Handled before the transient branch below because
+		// it IS a 5xx, and waiting out a queue is not the same event as
+		// surviving a provider blip -- charging it to the three-attempt
+		// transient budget would spend a run's whole margin on a busy minute.
+		// This is the chat-lane twin of the embedding path, which has answered
+		// backpressure this way since dittobench-api #103.
+		if atCapacity {
+			if capacityWaits >= platformChatCapacityMaxWaits {
+				break
+			}
+			capacityWaits++
+			if b.sleep(requestCtx, capacityPause) != nil {
+				break
+			}
+			attempt--
+			continue
+		}
+		// Auth class: the platform declined the grant. The lease is gone, or its
+		// budget is spent, so every further attempt would fail identically while
 		// still consuming a fresh reservation and one more request from a grant
-		// that no longer exists. Stop immediately.
+		// that cannot serve it. Stop immediately -- both terminal reasons want
+		// the same action here, and only the reporting below tells them apart.
 		if platformDeniesGrant(legacyGateway, responseStatus) {
 			break
 		}
@@ -1522,9 +1633,14 @@ func (b *inferenceBroker) proxy(w http.ResponseWriter, r *http.Request, session 
 		denials := session.grantDenials
 		runID, deadline := session.boundRunID, session.ticketDeadline
 		session.mu.Unlock()
+		// The code, when the platform sends one, is the difference between "the
+		// validator lost this lease" and "the agent spent its allowance" -- two
+		// findings that call for opposite follow-up and were previously the
+		// same log line. Older platforms send no code and get the old wording.
 		log.Printf(
-			"run %s: platform declined the inference grant (429); ticket deadline held locally is %s (in %s) -- this is a lease denial, not a provider fault (denial #%d)",
-			runID, deadline.UTC().Format(time.RFC3339), time.Until(deadline).Truncate(time.Second), denials,
+			"run %s: platform declined the inference grant (429: %s); ticket deadline held locally is %s (in %s) -- this is a lease denial, not a provider fault (denial #%d)",
+			runID, platformDeclineReason(platformDeclineCode(responseBody)),
+			deadline.UTC().Format(time.RFC3339), time.Until(deadline).Truncate(time.Second), denials,
 		)
 		writeError(w, http.StatusBadGateway, "inference provider unavailable")
 		return
