@@ -299,11 +299,25 @@ func platformDeniesGrant(legacyGateway string, status int) bool {
 // its own, which is what lets a platform emitting these codes keep working
 // against a broker that has never heard of them. The code is the precise
 // signal, and it is only ever *additional* information.
+//
+// The range, not the members, is the contract. ditto-platform owns 41xx and
+// adds to it; a broker that only recognises the members it was compiled with
+// discards the rest, which is how 4104-4109 -- including the one code that
+// explains a dead heavy v7 run -- arrived, parsed, and vanished.
 const (
-	platformDeclineUnspecified     = 4100
-	platformDeclineGrantRevoked    = 4101
-	platformDeclineBudgetExhausted = 4102
-	platformDeclineAtCapacity      = 4103
+	platformDeclineCodeMinimum = 4100
+	platformDeclineCodeMaximum = 4199
+
+	platformDeclineUnspecified         = 4100
+	platformDeclineGrantRevoked        = 4101
+	platformDeclineBudgetExhausted     = 4102
+	platformDeclineAtCapacity          = 4103
+	platformDeclineTokenBudget         = 4104
+	platformDeclineLeaseExpired        = 4105
+	platformDeclineNonceReplayed       = 4106
+	platformDeclineModelNotPermitted   = 4107
+	platformDeclineGrantNotExchanged   = 4108
+	platformDeclineReservationTooLarge = 4109
 )
 
 // platformDeclineCode extracts the platform's decline code from an error body,
@@ -323,16 +337,21 @@ func platformDeclineCode(body []byte) int {
 	if json.Unmarshal(body, &envelope) != nil {
 		return 0
 	}
-	switch envelope.ErrorCode {
-	case platformDeclineUnspecified, platformDeclineGrantRevoked,
-		platformDeclineBudgetExhausted, platformDeclineAtCapacity:
-		return envelope.ErrorCode
-	default:
+	// Accept the whole 41xx range rather than a list of known members. A closed
+	// whitelist here defaulted to 0, so every code this build had not heard of
+	// was received, parsed, and thrown away -- reported to the operator as "the
+	// platform did not say why", the one answer guaranteed to be wrong.
+	if envelope.ErrorCode < platformDeclineCodeMinimum ||
+		envelope.ErrorCode > platformDeclineCodeMaximum {
 		return 0
 	}
+	return envelope.ErrorCode
 }
 
 // platformDeclineReason renders a decline code for an operator reading logs.
+// A code inside the range but without a name here is still reported as itself:
+// an unfamiliar number an operator can grep for in ditto-platform beats a
+// sentence asserting the platform said nothing.
 func platformDeclineReason(code int) string {
 	switch code {
 	case platformDeclineGrantRevoked:
@@ -341,9 +360,24 @@ func platformDeclineReason(code int) string {
 		return "the lease spent its request budget"
 	case platformDeclineAtCapacity:
 		return "the lane is at capacity"
+	case platformDeclineTokenBudget:
+		return "the agent spent its token allowance"
+	case platformDeclineLeaseExpired:
+		return "the lease's own clock ran out"
+	case platformDeclineNonceReplayed:
+		return "this request nonce was already used"
+	case platformDeclineModelNotPermitted:
+		return "the lease does not permit this model"
+	case platformDeclineGrantNotExchanged:
+		return "the lease was never exchanged for a bearer"
+	case platformDeclineReservationTooLarge:
+		return "this one request exceeds the whole token allowance"
 	case platformDeclineUnspecified:
 		return "the platform declined the reservation"
 	default:
+		if code >= platformDeclineCodeMinimum && code <= platformDeclineCodeMaximum {
+			return fmt.Sprintf("platform decline %d", code)
+		}
 		return "the platform did not say why"
 	}
 }
@@ -398,6 +432,19 @@ func newInferenceBroker(maxSessions int, embeddingCapacity ...int) *inferenceBro
 	if len(embeddingCapacity) > 0 && embeddingCapacity[0] > 0 {
 		capacity = embeddingCapacity[0]
 	}
+	platformProxyURL, proxyURLErr := configuredPlatformProxyURL(
+		os.Getenv("DITTOBENCH_PLATFORM_INFERENCE_PROXY_URL"),
+	)
+	if proxyURLErr != nil {
+		// Said once, here, where it is true -- not left to be inferred from a
+		// wall of identical 401s. Not fatal: this broker also serves pre-v7
+		// work that needs no platform proxy at all, and exiting would take that
+		// down too. The activation refusal below names the same defect again.
+		log.Printf(
+			"inference broker: %v; every v7 activation will be refused until this is fixed",
+			proxyURLErr,
+		)
+	}
 	return &inferenceBroker{
 		sessions: make(map[string]*brokerSession),
 		tools:    make(map[string]toolRoute),
@@ -407,12 +454,10 @@ func newInferenceBroker(maxSessions int, embeddingCapacity ...int) *inferenceBro
 				return http.ErrUseLastResponse
 			},
 		},
-		maxSessions:    maxSessions * 2,
-		embeddingSlots: make(chan struct{}, capacity),
-		controlToken:   strings.TrimSpace(os.Getenv("DITTOBENCH_BROKER_CONTROL_TOKEN")),
-		platformProxyURL: configuredPlatformProxyURL(
-			os.Getenv("DITTOBENCH_PLATFORM_INFERENCE_PROXY_URL"),
-		),
+		maxSessions:      maxSessions * 2,
+		embeddingSlots:   make(chan struct{}, capacity),
+		controlToken:     strings.TrimSpace(os.Getenv("DITTOBENCH_BROKER_CONTROL_TOKEN")),
+		platformProxyURL: platformProxyURL,
 		embeddingURL: configuredEmbeddingURL(
 			envOr("DITTOBENCH_EMBEDDING_UPSTREAM_URL", "http://host.docker.internal:11434/api/embed"),
 		),
@@ -487,15 +532,83 @@ func configuredEmbeddingURL(raw string) string {
 	return parsed.String()
 }
 
-func configuredPlatformProxyURL(raw string) string {
+// normalizedPlatformProxyURL renders a platform inference proxy URL in one
+// canonical form, or "" when the value is not a well-formed one.
+//
+// Canonicalising instead of comparing bytes is the entire point. The platform
+// mints this URL from DITTO_INFERENCE_PUBLIC_BASE_URL and this broker reads its
+// own copy from DITTOBENCH_PLATFORM_INFERENCE_PROXY_URL: two environment
+// variables, set by two different Ansible roles, that a byte comparison
+// required to agree exactly. A capitalised host, an explicit :443, or one
+// trailing slash on either side refused every activation fleet-wide while both
+// /health endpoints stayed green.
+//
+// The normalisation is deliberately narrow, because this comparison is also
+// what stops a forged activation from aiming the broker -- which holds the
+// platform bearer -- at somebody else's host. Only case, the default port, and
+// the constant path are normalised. Percent-encoding in the authority is
+// refused rather than decoded: it has no legitimate use here, and unescaping it
+// is a well-worn way to walk a different host past a comparison.
+func normalizedPlatformProxyURL(raw string) string {
 	value := strings.TrimSpace(raw)
-	parsed, err := url.Parse(value)
-	if err != nil || value == "" || parsed.Scheme != "https" || parsed.Host == "" ||
-		parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" ||
-		parsed.Path != platformInferenceAPIPath {
+	if value == "" {
 		return ""
 	}
-	return value
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Opaque != "" || parsed.User != nil ||
+		parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
+		return ""
+	}
+	if !strings.EqualFold(parsed.Scheme, "https") {
+		return ""
+	}
+	host := strings.ToLower(parsed.Host)
+	if host == "" || strings.Contains(host, "%") {
+		return ""
+	}
+	if parsed.Port() == "443" {
+		host = strings.TrimSuffix(host, ":443")
+	}
+	if strings.TrimSuffix(parsed.Path, "/") != platformInferenceAPIPath {
+		return ""
+	}
+	// Rebuilt from the constant rather than echoed back, so any escaping the
+	// caller used to spell the path is gone by the time anything compares it.
+	return "https://" + host + platformInferenceAPIPath
+}
+
+// configuredPlatformProxyURL resolves this broker's half of the contract from
+// the environment: the canonical URL, or "" and the reason it was refused.
+//
+// The reason exists so a misconfiguration can be stated once at startup instead
+// of being rediscovered as an anonymous 401 on every activation for the life of
+// the process. An unset variable is not an error -- a broker that serves only
+// pre-v7 work never needs one.
+func configuredPlatformProxyURL(raw string) (string, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return "", nil
+	}
+	if normalized := normalizedPlatformProxyURL(value); normalized != "" {
+		return normalized, nil
+	}
+	// http is called out separately because it is the one rejection the two
+	// sides disagree about rather than a typo: ditto-platform accepts http and
+	// defaults to http://localhost:8000, so a platform can be perfectly healthy
+	// and minting a URL this broker will refuse on principle. It refuses on
+	// purpose -- the platform bearer is the credential this process exists to
+	// keep, and it is not going over cleartext to save an operator a keystroke.
+	if parsed, err := url.Parse(value); err == nil && strings.EqualFold(parsed.Scheme, "http") {
+		return "", fmt.Errorf(
+			"DITTOBENCH_PLATFORM_INFERENCE_PROXY_URL is %q: the platform bearer is only ever "+
+				"sent over https, and ditto-platform permits http, so this one is on you to fix",
+			value,
+		)
+	}
+	return "", fmt.Errorf(
+		"DITTOBENCH_PLATFORM_INFERENCE_PROXY_URL is %q, which is not an https URL ending in %s",
+		value, platformInferenceAPIPath,
+	)
 }
 
 func (b *inferenceBroker) controlAuthorized(r *http.Request) bool {
@@ -705,29 +818,18 @@ func (b *inferenceBroker) activate(w http.ResponseWriter, r *http.Request) {
 	session.mu.Lock()
 	defer session.mu.Unlock()
 	now := time.Now()
-	_, grantErr := uuid.Parse(activation.GrantID)
-	ticketIdentity := brokerTicketIdentity{
-		GrantID: activation.GrantID, AgentID: activation.AgentID,
-		SlotID: activation.SlotID, TicketDeadline: activation.TicketDeadline,
-	}
-	hasRouteIdentity := activation.Provider != "" || activation.ProfileRevision != "" || activation.Model != ""
-	secretMatches := subtle.ConstantTimeCompare(
-		[]byte(activation.ActivationSecret), []byte(session.activationSecret),
-	) == 1
-	if !secretMatches || activation.Bearer == "" ||
-		len(activation.Bearer) > 4096 || grantErr != nil || activation.Generation < 1 ||
-		!activation.ExpiresAt.After(now) || activation.ExpiresAt.After(now.Add(brokerMaximumSessionTTL)) ||
-		b.platformProxyURL == "" || activation.ProxyURL != b.platformProxyURL ||
-		(hasRouteIdentity && (!validBrokerTicketIdentity(ticketIdentity, now) ||
-			activation.ExpiresAt.After(activation.TicketDeadline) || activation.Provider == "" ||
-			activation.ProfileRevision == "" || activation.Model == "")) {
-		writeError(w, http.StatusUnauthorized, "invalid inference activation")
+	if reason := b.activationRejection(session, activation, now); reason != "" {
+		log.Printf("inference session %s: refused activation -- %s", id, reason)
+		writeError(w, http.StatusUnauthorized, "invalid inference activation: "+reason)
 		return
 	}
 	session.activationSecret = ""
 	session.grantID = activation.GrantID
 	session.bearer = activation.Bearer
-	session.proxyURL = activation.ProxyURL
+	// The canonical form, not the spelling that arrived: everything downstream
+	// reads this field, and it should not matter which of the two equivalent
+	// spellings the platform happened to mint.
+	session.proxyURL = b.platformProxyURL
 	session.generation = activation.Generation
 	session.expiresAt = activation.ExpiresAt
 	session.provider = activation.Provider
@@ -741,12 +843,121 @@ func (b *inferenceBroker) activate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"active": true})
 }
 
+// activationRejection names the one condition that makes an activation
+// unacceptable, or "" when it is good.
+//
+// This was a single eight-term `||` answering every failure with the same
+// anonymous "invalid inference activation" and logging nothing. The most likely
+// production misconfiguration in this whole system -- the two halves of the
+// proxy-URL contract disagreeing -- was therefore indistinguishable from seven
+// unrelated causes, several of which are ordinary expiry. The caller here is
+// the validator's own control plane, already past requireControl, not the
+// harness; naming the failure to it gives away nothing the Bearer check does
+// not already gate.
+//
+// The order matters in one place only: the activation secret is compared first
+// and in constant time, so nothing below it can be reached by a caller that
+// does not already hold the secret.
+func (b *inferenceBroker) activationRejection(
+	session *brokerSession, activation brokerActivation, now time.Time,
+) string {
+	if subtle.ConstantTimeCompare(
+		[]byte(activation.ActivationSecret), []byte(session.activationSecret),
+	) != 1 {
+		return "activation secret does not match the prepared session"
+	}
+	switch {
+	case activation.Bearer == "":
+		return "bearer is empty"
+	case len(activation.Bearer) > 4096:
+		return fmt.Sprintf("bearer is %d bytes, over the 4096 limit", len(activation.Bearer))
+	}
+	if _, err := uuid.Parse(activation.GrantID); err != nil {
+		return fmt.Sprintf("grant id %q is not a uuid", activation.GrantID)
+	}
+	if activation.Generation < 1 {
+		return fmt.Sprintf("generation %d is below 1", activation.Generation)
+	}
+	switch {
+	case !activation.ExpiresAt.After(now):
+		return fmt.Sprintf(
+			"expiry %s has already passed", activation.ExpiresAt.UTC().Format(time.RFC3339),
+		)
+	case activation.ExpiresAt.After(now.Add(brokerMaximumSessionTTL)):
+		return fmt.Sprintf(
+			"expiry %s is beyond the %s maximum session TTL",
+			activation.ExpiresAt.UTC().Format(time.RFC3339), brokerMaximumSessionTTL,
+		)
+	}
+	// Both URLs, spelled out. This is the line that turns a fleet-wide silent
+	// 401 into a diff an operator can read in one glance.
+	switch {
+	case b.platformProxyURL == "":
+		return "this broker has no usable DITTOBENCH_PLATFORM_INFERENCE_PROXY_URL, " +
+			"so no activation can ever be accepted"
+	case normalizedPlatformProxyURL(activation.ProxyURL) != b.platformProxyURL:
+		return fmt.Sprintf(
+			"proxy URL %q is not this broker's configured %q "+
+				"(ditto-platform DITTO_INFERENCE_PUBLIC_BASE_URL and this broker's "+
+				"DITTOBENCH_PLATFORM_INFERENCE_PROXY_URL disagree)",
+			activation.ProxyURL, b.platformProxyURL,
+		)
+	}
+	// Pre-v7 routes carry no ticket identity and are complete here. A partial
+	// one is not the same thing as an absent one and is refused below.
+	if activation.Provider == "" && activation.ProfileRevision == "" && activation.Model == "" {
+		return ""
+	}
+	switch {
+	case activation.Provider == "":
+		return "route identity is partial: provider is empty"
+	case activation.ProfileRevision == "":
+		return "route identity is partial: profile revision is empty"
+	case activation.Model == "":
+		return "route identity is partial: model is empty"
+	}
+	identity := brokerTicketIdentity{
+		GrantID: activation.GrantID, AgentID: activation.AgentID,
+		SlotID: activation.SlotID, TicketDeadline: activation.TicketDeadline,
+	}
+	if reason := brokerTicketIdentityRejection(identity, now); reason != "" {
+		return reason
+	}
+	if activation.ExpiresAt.After(activation.TicketDeadline) {
+		return fmt.Sprintf(
+			"expiry %s outlives the ticket deadline %s",
+			activation.ExpiresAt.UTC().Format(time.RFC3339),
+			activation.TicketDeadline.UTC().Format(time.RFC3339),
+		)
+	}
+	return ""
+}
+
 func validBrokerTicketIdentity(identity brokerTicketIdentity, now time.Time) bool {
-	_, grantErr := uuid.Parse(identity.GrantID)
-	_, agentErr := uuid.Parse(identity.AgentID)
+	return brokerTicketIdentityRejection(identity, now) == ""
+}
+
+// brokerTicketIdentityRejection is validBrokerTicketIdentity with its answer
+// spelled out. The boolean form delegates here so the two can never drift.
+func brokerTicketIdentityRejection(identity brokerTicketIdentity, now time.Time) string {
+	if _, err := uuid.Parse(identity.GrantID); err != nil {
+		return fmt.Sprintf("ticket grant id %q is not a uuid", identity.GrantID)
+	}
+	if _, err := uuid.Parse(identity.AgentID); err != nil {
+		return fmt.Sprintf("ticket agent id %q is not a uuid", identity.AgentID)
+	}
 	validSlot := len(identity.SlotID) == len("slot-0") && strings.HasPrefix(identity.SlotID, "slot-") &&
 		identity.SlotID[len(identity.SlotID)-1] >= '0' && identity.SlotID[len(identity.SlotID)-1] <= '7'
-	return grantErr == nil && agentErr == nil && validSlot && identity.TicketDeadline.After(now)
+	if !validSlot {
+		return fmt.Sprintf("ticket slot id %q is not slot-0 through slot-7", identity.SlotID)
+	}
+	if !identity.TicketDeadline.After(now) {
+		return fmt.Sprintf(
+			"ticket deadline %s has already passed",
+			identity.TicketDeadline.UTC().Format(time.RFC3339),
+		)
+	}
+	return ""
 }
 
 func (b *inferenceBroker) claimRun(id, runID string, identity brokerTicketIdentity, benchVersion int) bool {

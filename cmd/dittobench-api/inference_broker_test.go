@@ -852,8 +852,14 @@ func TestInferenceActivationRequiresTicketIdentityForV7Route(t *testing.T) {
 
 func TestConfiguredPlatformProxyURLFailsClosed(t *testing.T) {
 	valid := "https://platform.example" + platformInferenceAPIPath
-	if got := configuredPlatformProxyURL("  " + valid + "  "); got != valid {
-		t.Fatalf("configured proxy = %q", got)
+	got, err := configuredPlatformProxyURL("  " + valid + "  ")
+	if got != valid || err != nil {
+		t.Fatalf("configured proxy = %q, err = %v", got, err)
+	}
+	// Unset is not a misconfiguration: a broker serving only pre-v7 work has
+	// no platform proxy and must not be told it is broken.
+	if got, err := configuredPlatformProxyURL("   "); got != "" || err != nil {
+		t.Fatalf("unset proxy = %q, err = %v", got, err)
 	}
 	for _, invalid := range []string{
 		"http://platform.example" + platformInferenceAPIPath,
@@ -861,9 +867,191 @@ func TestConfiguredPlatformProxyURLFailsClosed(t *testing.T) {
 		valid + "?next=https://attacker.example",
 		"https://user@platform.example" + platformInferenceAPIPath,
 	} {
-		if got := configuredPlatformProxyURL(invalid); got != "" {
+		got, err := configuredPlatformProxyURL(invalid)
+		if got != "" {
 			t.Errorf("unsafe proxy %q accepted as %q", invalid, got)
 		}
+		// The reason is the point: silence here is what left the operator
+		// reading identical 401s with no idea which half was wrong.
+		if err == nil {
+			t.Errorf("rejected proxy %q gave no reason", invalid)
+		}
+	}
+}
+
+// TestPlatformProxyURLNormalizationAcceptsEquivalentSpellings is the regression
+// for the outage this whole change is about. The platform mints this URL from
+// DITTO_INFERENCE_PUBLIC_BASE_URL and the broker reads its own from
+// DITTOBENCH_PLATFORM_INFERENCE_PROXY_URL; the two are set by different Ansible
+// roles and were compared byte for byte, so any of the spellings below refused
+// every activation fleet-wide while both /health endpoints stayed green.
+func TestPlatformProxyURLNormalizationAcceptsEquivalentSpellings(t *testing.T) {
+	canonical := "https://dittobench.ai" + platformInferenceAPIPath
+	for name, spelling := range map[string]string{
+		"canonical":      canonical,
+		"trailing slash": canonical + "/",
+		"host case":      "https://DittoBench.AI" + platformInferenceAPIPath,
+		"scheme case":    "HTTPS://dittobench.ai" + platformInferenceAPIPath,
+		"explicit 443":   "https://dittobench.ai:443" + platformInferenceAPIPath,
+		"surrounding ws": "  " + canonical + "\n",
+		"all at once":    "  HTTPS://DittoBench.AI:443" + platformInferenceAPIPath + "/  ",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := normalizedPlatformProxyURL(spelling); got != canonical {
+				t.Fatalf("normalized %q = %q, want %q", spelling, got, canonical)
+			}
+		})
+	}
+}
+
+// TestPlatformProxyURLNormalizationRefusesMalformedURLs covers the shapes that
+// are not a platform proxy URL at all, whatever host they name.
+func TestPlatformProxyURLNormalizationRefusesMalformedURLs(t *testing.T) {
+	for name, hostile := range map[string]string{
+		"http":              "http://dittobench.ai" + platformInferenceAPIPath,
+		"other path":        "https://dittobench.ai/api/v1/inference/embeddings",
+		"path traversal":    "https://dittobench.ai" + platformInferenceAPIPath + "/../../evil",
+		"query":             "https://dittobench.ai" + platformInferenceAPIPath + "?to=https://attacker.example",
+		"fragment":          "https://dittobench.ai" + platformInferenceAPIPath + "#x",
+		"userinfo":          "https://attacker.example@dittobench.ai" + platformInferenceAPIPath,
+		"percent host":      "https://dittobench%2eai" + platformInferenceAPIPath,
+		"percent authority": "https://dittobench.ai%40attacker.example" + platformInferenceAPIPath,
+		"scheme relative":   "//dittobench.ai" + platformInferenceAPIPath,
+		"relative":          platformInferenceAPIPath,
+		"empty":             "",
+		"not a url":         "https://%zz" + platformInferenceAPIPath,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := normalizedPlatformProxyURL(hostile); got != "" {
+				t.Fatalf("normalized %q = %q, want refusal", hostile, got)
+			}
+		})
+	}
+}
+
+// TestPlatformProxyURLNormalizationKeepsForeignAuthoritiesDistinct pins the
+// security half. Normalising must fold together only spellings of the SAME
+// authority: this comparison is what stops a forged activation from aiming the
+// broker -- which holds the platform bearer -- at somebody else's host.
+func TestPlatformProxyURLNormalizationKeepsForeignAuthoritiesDistinct(t *testing.T) {
+	canonical := normalizedPlatformProxyURL("https://dittobench.ai" + platformInferenceAPIPath)
+	if canonical == "" {
+		t.Fatal("canonical URL did not normalize")
+	}
+	for name, foreign := range map[string]string{
+		"other host":       "https://attacker.example" + platformInferenceAPIPath,
+		"credentials host": "https://dittobench.ai@attacker.example" + platformInferenceAPIPath,
+		"subdomain":        "https://dittobench.ai.attacker.example" + platformInferenceAPIPath,
+		"suffix":           "https://dittobench.aix" + platformInferenceAPIPath,
+		"non default port": "https://dittobench.ai:8443" + platformInferenceAPIPath,
+		"port 80":          "https://dittobench.ai:80" + platformInferenceAPIPath,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := normalizedPlatformProxyURL(foreign); got == canonical {
+				t.Fatalf("normalized %q collided with the canonical URL %q", foreign, canonical)
+			}
+		})
+	}
+}
+
+// TestInferenceActivationAcceptsEquivalentProxySpellings drives the same
+// spellings through the endpoint that actually 401s, not just the parser.
+func TestInferenceActivationAcceptsEquivalentProxySpellings(t *testing.T) {
+	canonical := "https://dittobench.ai" + platformInferenceAPIPath
+	for name, minted := range map[string]string{
+		"trailing slash": canonical + "/",
+		"host case":      "https://DittoBench.AI" + platformInferenceAPIPath,
+		"explicit 443":   "https://dittobench.ai:443" + platformInferenceAPIPath,
+	} {
+		t.Run(name, func(t *testing.T) {
+			broker := newInferenceBroker(1)
+			broker.platformProxyURL = canonical
+			prepared := prepareBrokerSession(t, broker)
+			recorder := activationResponse(broker, prepared, minted, time.Now().Add(time.Minute))
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("activation with %q = %d: %s", minted, recorder.Code, recorder.Body.String())
+			}
+			// Downstream reads session.proxyURL; it should hold the canonical
+			// form regardless of which equivalent spelling arrived.
+			session := broker.sessions[prepared["session_id"]]
+			session.mu.Lock()
+			stored := session.proxyURL
+			session.mu.Unlock()
+			if stored != canonical {
+				t.Fatalf("stored proxy URL = %q, want %q", stored, canonical)
+			}
+		})
+	}
+	// http stays refused even though ditto-platform permits it, because the
+	// platform bearer does not travel in cleartext. This asymmetry is
+	// deliberate; the broker says so at startup rather than only here.
+	broker := newInferenceBroker(1)
+	broker.platformProxyURL = canonical
+	prepared := prepareBrokerSession(t, broker)
+	recorder := activationResponse(
+		broker, prepared, "http://dittobench.ai"+platformInferenceAPIPath, time.Now().Add(time.Minute),
+	)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("http proxy activation = %d, want 401", recorder.Code)
+	}
+}
+
+// TestInferenceActivationNamesWhichConditionFailed is the diagnosability half.
+// One anonymous "invalid inference activation" covered eight conditions, so the
+// single most likely production misconfiguration looked exactly like seven
+// unrelated causes -- several of them ordinary expiry.
+func TestInferenceActivationNamesWhichConditionFailed(t *testing.T) {
+	canonical := "https://dittobench.ai" + platformInferenceAPIPath
+	broker := newInferenceBroker(1)
+	broker.platformProxyURL = canonical
+	prepared := prepareBrokerSession(t, broker)
+
+	recorder := activationResponse(
+		broker, prepared, "https://platform-api-dev.heyditto.ai"+platformInferenceAPIPath,
+		time.Now().Add(time.Minute),
+	)
+	body := recorder.Body.String()
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("mismatched proxy = %d", recorder.Code)
+	}
+	// Both sides of the contract, so the diff is readable without a redeploy.
+	if !strings.Contains(body, "platform-api-dev.heyditto.ai") || !strings.Contains(body, canonical) {
+		t.Fatalf("proxy mismatch did not name both URLs: %s", body)
+	}
+
+	expired := activationResponse(broker, prepared, canonical, time.Now().Add(-time.Minute))
+	if expired.Code != http.StatusUnauthorized {
+		t.Fatalf("expired activation = %d", expired.Code)
+	}
+	if strings.Contains(expired.Body.String(), "proxy URL") {
+		t.Fatalf("an expiry failure was reported as a proxy failure: %s", expired.Body.String())
+	}
+}
+
+// TestPlatformDeclineReasonNamesEveryCodeThePlatformDefines walks the ten codes
+// in ditto-platform's error envelope. 4104 is the one that matters most: it is
+// live-reachable, it is what ends a heavy v7 run, and under the old closed
+// whitelist it was received, parsed, discarded, and reported to the operator as
+// "the platform did not say why".
+func TestPlatformDeclineReasonNamesEveryCodeThePlatformDefines(t *testing.T) {
+	seen := make(map[string]int, 10)
+	for code := platformDeclineCodeMinimum; code <= 4109; code++ {
+		reason := platformDeclineReason(code)
+		if reason == "the platform did not say why" {
+			t.Errorf("code %d has no reason", code)
+		}
+		if previous, duplicate := seen[reason]; duplicate {
+			t.Errorf("codes %d and %d share the reason %q", previous, code, reason)
+		}
+		seen[reason] = code
+	}
+	// A code newer than this build is still reported as itself.
+	if got := platformDeclineReason(4142); got != "platform decline 4142" {
+		t.Errorf("unknown in-range code rendered as %q", got)
+	}
+	// Absent stays absent: 0 means the body carried nothing.
+	if got := platformDeclineReason(0); got != "the platform did not say why" {
+		t.Errorf("absent code rendered as %q", got)
 	}
 }
 
@@ -1784,8 +1972,18 @@ func TestPlatformDeclineCodeIsAdvisoryAndFailsSoft(t *testing.T) {
 		"exhausted":      {[]byte(`{"error_code":4102,"message":"x"}`), platformDeclineBudgetExhausted},
 		"at capacity":    {[]byte(`{"error_code":4103}`), platformDeclineAtCapacity},
 		"unspecified":    {[]byte(`{"error_code":4100}`), platformDeclineUnspecified},
+		"token budget":   {[]byte(`{"error_code":4104}`), platformDeclineTokenBudget},
+		"lease expired":  {[]byte(`{"error_code":4105}`), platformDeclineLeaseExpired},
+		"nonce replayed": {[]byte(`{"error_code":4106}`), platformDeclineNonceReplayed},
+		"model":          {[]byte(`{"error_code":4107}`), platformDeclineModelNotPermitted},
+		"not exchanged":  {[]byte(`{"error_code":4108}`), platformDeclineGrantNotExchanged},
+		"too large":      {[]byte(`{"error_code":4109}`), platformDeclineReservationTooLarge},
+		// A code this build predates must survive to the log, not be erased.
+		"newer platform": {[]byte(`{"error_code":4142}`), 4142},
 		"older platform": {[]byte(`{"detail":"inference grant unavailable"}`), 0},
-		"unknown code":   {[]byte(`{"error_code":9999}`), 0},
+		"outside range":  {[]byte(`{"error_code":9999}`), 0},
+		"below range":    {[]byte(`{"error_code":4099}`), 0},
+		"above range":    {[]byte(`{"error_code":4200}`), 0},
 		"not json":       {[]byte(`inference grant unavailable`), 0},
 		"empty":          {nil, 0},
 	} {
