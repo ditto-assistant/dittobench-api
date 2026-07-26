@@ -1770,3 +1770,129 @@ func TestLegacyRelayStillTreatsA429AsAProviderFault(t *testing.T) {
 		t.Fatal("a platform 502 must stay an upstream provider fault")
 	}
 }
+
+// TestPlatformDeclineCodeIsAdvisoryAndFailsSoft pins the parser's contract. It
+// may only ever ADD information: the fleet runs pinned builds against a
+// platform that may be older or newer, so a body this cannot understand must
+// leave every status-only decision exactly as it was.
+func TestPlatformDeclineCodeIsAdvisoryAndFailsSoft(t *testing.T) {
+	for name, testCase := range map[string]struct {
+		body []byte
+		want int
+	}{
+		"revoked":        {[]byte(`{"error_code":4101,"message":"x"}`), platformDeclineGrantRevoked},
+		"exhausted":      {[]byte(`{"error_code":4102,"message":"x"}`), platformDeclineBudgetExhausted},
+		"at capacity":    {[]byte(`{"error_code":4103}`), platformDeclineAtCapacity},
+		"unspecified":    {[]byte(`{"error_code":4100}`), platformDeclineUnspecified},
+		"older platform": {[]byte(`{"detail":"inference grant unavailable"}`), 0},
+		"unknown code":   {[]byte(`{"error_code":9999}`), 0},
+		"not json":       {[]byte(`inference grant unavailable`), 0},
+		"empty":          {nil, 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := platformDeclineCode(testCase.body); got != testCase.want {
+				t.Fatalf("platformDeclineCode=%d, want %d", got, testCase.want)
+			}
+		})
+	}
+}
+
+// TestChatCapacityDeclineIsWaitedOutRatherThanKillingTheRun is the regression
+// test for `banblackycat`, which died to 17 capacity declines against a lease
+// that was still live.
+//
+// The platform now answers a full-but-healthy chat lane with 503 + Retry-After
+// instead of the 429 it reserves for a dead lease. This asserts the broker
+// treats that as backpressure end to end: it comes back, it succeeds, it does
+// NOT record a grant denial, and it does NOT charge the run's three-attempt
+// transient budget for waiting out a queue.
+func TestChatCapacityDeclineIsWaitedOutRatherThanKillingTheRun(t *testing.T) {
+	var attempts atomic.Int64
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if attempts.Add(1) <= 3 {
+			w.Header().Set("Retry-After", "1")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error_code":4103,"message":"inference lane is at capacity"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"c","object":"chat.completion","created":1,"model":"openai/gpt-oss-20b","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer upstream.Close()
+
+	broker := newInferenceBroker(1)
+	broker.sleep = func(context.Context, time.Duration) error { return nil }
+	proxyURL := configureBrokerUpstream(broker, upstream)
+	prepared := prepareBrokerSession(t, broker)
+	activateBrokerSessionFor(t, broker, prepared, proxyURL, "openrouter", "openrouter-route-0123456789abcdef-v1", llm.V7HarnessModel)
+	sourceIP := "192.0.2.97"
+	claimAndBindBrokerSession(t, broker, prepared["session_id"], sourceIP, protocol.BenchVersionV7)
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/inference/id/v1/chat/completions", bytes.NewBufferString(`{"model":"openai/gpt-oss-20b"}`))
+	request.RemoteAddr = sourceIP + ":4321"
+	request.SetPathValue("rest", "v1/chat/completions")
+	recorder := httptest.NewRecorder()
+	broker.handle(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("a healthy-but-full lane failed the request: status=%d", recorder.Code)
+	}
+	// Three declines waited out, then the real answer. Under the old
+	// status-only classifier the first one ended the run.
+	if attempts.Load() != 4 {
+		t.Fatalf("deliveries=%d, want 4 (three capacity waits then success)", attempts.Load())
+	}
+	end, err := broker.snapshot(prepared["session_id"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if end.GrantDenials != 0 {
+		t.Fatalf("backpressure was miscounted as a lost lease: %+v", end)
+	}
+	if end.InfrastructureFailures != 0 {
+		t.Fatalf("backpressure was miscounted as a provider fault: %+v", end)
+	}
+}
+
+// TestChatCapacityWaitingIsBounded stops the previous test's tolerance from
+// becoming a way to hold a check open forever. A platform pinned at zero
+// headroom must surface as a bounded failure, not an unbounded stall.
+func TestChatCapacityWaitingIsBounded(t *testing.T) {
+	var attempts atomic.Int64
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts.Add(1)
+		w.Header().Set("Retry-After", "1")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error_code":4103}`))
+	}))
+	defer upstream.Close()
+
+	broker := newInferenceBroker(1)
+	broker.sleep = func(context.Context, time.Duration) error { return nil }
+	proxyURL := configureBrokerUpstream(broker, upstream)
+	prepared := prepareBrokerSession(t, broker)
+	activateBrokerSessionFor(t, broker, prepared, proxyURL, "openrouter", "openrouter-route-0123456789abcdef-v1", llm.V7HarnessModel)
+	sourceIP := "192.0.2.98"
+	claimAndBindBrokerSession(t, broker, prepared["session_id"], sourceIP, protocol.BenchVersionV7)
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/inference/id/v1/chat/completions", bytes.NewBufferString(`{"model":"openai/gpt-oss-20b"}`))
+	request.RemoteAddr = sourceIP + ":4321"
+	request.SetPathValue("rest", "v1/chat/completions")
+	recorder := httptest.NewRecorder()
+	broker.handle(recorder, request)
+
+	if recorder.Code != http.StatusBadGateway {
+		t.Fatalf("an endlessly-full lane did not fail closed: status=%d", recorder.Code)
+	}
+	if got := attempts.Load(); got > platformChatCapacityMaxWaits+1 {
+		t.Fatalf("capacity waiting was unbounded: deliveries=%d", got)
+	}
+	end, err := broker.snapshot(prepared["session_id"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if end.GrantDenials != 0 {
+		t.Fatalf("backpressure was miscounted as a lost lease: %+v", end)
+	}
+}
