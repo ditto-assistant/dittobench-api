@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -32,6 +33,26 @@ type relayHealthSnapshot struct {
 	// the two makes a validator losing its lease indistinguishable from a
 	// provider blip. A legacy relay never reports this.
 	GrantDenials uint64 `json:"grant_denials"`
+	// GrantAgentDeclines is the SUBSET of GrantDenials the harness caused: it
+	// spent the request-count or token allowance its own ticket granted
+	// (platform codes 4102/4104), or sent a single request too large to reserve
+	// (4109). The lease was alive and the platform healthy in every one of
+	// these; nothing the validator or platform did unilaterally lands here.
+	//
+	// A subset rather than a split so GrantDenials keeps its exact previous
+	// meaning: which runs fail is unchanged by this field's existence, only who
+	// is charged. A legacy relay reports neither.
+	GrantAgentDeclines uint64 `json:"grant_agent_declines"`
+	// AgentRequestRejections counts pre-reservation 4xx: the platform refusing
+	// the harness's request bytes (schema, size, model) without reserving
+	// capacity or contacting a provider. Already fails the run via
+	// UsageUnavailable; this exists so the failure can name the harness.
+	AgentRequestRejections uint64 `json:"agent_request_rejections"`
+	// CapacityExhaustions counts calls that spent their entire bounded
+	// backpressure wait budget and gave up. Reported separately from
+	// InfrastructureFailures so a saturated rail is legible, but deliberately
+	// still INFRASTRUCTURE: a miner cannot provision the lane.
+	CapacityExhaustions uint64 `json:"capacity_exhaustions"`
 	// EmbeddingRetries is the v7 embedding lane's retry ledger, the counterpart
 	// of UpstreamAttempts-minus-Requests on the chat lane.
 	EmbeddingRetries    uint64 `json:"embedding_retries"`
@@ -63,6 +84,9 @@ type relayExecutionSummary struct {
 	Successes              uint64 `json:"successes"`
 	InfrastructureFailures uint64 `json:"infrastructure_failures"`
 	GrantDenials           uint64 `json:"grant_denials,omitempty"`
+	GrantAgentDeclines     uint64 `json:"grant_agent_declines,omitempty"`
+	AgentRequestRejections uint64 `json:"agent_request_rejections,omitempty"`
+	CapacityExhaustions    uint64 `json:"capacity_exhaustions,omitempty"`
 	CallerCancellations    uint64 `json:"caller_cancellations"`
 	UpstreamAttempts       uint64 `json:"upstream_attempts"`
 	Retries                uint64 `json:"retries"`
@@ -229,11 +253,32 @@ func requireTokenAccounting(snapshot relayHealthSnapshot, benchVersion int, runS
 	return nil
 }
 
-func requireCompleteV7Usage(benchVersion int, usage protocol.TokenUsage) error {
-	if benchVersion >= protocol.BenchVersionV7 && !efficiency.ValidUsage(usage) {
-		return fmt.Errorf("benchmark v7 requires complete provider token usage")
+// requireCompleteV7Usage is unchanged in WHICH runs it fails -- the predicate
+// is still exactly efficiency.ValidUsage -- and changed only in whom it names.
+//
+// UsageUnavailable has always had two unrelated causes sharing one counter. One
+// is provider-side: a call succeeded but the provider's response carried no
+// usage block, which nothing the harness did can cause or prevent. The other is
+// the platform rejecting the harness's own request bytes with a pre-reservation
+// 4xx -- schema, size, or model -- before any provider was contacted. Both
+// failed the run as validator_infrastructure/retryable, so a harness reliably
+// sending one malformed request per case was minting itself retry grants.
+//
+// execution.AgentRequestRejections is the second cause, counted separately.
+// When it accounts for the ENTIRE usage shortfall, the run is the agent's.
+// Any provider-side gap at all, and the run keeps its grant -- the same
+// infrastructure-wins-ties rule relayDegradedSince applies to grant denials.
+func requireCompleteV7Usage(benchVersion int, usage protocol.TokenUsage, execution relayExecutionSummary) error {
+	if benchVersion < protocol.BenchVersionV7 || efficiency.ValidUsage(usage) {
+		return nil
 	}
-	return nil
+	if execution.AgentRequestRejections > 0 && execution.AgentRequestRejections >= usage.UsageUnavailable {
+		return fmt.Errorf(
+			"%w: the platform rejected %d of the harness's inference request(s) outright, before reserving any capacity — no provider was contacted",
+			errAgentInferenceDeclined, execution.AgentRequestRejections,
+		)
+	}
+	return fmt.Errorf("benchmark v7 requires complete provider token usage")
 }
 
 // relayDegradedSince keeps #97's fail-closed rule: a run must never be scored
@@ -245,16 +290,38 @@ func requireCompleteV7Usage(benchVersion int, usage protocol.TokenUsage) error {
 // are present, the denial is the cause and the provider counter is downstream
 // noise.
 func relayDegradedSince(start, end relayHealthSnapshot) error {
-	if end.Requests < start.Requests || end.Successes < start.Successes ||
-		end.InfrastructureFailures < start.InfrastructureFailures ||
-		end.GrantDenials < start.GrantDenials || end.EmbeddingRetries < start.EmbeddingRetries ||
-		end.CallerCancellations < start.CallerCancellations || end.UpstreamAttempts < start.UpstreamAttempts {
+	if relayRestarted(start, end) {
 		return fmt.Errorf("relay restarted during benchmark")
 	}
 	if end.GrantDenials > start.GrantDenials {
+		denials := end.GrantDenials - start.GrantDenials
+		agentDeclines := end.GrantAgentDeclines - start.GrantAgentDeclines
+		// Infrastructure wins ties, and this is the tie-break that makes the
+		// whole change safe: the run is charged to the agent ONLY when every
+		// single denial it saw was agent-attributable. One revoked lease, one
+		// expired grant, one decline this build could not attribute -- any of
+		// them, mixed in with a hundred budget declines -- and the run keeps
+		// its grant. A platform failure can therefore never start billing a
+		// miner, no matter what else happened alongside it.
+		if agentDeclines == denials {
+			return fmt.Errorf(
+				"%w: the harness exhausted its own inference allowance %d time(s) during benchmark — the lease was alive and the platform healthy",
+				errAgentInferenceDeclined, denials,
+			)
+		}
 		return fmt.Errorf(
 			"platform declined this run's inference grant %d time(s) during benchmark (lease revoked, deadline rewritten, or budget exhausted) — not an upstream provider fault",
-			end.GrantDenials-start.GrantDenials,
+			denials,
+		)
+	}
+	if end.CapacityExhaustions > start.CapacityExhaustions {
+		// Reported before the generic upstream-failure line because a capacity
+		// exhaustion also increments InfrastructureFailures, and the saturated
+		// lane is the cause while the generic counter is downstream noise --
+		// the same ordering rule grant denials already follow above.
+		return fmt.Errorf(
+			"%w: %d inference call(s) spent their whole backpressure budget waiting on a full platform lane",
+			errInferenceLaneSaturated, end.CapacityExhaustions-start.CapacityExhaustions,
 		)
 	}
 	if end.InfrastructureFailures > start.InfrastructureFailures {
@@ -263,11 +330,27 @@ func relayDegradedSince(start, end relayHealthSnapshot) error {
 	return nil
 }
 
-func relayExecutionSince(start, end relayHealthSnapshot) (relayExecutionSummary, error) {
-	if end.Requests < start.Requests || end.Successes < start.Successes ||
+// relayRestarted reports whether any monotonic counter went backwards, which
+// can only mean the relay's accounting was reset underneath this run. Shared by
+// relayDegradedSince and relayExecutionSince so a newly added counter cannot be
+// guarded in one and forgotten in the other.
+func relayRestarted(start, end relayHealthSnapshot) bool {
+	return end.Requests < start.Requests || end.Successes < start.Successes ||
 		end.InfrastructureFailures < start.InfrastructureFailures ||
-		end.GrantDenials < start.GrantDenials || end.EmbeddingRetries < start.EmbeddingRetries ||
-		end.CallerCancellations < start.CallerCancellations || end.UpstreamAttempts < start.UpstreamAttempts {
+		end.GrantDenials < start.GrantDenials ||
+		end.GrantAgentDeclines < start.GrantAgentDeclines ||
+		end.AgentRequestRejections < start.AgentRequestRejections ||
+		end.CapacityExhaustions < start.CapacityExhaustions ||
+		end.EmbeddingRetries < start.EmbeddingRetries ||
+		end.CallerCancellations < start.CallerCancellations ||
+		end.UpstreamAttempts < start.UpstreamAttempts ||
+		// A subset counter that outran its total means the two were updated
+		// inconsistently; refuse to classify on it rather than guess.
+		end.GrantAgentDeclines-start.GrantAgentDeclines > end.GrantDenials-start.GrantDenials
+}
+
+func relayExecutionSince(start, end relayHealthSnapshot) (relayExecutionSummary, error) {
+	if relayRestarted(start, end) {
 		return relayExecutionSummary{}, fmt.Errorf("relay restarted during benchmark")
 	}
 	summary := relayExecutionSummary{
@@ -275,6 +358,9 @@ func relayExecutionSince(start, end relayHealthSnapshot) (relayExecutionSummary,
 		Successes:              end.Successes - start.Successes,
 		InfrastructureFailures: end.InfrastructureFailures - start.InfrastructureFailures,
 		GrantDenials:           end.GrantDenials - start.GrantDenials,
+		GrantAgentDeclines:     end.GrantAgentDeclines - start.GrantAgentDeclines,
+		AgentRequestRejections: end.AgentRequestRejections - start.AgentRequestRejections,
+		CapacityExhaustions:    end.CapacityExhaustions - start.CapacityExhaustions,
 		EmbeddingRetries:       end.EmbeddingRetries - start.EmbeddingRetries,
 		CallerCancellations:    end.CallerCancellations - start.CallerCancellations,
 		UpstreamAttempts:       end.UpstreamAttempts - start.UpstreamAttempts,
@@ -418,12 +504,113 @@ func (s *server) handleRelayPreflight(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// errAgentInferenceDeclined and errInferenceLaneSaturated are typed sentinels,
+// not message markers, for the reason dittobench-api #118 introduced the
+// pattern: the harness's own output and its own error strings flow through this
+// process, and a classification that can be produced by printing the right
+// words is a classification a harness can forge. `errors.Is` cannot be forged
+// by any string a miner controls -- only code in this package can wrap these.
+//
+// The direction of each is deliberate and opposite:
+//
+//   - errAgentInferenceDeclined moves a run OUT of the no-fault class. Only
+//     conditions the AGENT controls are ever wrapped in it. Forging it would
+//     let a miner take blame it does not deserve, which is a strange attack;
+//     the real risk is code drift wrapping too much, which the table in
+//     inference_broker.go (declineFaultFor) bounds.
+//   - errInferenceLaneSaturated KEEPS a run in the no-fault class and only
+//     renames it. Forging it would be worth something -- it mints a retry
+//     grant -- which is precisely why it is a sentinel and not a substring.
+var (
+	errAgentInferenceDeclined = errors.New("agent-attributable inference decline")
+	errInferenceLaneSaturated = errors.New("platform inference lane saturated")
+)
+
+// relayFinalizeFailure classifies a finalize-path relay failure.
+//
+// The DEFAULT is unchanged and stays validator_infrastructure/retryable. That
+// is the correct default here and must not be narrowed: relay unreachable, a
+// snapshot that could not be read, a provider fault, a revoked grant, an
+// expired lease, a restarted relay, and every condition this build has never
+// seen are all things the platform can cause unilaterally, and a run must keep
+// its grant for all of them.
+//
+// What changed is that the no-fault class is no longer the ONLY outcome. Every
+// finalize failure used to land here, so nine unrelated conditions -- several
+// of them entirely the harness's doing -- became "validator_infrastructure,
+// retryable: true", which mints a retry grant, RAISES the attempt cap, and
+// re-leases. An agent that failed the same way every run therefore re-leased
+// itself without bound, holding validator slots and never scoring: the mnemox
+// loop, one layer down from where #282 found it.
+//
+// Only a typed sentinel can leave the default. Nothing derived from harness
+// output, harness error text, or an unrecognised platform code can.
+func relayFinalizeFailure(err error) *store.Failure {
+	switch {
+	case errors.Is(err, errAgentInferenceDeclined):
+		// Terminal and the agent's: retrying cannot help, because the harness
+		// would spend the same allowance the same way on a fresh grant. This is
+		// the only bin in this function that costs a miner an attempt, and
+		// every condition reaching it is one the agent controls outright.
+		return &store.Failure{
+			Kind:      "sandbox_failure",
+			Code:      "inference_allowance_exhausted",
+			Retryable: false,
+		}
+	case errors.Is(err, errInferenceLaneSaturated):
+		// Saturation is distinguished in DIAGNOSTICS, not in the code, and the
+		// asymmetry is deliberate.
+		//
+		// The two new classifications are not equally safe to put on the wire.
+		// The agent one is: a validator that has never heard of
+		// `inference_allowance_exhausted` sees sandbox_failure/retryable=false,
+		// which its terminal default already handles correctly. Old validators
+		// do the right thing with it by construction.
+		//
+		// The no-fault direction is NOT. ditto-subnet's
+		// `_sandbox_infrastructure_failure_code` returns None for any code
+		// outside its allowlist, and None becomes fail_job("scoring_error") --
+		// so shipping a NEW infrastructure code charges a miner on every
+		// validator that predates the matching release. The fleet lags scorer
+		// releases by design, which means a new code here would bill miners for
+		// a saturated platform rail for as long as the skew lasts: precisely
+		// the mistake this whole change exists to stop, arriving through the
+		// rollout instead of through the classifier.
+		//
+		// `model_relay_unavailable` is already in every deployed validator's
+		// allowlist, so this stays no-fault on EVERY fleet version, including
+		// ones that will never be upgraded. Diagnostics carry the distinction
+		// for the operator; that field is not consulted by the subnet's
+		// classifier, so it cannot change the class anywhere.
+		return &store.Failure{
+			Kind:      "validator_infrastructure",
+			Code:      "model_relay_unavailable",
+			Retryable: true,
+			Diagnostics: map[string]any{
+				"relay_cause": "inference_lane_saturated",
+			},
+		}
+	default:
+		return &store.Failure{
+			Kind:      "validator_infrastructure",
+			Code:      "model_relay_unavailable",
+			Retryable: true,
+		}
+	}
+}
+
 func (s *server) failRelayUnavailable(runID string, err error) {
-	s.store.FailWith(runID, "locked model relay unavailable: "+err.Error(), &store.Failure{
-		Kind:      "validator_infrastructure",
-		Code:      "model_relay_unavailable",
-		Retryable: true,
-	})
+	failure := relayFinalizeFailure(err)
+	// The prose has to follow the classification. "locked model relay
+	// unavailable" was the only sentence this path could produce, and it was a
+	// false statement for every agent-caused finalize failure -- which is how a
+	// harness spending its own token budget came to read, in the operator's
+	// logs and in errors.failure_detail(), as a broken relay.
+	prefix := "locked model relay unavailable: "
+	if failure.Kind == "sandbox_failure" {
+		prefix = "harness exhausted its inference allowance: "
+	}
+	s.store.FailWith(runID, prefix+err.Error(), failure)
 }
 
 func trustedEmbeddingInfrastructureFailure(err error) *store.Failure {

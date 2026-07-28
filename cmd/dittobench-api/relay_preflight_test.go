@@ -340,10 +340,10 @@ func TestV7RequiresCompleteProviderUsage(t *testing.T) {
 		Model:           llm.V7HarnessModel,
 		PromptTokens:    1,
 	}
-	if err := requireCompleteV7Usage(protocol.BenchVersionV6, incomplete); err != nil {
+	if err := requireCompleteV7Usage(protocol.BenchVersionV6, incomplete, relayExecutionSummary{}); err != nil {
 		t.Fatalf("v6 compatibility rejected incomplete usage: %v", err)
 	}
-	if err := requireCompleteV7Usage(protocol.BenchVersionV7, incomplete); err == nil {
+	if err := requireCompleteV7Usage(protocol.BenchVersionV7, incomplete, relayExecutionSummary{}); err == nil {
 		t.Fatal("v7 accepted incomplete provider usage")
 	}
 	incomplete.CompletionTokens = 1
@@ -352,14 +352,14 @@ func TestV7RequiresCompleteProviderUsage(t *testing.T) {
 	incomplete.Successes = 1
 	incomplete.UsageAvailable = 1
 	incomplete.Status = "complete"
-	if err := requireCompleteV7Usage(protocol.BenchVersionV7, incomplete); err != nil {
+	if err := requireCompleteV7Usage(protocol.BenchVersionV7, incomplete, relayExecutionSummary{}); err != nil {
 		t.Fatalf("v7 rejected complete provider usage: %v", err)
 	}
 	// Caller cancellations may make requests exceed successful provider
 	// responses, as observed in the reviewed campaign. They remain acceptable
 	// when every successful response has usage and no response is unaccounted.
 	incomplete.Requests = 2
-	if err := requireCompleteV7Usage(protocol.BenchVersionV7, incomplete); err != nil {
+	if err := requireCompleteV7Usage(protocol.BenchVersionV7, incomplete, relayExecutionSummary{}); err != nil {
 		t.Fatalf("v7 rejected complete usage after a caller cancellation: %v", err)
 	}
 }
