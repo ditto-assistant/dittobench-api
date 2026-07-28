@@ -425,6 +425,59 @@ func platformDeclineCode(body []byte) int {
 	return 0
 }
 
+// platformRejectionMessageLimit bounds what is copied out of a platform error
+// body. Long enough for a schema refusal that names several fields, short
+// enough that nothing can use this path to pump bulk text into a harness's
+// stderr or this process's logs.
+const platformRejectionMessageLimit = 400
+
+// platformRejectionMessage extracts the platform's own explanation of a request
+// rejection from its error envelope (ditto-platform
+// ditto/api_server/middleware/error_envelope.py: `{error_code, message,
+// request_id}`), returning "" when there is nothing usable.
+//
+// This exists because the broker used to throw that explanation away. A 4xx
+// from the platform reached the harness as the fixed string "inference request
+// denied", so a miner whose request carried one field the platform's schema did
+// not recognise saw a generic refusal with no indication of which field. That
+// is exactly what happened to `Cooking`: three submissions burned on a single
+// unrecognised `reasoning` key, with no way to discover its name. The platform
+// now names the offending key; this makes the name survive the last hop.
+//
+// Forwarding the string changes no classification. The status, the counters,
+// and the agent-fault attribution above are all untouched, and the response
+// shape stays `{"error": ...}` -- only the human-readable value differs. A body
+// this cannot parse falls back to the old wording rather than failing.
+func platformRejectionMessage(body []byte) string {
+	if len(body) == 0 || len(body) > 64<<10 {
+		return ""
+	}
+	var envelope struct {
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(body, &envelope) != nil {
+		return ""
+	}
+	// Control characters are stripped rather than escaped: this string is
+	// destined for a log line and a harness's stderr, and a newline in either
+	// would let a platform-relayed message forge an entry.
+	cleaned := strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, envelope.Message)
+	cleaned = strings.TrimSpace(cleaned)
+	if cleaned == "" {
+		return ""
+	}
+	if len(cleaned) > platformRejectionMessageLimit {
+		// Truncate on a rune boundary so the result stays valid UTF-8.
+		cleaned = strings.ToValidUTF8(cleaned[:platformRejectionMessageLimit], "") + "..."
+	}
+	return cleaned
+}
+
 // platformDeclineReasons is the recognised code set and its operator-facing
 // wording in one place, so a code cannot be parseable without also being
 // renderable (or attributable, via declineFaultFor above).
@@ -1765,11 +1818,20 @@ func (b *inferenceBroker) proxy(w http.ResponseWriter, r *http.Request, session 
 		session.providerLatency += totalLatency
 		rejections, runID := session.agentRequestRejections, session.boundRunID
 		session.mu.Unlock()
+		// The platform's own explanation is the only thing that can tell a
+		// miner WHICH of their bytes was refused, and this is its last hop
+		// before the harness. Discarding it here is what left `Cooking` unable
+		// to discover the offending field across three submissions. It goes to
+		// both destinations: the harness's stderr, and the operator's log.
+		detail := platformRejectionMessage(responseBody)
+		if detail == "" {
+			detail = "inference request denied"
+		}
 		log.Printf(
-			"run %s: platform rejected the harness's inference request with %d before any reservation -- AGENT fault, no provider was contacted (rejection #%d)",
-			runID, responseStatus, rejections,
+			"run %s: platform rejected the harness's inference request with %d before any reservation -- AGENT fault, no provider was contacted (rejection #%d): %s",
+			runID, responseStatus, rejections, detail,
 		)
-		writeError(w, responseStatus, "inference request denied")
+		writeError(w, responseStatus, detail)
 		return
 	}
 	// A platform grant denial is a lost lease, not a provider fault. It is
