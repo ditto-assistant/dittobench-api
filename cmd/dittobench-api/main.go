@@ -278,22 +278,7 @@ func main() {
 	}
 	s.broker.relayWait = s.store.SetRelayWaiting
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health", s.handleHealth)
-	mux.HandleFunc("GET /v1/relay-preflight", s.handleRelayPreflight)
-	mux.HandleFunc("GET /v1/capabilities", s.handleCapabilities)
-	mux.HandleFunc("GET /v1/dataset", s.handleDataset)
-	mux.HandleFunc("GET /v1/sample", s.handleSample)
-	mux.HandleFunc("GET /v1/catalog", s.handleCatalog)
-	mux.HandleFunc("POST /v1/submit", s.handleSubmit)
-	mux.HandleFunc("POST /v1/score", s.handleScore)
-	mux.HandleFunc("POST /v2/score", s.handleVersionedScore)
-	mux.HandleFunc("GET /v1/runs/{id}", s.handleGetRun)
-	mux.HandleFunc("GET /v1/runs/{id}/transcript", s.handleGetTranscript)
-	mux.HandleFunc("DELETE /v1/runs/{id}", s.handleCancelRun)
-	mux.HandleFunc("POST /v1/inference/session", s.broker.prepare)
-	mux.HandleFunc("POST /v1/inference/session/{id}/activate", s.broker.activate)
-	mux.HandleFunc("DELETE /v1/inference/session/{id}", s.broker.cancel)
+	mux := s.newControlPlaneMux()
 
 	// Untrusted harnesses reach a dedicated listener that exposes only the
 	// ticket-bound inference route. Keeping this off the control-plane mux means
@@ -329,8 +314,14 @@ func main() {
 	}
 
 	addr := ":" + strconv.Itoa(*port)
+	// Everything on this mux except the allowlisted liveness route requires a
+	// validator credential. See control_auth.go for the route classification
+	// and the shadow/enforce rollout.
+	controlAuth := newControlAuth()
+	controlAuth.logStartup()
+
 	log.Printf("dittobench-api (off-chain practice validator) listening on %s", addr)
-	if err := http.ListenAndServe(addr, logging(mux)); err != nil {
+	if err := http.ListenAndServe(addr, logging(controlAuth.wrap(mux))); err != nil {
 		log.Fatalf("server error: %v", err)
 	}
 }
