@@ -1063,7 +1063,7 @@ func TestV7InferenceBrokerRetriesTransientProviderFaultsBoundedly(t *testing.T) 
 	if execution.Requests != 1 || execution.GrantDenials != 0 {
 		t.Fatalf("retry must not inflate requests or denials: %+v", execution)
 	}
-	if err := requireCompleteV7Usage(protocol.BenchVersionV7, usage); err == nil {
+	if err := requireCompleteV7Usage(protocol.BenchVersionV7, usage, relayExecutionSummary{}); err == nil {
 		t.Fatal("v7 accepted a run with a provider infrastructure failure")
 	}
 }

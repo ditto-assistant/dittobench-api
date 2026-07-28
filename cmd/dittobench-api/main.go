@@ -1683,7 +1683,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		if !ok {
 			return
 		}
-		if err := requireCompleteV7Usage(req.BenchVersion, tokenUsage); err != nil {
+		if err := requireCompleteV7Usage(req.BenchVersion, tokenUsage, relayExecution); err != nil {
 			s.failRelayUnavailable(runID, err)
 			return
 		}

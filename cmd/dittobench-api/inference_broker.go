@@ -132,6 +132,26 @@ type brokerSession struct {
 	grantDenials        uint64
 	usageAvailable      uint64
 	usageUnavailable    uint64
+	// grantAgentDeclines is the SUBSET of grantDenials the harness caused: it
+	// spent the request or token allowance its own ticket granted, or sent one
+	// request too large to reserve. Kept as a subset rather than as a split of
+	// grantDenials on purpose -- grantDenials keeps its exact previous meaning
+	// and wire value, so which runs FAIL is unchanged and only who is CHARGED
+	// moves. See relayFinalizeFailure for the tie-break.
+	grantAgentDeclines uint64
+	// agentRequestRejections counts pre-reservation 4xx (a 400 the platform's
+	// schema refused, a 403 on a model, an oversized body) -- the platform
+	// rejecting the harness's request without ever reserving capacity. These
+	// already fail the run through usageUnavailable; this counter exists only
+	// so the failure can name the harness instead of the relay.
+	agentRequestRejections uint64
+	// capacityExhaustions counts calls that used up their whole bounded
+	// backpressure wait budget and gave up. Deliberately its own counter AND
+	// deliberately still infrastructure: a saturated lane is a platform
+	// property, and a harness cannot make the platform busy on its own. It gets
+	// a distinct code purely so an operator can tell a saturated rail apart
+	// from an unreachable relay without reading logs.
+	capacityExhaustions uint64
 	promptTokens        uint64
 	promptBytes         uint64
 	completionTokens    uint64
@@ -300,11 +320,87 @@ func platformDeniesGrant(legacyGateway string, status int) bool {
 // against a broker that has never heard of them. The code is the precise
 // signal, and it is only ever *additional* information.
 const (
-	platformDeclineUnspecified     = 4100
-	platformDeclineGrantRevoked    = 4101
-	platformDeclineBudgetExhausted = 4102
-	platformDeclineAtCapacity      = 4103
+	platformDeclineUnspecified          = 4100
+	platformDeclineGrantRevoked         = 4101
+	platformDeclineBudgetExhausted      = 4102
+	platformDeclineAtCapacity           = 4103
+	platformDeclineTokenBudgetExhausted = 4104
+	platformDeclineLeaseExpired         = 4105
+	platformDeclineNonceReplayed        = 4106
+	platformDeclineModelNotPermitted    = 4107
+	platformDeclineGrantNotExchanged    = 4108
+	platformDeclineReservationTooLarge  = 4109
 )
+
+// declineFault says who a decline is attributable to. It is the whole point of
+// reading the code at all: until now every one of these collapsed into a single
+// counter, and that counter's only consumer classified the run as
+// validator_infrastructure/retryable -- which mints a retry grant, RAISES the
+// attempt cap, and re-leases. A harness that reliably spends its own allowance
+// therefore re-leased itself forever, holding validator slots and never scoring.
+type declineFault int
+
+const (
+	// declineFaultPlatform: the platform (or this broker) caused it
+	// unilaterally, and no harness behaviour could have avoided it. Stays
+	// no-fault. This is also the DEFAULT for anything unrecognised.
+	declineFaultPlatform declineFault = iota
+	// declineFaultAgent: the harness's own request volume or request size
+	// caused it. The lease is alive and the platform is healthy; the agent
+	// simply spent what it was given. Charging a retry grant for this is what
+	// created the loop.
+	declineFaultAgent
+)
+
+// declineFaultFor is the authoritative attribution table, deliberately a table
+// and not a ladder of ifs -- the same shape, and for the same reason, as the
+// platform's own _TERMINAL_DECLINE_RESPONSES (ditto-platform
+// ditto/api_server/middleware/error_envelope.py): a new decline that nobody
+// wires up must fall into the SAFE bin, not an arbitrary one.
+//
+// Only entries present here are agent-attributable. Everything else -- every
+// code below, every code this build has never heard of, and the "the platform
+// sent no code at all" answer (0) -- returns declineFaultPlatform. That default
+// is the safety property: a decline this build cannot attribute keeps its grant.
+//
+// Explicitly NOT agent-attributable, despite being 429 declines the harness's
+// request superficially "caused":
+//
+//   - 4106 NONCE_REPLAYED and 4107 MODEL_NOT_PERMITTED. A harness cannot reach
+//     either. This broker mints a fresh uuid nonce per upstream attempt on both
+//     lanes, and it OVERWRITES the caller's model with the ticket's before
+//     forwarding (rewriteRequestModel on chat, a hard-coded hostedEmbeddingModel
+//     on embeddings). If the platform still says the nonce repeated or the model
+//     is not permitted, the disagreement is between the grant and the ticket --
+//     platform and broker state the miner never touches. Billing a miner for
+//     those would be the exact mirror-image of the bug being fixed here.
+//   - 4108 GRANT_NOT_EXCHANGED, 4105 LEASE_EXPIRED, 4101 GRANT_REVOKED. Grant
+//     lifecycle, owned entirely by the platform and this broker.
+//   - 4100 unattributed. The platform holds an unknown grant id and a failed
+//     bearer comparison deliberately indistinguishable so an unauthenticated
+//     caller learns nothing. If the platform refuses to say, this must not guess.
+//   - 4103 AT_CAPACITY. Never reaches this table (it is a 503 handled as
+//     backpressure), and lane saturation is a platform property regardless.
+var declineFaultFor = map[int]declineFault{
+	// The request-count allowance the ticket granted, spent by the harness's
+	// own call volume. The lease is alive and the platform is healthy.
+	platformDeclineBudgetExhausted: declineFaultAgent,
+	// The token allowance, spent by the harness's own prompt sizes. The
+	// platform splits this from the request count precisely because "hit the
+	// token wall at call 400" is a different agent behaviour from "hit the
+	// request wall at call 8192" -- both are the agent's behaviour.
+	platformDeclineTokenBudgetExhausted: declineFaultAgent,
+	// A single harness request whose reservation exceeds the entire token
+	// allowance. Nothing has been spent and the lease is still good: the
+	// request itself is oversized, which is authored by the harness alone.
+	platformDeclineReservationTooLarge: declineFaultAgent,
+}
+
+// declineIsAgentFault reports whether a platform decline code is attributable
+// to the harness. Unknown codes, and the absent code 0, are never agent-fault.
+func declineIsAgentFault(code int) bool {
+	return declineFaultFor[code] == declineFaultAgent
+}
 
 // platformDeclineCode extracts the platform's decline code from an error body,
 // returning 0 when the body is absent, unparseable, or carries no code.
@@ -323,29 +419,41 @@ func platformDeclineCode(body []byte) int {
 	if json.Unmarshal(body, &envelope) != nil {
 		return 0
 	}
-	switch envelope.ErrorCode {
-	case platformDeclineUnspecified, platformDeclineGrantRevoked,
-		platformDeclineBudgetExhausted, platformDeclineAtCapacity:
+	if _, known := platformDeclineReasons[envelope.ErrorCode]; known {
 		return envelope.ErrorCode
-	default:
-		return 0
 	}
+	return 0
+}
+
+// platformDeclineReasons is the recognised code set and its operator-facing
+// wording in one place, so a code cannot be parseable without also being
+// renderable (or attributable, via declineFaultFor above).
+//
+// This build previously recognised only 4100-4103. The platform has emitted
+// 4104-4109 since it split the terminal declines apart, and every one of them
+// was landing on the "the platform did not say why" branch -- the discriminating
+// signal arrived, was parsed, and was then discarded. That is why a spent TOKEN
+// budget (4104), the decline that actually ends heavy v7 runs, has been
+// indistinguishable from a revoked lease at this layer.
+var platformDeclineReasons = map[int]string{
+	platformDeclineUnspecified:          "the platform declined the reservation",
+	platformDeclineGrantRevoked:         "the lease was revoked",
+	platformDeclineBudgetExhausted:      "the lease spent its request budget",
+	platformDeclineAtCapacity:           "the lane is at capacity",
+	platformDeclineTokenBudgetExhausted: "the lease spent its token budget",
+	platformDeclineLeaseExpired:         "the lease's own clock ran out",
+	platformDeclineNonceReplayed:        "the broker replayed a nonce",
+	platformDeclineModelNotPermitted:    "the grant does not pin this model",
+	platformDeclineGrantNotExchanged:    "the grant was never exchanged for a bearer",
+	platformDeclineReservationTooLarge:  "one request exceeded the whole token allowance",
 }
 
 // platformDeclineReason renders a decline code for an operator reading logs.
 func platformDeclineReason(code int) string {
-	switch code {
-	case platformDeclineGrantRevoked:
-		return "the lease was revoked"
-	case platformDeclineBudgetExhausted:
-		return "the lease spent its request budget"
-	case platformDeclineAtCapacity:
-		return "the lane is at capacity"
-	case platformDeclineUnspecified:
-		return "the platform declined the reservation"
-	default:
-		return "the platform did not say why"
+	if reason, known := platformDeclineReasons[code]; known {
+		return reason
 	}
+	return "the platform did not say why"
 }
 
 // platformIsAtCapacity recognises the platform's backpressure answer on any
@@ -1142,14 +1250,27 @@ func (b *inferenceBroker) handleEmbedding(w http.ResponseWriter, r *http.Request
 			// eviction came to be reported as "1 upstream failure".
 			var denied platformGrantDenied
 			session.mu.Lock()
+			var saturated platformEmbeddingAtCapacity
 			if errors.As(err, &denied) {
 				session.grantDenials++
+				attribution := "platform fault: the lease is gone"
+				if declineIsAgentFault(denied.code) {
+					session.grantAgentDeclines++
+					attribution = "AGENT fault: the harness spent its own allowance"
+				}
 				log.Printf(
-					"run %s: platform declined the embedding grant (429: %s); ticket deadline held locally is %s (in %s) -- this is a lease denial, not a provider fault (denial #%d)",
-					session.boundRunID, platformDeclineReason(denied.code),
+					"run %s: platform declined the embedding grant (429: %s -- %s); ticket deadline held locally is %s (in %s) -- this is a lease denial, not a provider fault (denial #%d, agent-attributable #%d)",
+					session.boundRunID, platformDeclineReason(denied.code), attribution,
 					session.ticketDeadline.UTC().Format(time.RFC3339),
-					time.Until(session.ticketDeadline).Truncate(time.Second), session.grantDenials,
+					time.Until(session.ticketDeadline).Truncate(time.Second),
+					session.grantDenials, session.grantAgentDeclines,
 				)
+			} else if errors.As(err, &saturated) {
+				// The whole bounded wait budget went by and the lane was still
+				// full. Distinct from a provider fault, but still the
+				// platform's -- see capacityExhaustions.
+				session.capacityExhaustions++
+				session.failures++
 			} else {
 				session.failures++
 			}
@@ -1427,6 +1548,9 @@ func (b *inferenceBroker) health(w http.ResponseWriter, session *brokerSession) 
 		Successes:              session.successes,
 		InfrastructureFailures: session.failures,
 		GrantDenials:           session.grantDenials,
+		GrantAgentDeclines:     session.grantAgentDeclines,
+		AgentRequestRejections: session.agentRequestRejections,
+		CapacityExhaustions:    session.capacityExhaustions,
 		EmbeddingRetries:       session.embeddingRetries,
 		CallerCancellations:    session.callerCancels,
 		UpstreamAttempts:       session.upstreamAttempts,
@@ -1583,6 +1707,18 @@ func (b *inferenceBroker) proxy(w http.ResponseWriter, r *http.Request, session 
 		// backpressure this way since dittobench-api #103.
 		if atCapacity {
 			if capacityWaits >= platformChatCapacityMaxWaits {
+				// The whole bounded wait budget went by and the lane was still
+				// full. This is genuinely ambiguous -- a saturated rail can be
+				// an under-provisioned platform OR one embed-heavy ticket
+				// crowding out its neighbours -- and it is deliberately NOT
+				// reclassified as the agent's fault. A miner cannot provision
+				// the lane, and blaming one for a platform running at its limit
+				// is the same error as this change is fixing, pointed the other
+				// way. It gets its own CODE so an operator can see it; it keeps
+				// the infrastructure CLASS so it keeps its grant.
+				session.mu.Lock()
+				session.capacityExhaustions++
+				session.mu.Unlock()
 				break
 			}
 			capacityWaits++
@@ -1614,10 +1750,25 @@ func (b *inferenceBroker) proxy(w http.ResponseWriter, r *http.Request, session 
 		return
 	}
 	if responseStatus >= 400 && responseStatus < 500 && responseStatus != http.StatusTooManyRequests {
+		// The platform rejected the harness's REQUEST before reserving any
+		// capacity: a body its schema refused, an oversized payload, a model
+		// the grant will not serve. No reservation was made and no provider was
+		// contacted, so nothing here is an upstream fault -- the only thing
+		// that went wrong is the bytes the harness sent.
+		//
+		// usageUnavailable is still incremented, unchanged, so the run fails
+		// exactly as before via requireCompleteV7Usage. The new counter is
+		// purely attributive.
 		session.mu.Lock()
 		session.usageUnavailable++
+		session.agentRequestRejections++
 		session.providerLatency += totalLatency
+		rejections, runID := session.agentRequestRejections, session.boundRunID
 		session.mu.Unlock()
+		log.Printf(
+			"run %s: platform rejected the harness's inference request with %d before any reservation -- AGENT fault, no provider was contacted (rejection #%d)",
+			runID, responseStatus, rejections,
+		)
 		writeError(w, responseStatus, "inference request denied")
 		return
 	}
@@ -1630,17 +1781,25 @@ func (b *inferenceBroker) proxy(w http.ResponseWriter, r *http.Request, session 
 		session.mu.Lock()
 		session.grantDenials++
 		session.providerLatency += totalLatency
-		denials := session.grantDenials
+		declineCode := platformDeclineCode(responseBody)
+		attribution := "platform fault: the lease is gone"
+		if declineIsAgentFault(declineCode) {
+			session.grantAgentDeclines++
+			attribution = "AGENT fault: the harness spent its own allowance"
+		}
+		denials, agentDenials := session.grantDenials, session.grantAgentDeclines
 		runID, deadline := session.boundRunID, session.ticketDeadline
 		session.mu.Unlock()
 		// The code, when the platform sends one, is the difference between "the
 		// validator lost this lease" and "the agent spent its allowance" -- two
-		// findings that call for opposite follow-up and were previously the
-		// same log line. Older platforms send no code and get the old wording.
+		// findings that call for opposite follow-up, and which until now were
+		// not merely the same log line but the same CLASSIFICATION. Older
+		// platforms send no code, get the old wording, and stay no-fault.
 		log.Printf(
-			"run %s: platform declined the inference grant (429: %s); ticket deadline held locally is %s (in %s) -- this is a lease denial, not a provider fault (denial #%d)",
-			runID, platformDeclineReason(platformDeclineCode(responseBody)),
-			deadline.UTC().Format(time.RFC3339), time.Until(deadline).Truncate(time.Second), denials,
+			"run %s: platform declined the inference grant (429: %s -- %s); ticket deadline held locally is %s (in %s) -- this is a lease denial, not a provider fault (denial #%d, agent-attributable #%d)",
+			runID, platformDeclineReason(declineCode), attribution,
+			deadline.UTC().Format(time.RFC3339), time.Until(deadline).Truncate(time.Second),
+			denials, agentDenials,
 		)
 		writeError(w, http.StatusBadGateway, "inference provider unavailable")
 		return
@@ -1732,7 +1891,10 @@ func (b *inferenceBroker) snapshot(id string) (relayHealthSnapshot, error) {
 		AccountingVersion: 2, Status: "ok", Requests: session.requests,
 		Successes: session.successes, InfrastructureFailures: session.failures,
 		GrantDenials: session.grantDenials, EmbeddingRetries: session.embeddingRetries,
-		CallerCancellations: session.callerCancels, UpstreamAttempts: session.upstreamAttempts,
+		GrantAgentDeclines:     session.grantAgentDeclines,
+		AgentRequestRejections: session.agentRequestRejections,
+		CapacityExhaustions:    session.capacityExhaustions,
+		CallerCancellations:    session.callerCancels, UpstreamAttempts: session.upstreamAttempts,
 		Provider: session.provider, ProfileRevision: session.profileRevision,
 		Model: session.model, UsageAvailable: session.usageAvailable,
 		UsageUnavailable: session.usageUnavailable, PromptTokens: session.promptTokens,
