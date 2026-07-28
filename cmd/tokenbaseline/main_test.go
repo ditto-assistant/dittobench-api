@@ -62,6 +62,22 @@ func TestV7StarterKitRevisionMustBeCanonicalGitSHA(t *testing.T) {
 	}
 }
 
+func TestV8QualityOnlyManifestUsesPinnedDataset(t *testing.T) {
+	manifest, err := calibrationManifest(protocol.BenchVersionV8, "62223b028acceb38ad0db98790402f1e2361dd18")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.BenchVersion != protocol.BenchVersionV8 || manifest.ScoringEnabled || len(manifest.Baselines) != 0 {
+		t.Fatalf("v8 quality-only manifest = %#v", manifest)
+	}
+	if manifest.DatasetKnownVector != "7c2945b233fb0dd104559a4a42b8375ecf19d921075d71d149b58f78e2c355b7" {
+		t.Fatalf("v8 known vector = %s", manifest.DatasetKnownVector)
+	}
+	if len(manifest.Calibration) != 60 {
+		t.Fatalf("v8 dataset pins = %d, want 60", len(manifest.Calibration))
+	}
+}
+
 func TestSortBaselinesUsesFullRouteIdentityBeforeRunSize(t *testing.T) {
 	baselines := []efficiency.Baseline{
 		{Provider: "groq", ProfileRevision: "b", Model: "m1", RunSize: "small"},

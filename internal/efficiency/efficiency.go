@@ -156,6 +156,7 @@ type SmokeRun struct {
 // accepts today.
 const (
 	ProvenanceReviewedMeasured     = "reviewed-measured"
+	ProvenanceReviewedContract     = "reviewed-contract"
 	ProvenanceDerivedSmokeVerified = "derived-smoke-validated"
 	ProvenanceDerivedUnvalidated   = "derived-unvalidated"
 )
@@ -200,8 +201,12 @@ var manifestJSON []byte
 //go:embed baselines_v7.json
 var manifestV7JSON []byte
 
+//go:embed baselines_v8.json
+var manifestV8JSON []byte
+
 var productionManifest = mustManifest(manifestJSON, protocol.BenchVersionV5)
 var productionV7Manifest = mustManifest(manifestV7JSON, protocol.BenchVersionV7)
+var productionV8Manifest = mustManifest(manifestV8JSON, protocol.BenchVersionV8)
 
 func mustManifest(body []byte, benchVersion int) Manifest {
 	var manifest Manifest
@@ -232,6 +237,17 @@ func V7ManifestSnapshot() Manifest {
 	return copy
 }
 
+func V8ManifestSnapshot() Manifest {
+	copy := productionV8Manifest
+	copy.Calibration = append([]CalibrationDataset(nil), productionV8Manifest.Calibration...)
+	copy.Baselines = append([]Baseline(nil), productionV8Manifest.Baselines...)
+	if productionV8Manifest.Embedding != nil {
+		embedding := *productionV8Manifest.Embedding
+		copy.Embedding = &embedding
+	}
+	return copy
+}
+
 // ProductionReady is true only after reviewed baselines exist for every run
 // size on both certified provider profiles. Until then v5 remains hidden from
 // capability negotiation and any direct v5 report fails neutral.
@@ -252,9 +268,37 @@ func ProductionReadyForVersion(benchVersion int) bool {
 		return ProductionReady()
 	case protocol.BenchVersionV7:
 		return ReadyForV7QualityOnly(productionV7Manifest)
+	case protocol.BenchVersionV8:
+		return ReadyForV8QualityOnly(productionV8Manifest)
 	default:
 		return false
 	}
+}
+
+// V8Readiness carries the immutable dataset and route identity for the v8
+// quality-only contract. No token baseline is implied or consumed.
+func V8Readiness() CalibrationReadiness {
+	readiness := CalibrationReadiness{SupportedRoutes: []CalibrationRouteIdentity{}}
+	if !ReadyForV8QualityOnly(productionV8Manifest) {
+		return readiness
+	}
+	readiness.SupportedRoutes = []CalibrationRouteIdentity{{
+		Provider: v7AggregateProvider, ProfileRevision: v7AggregateProfile,
+		Model: llm.V7HarnessModel,
+	}}
+	sum := sha256.Sum256(manifestV8JSON)
+	readiness.ManifestSHA256 = fmt.Sprintf("%x", sum[:])
+	readiness.Provenance = ProvenanceReviewedContract
+	return readiness
+}
+
+func ValidV8Readiness(readiness CalibrationReadiness) bool {
+	return canonicalSHA256(readiness.ManifestSHA256) &&
+		len(readiness.SupportedRoutes) == 1 &&
+		readiness.SupportedRoutes[0] == (CalibrationRouteIdentity{
+			Provider: v7AggregateProvider, ProfileRevision: v7AggregateProfile,
+			Model: llm.V7HarnessModel,
+		})
 }
 
 // V7CalibrationReadiness returns only identities proven by the embedded,
@@ -354,6 +398,12 @@ const (
 	v7AllowancePolicy          = "starter_raw_p90_floor_75_percent_v1"
 )
 
+const (
+	v8StarterKitRevision       = v7StarterKitRevision
+	v8DatasetKnownVector       = "7c2945b233fb0dd104559a4a42b8375ecf19d921075d71d149b58f78e2c355b7"
+	v8CalibrationDatasetDigest = "c430a9a608080199e397590bdf0ab7e6c618ab8d9d31978a849aa6a739651175"
+)
+
 // v7ContractShapeValid validates every element of the reviewed aggregate
 // GPT-OSS v7 contract EXCEPT the scoring_enabled flag: the locked harness model
 // identity, the aggregate route + hosted embedding profile, the starter-kit
@@ -428,6 +478,25 @@ func ReadyForV7Production(manifest Manifest) bool {
 // behind ProductionReadyForVersion(V7) and the v7 capability readiness.
 func ReadyForV7QualityOnly(manifest Manifest) bool {
 	return !manifest.ScoringEnabled && v7ContractShapeValid(manifest)
+}
+
+// ReadyForV8QualityOnly is intentionally smaller than v7 calibration
+// readiness. V8 keeps the exact v7 provider/model/embedding route and applies
+// no absolute token transform; its manifest content-binds only the new dataset
+// bytes, the 60 deterministic audit pins, starter runtime, and route identity.
+func ReadyForV8QualityOnly(manifest Manifest) bool {
+	return !manifest.ScoringEnabled && manifest.Derived == nil &&
+		manifest.BenchVersion == protocol.BenchVersionV8 &&
+		manifest.StarterKitRevision == v8StarterKitRevision &&
+		manifest.DatasetKnownVector == v8DatasetKnownVector &&
+		len(manifest.Baselines) == 0 &&
+		calibrationDatasetDigest(manifest.Calibration) == v8CalibrationDatasetDigest &&
+		validV7CalibrationDatasets(manifest.Calibration) &&
+		manifest.Embedding != nil && *manifest.Embedding == (EmbeddingContract{
+		Provider: v7EmbeddingProvider, Model: v7EmbeddingModel,
+		Profile: v7EmbeddingProfile, Dimensions: v7EmbeddingDimensions,
+		CatalogSHA256: v7EmbeddingCatalogSHA256,
+	})
 }
 
 func canonicalSHA256(value string) bool {

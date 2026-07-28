@@ -356,6 +356,7 @@ type capabilitiesResponse struct {
 	FullRunCapacity        int                             `json:"full_run_capacity"`
 	MemoryPhaseCapacity    int                             `json:"memory_phase_capacity"`
 	V7Calibration          efficiency.CalibrationReadiness `json:"v7_calibration"`
+	V8Readiness            efficiency.CalibrationReadiness `json:"v8_readiness"`
 	// SourceRevisionOrigin is "binary" when source_revision was compiled into
 	// the running binary and "env" when it was only asserted by the process
 	// environment. Additive: an older scorer omits it, which a consumer should
@@ -394,6 +395,13 @@ func supportedBenchVersions() []int {
 		efficiency.ValidV7CalibrationReadiness(efficiency.V7CalibrationReadiness()) {
 		versions = append(versions, protocol.BenchVersionV7)
 	}
+	// V8 is likewise capability-only. The platform/backroom rollout target is
+	// the sole activation control; merging a technically-ready scorer does not
+	// dispatch one v8 ticket.
+	if efficiency.ProductionReadyForVersion(protocol.BenchVersionV8) &&
+		efficiency.ValidV8Readiness(efficiency.V8Readiness()) {
+		versions = append(versions, protocol.BenchVersionV8)
+	}
 	return versions
 }
 
@@ -418,6 +426,7 @@ func (s *server) handleCapabilities(w http.ResponseWriter, _ *http.Request) {
 		FullRunCapacity:        maxConcurrentRuns,
 		MemoryPhaseCapacity:    maxConcurrentMemoryPhases,
 		V7Calibration:          efficiency.V7CalibrationReadiness(),
+		V8Readiness:            efficiency.V8Readiness(),
 		SourceRevisionOrigin:   s.sourceRevisionOrigin,
 		SourceRevisionMismatch: s.sourceRevisionMismatch,
 		SoftwareVersionOrigin:  s.softwareVersionOrigin,
@@ -970,14 +979,29 @@ func (s *server) handleScoreRequest(w http.ResponseWriter, r *http.Request, requ
 func requestedBenchVersion(requested int, requireExplicit bool) (int, string) {
 	if requested == 0 {
 		if requireExplicit {
-			return 0, "bench_version is required (supported: 2, 3, 4, 5, 6, 7)"
+			return 0, "bench_version is required (supported: 2, 3, 4, 5, 6, 7, 8)"
 		}
 		return 2, ""
 	}
 	if !protocol.SupportedBenchVersion(requested) {
-		return 0, "unsupported bench_version (supported: 2, 3, 4, 5, 6, 7)"
+		return 0, "unsupported bench_version (supported: 2, 3, 4, 5, 6, 7, 8)"
 	}
 	return requested, ""
+}
+
+func toolPrerequisiteWave(toolCases []protocol.ToolCase) (protocol.SeedRequest, error) {
+	wave := protocol.SeedRequest{UserID: "miner"}
+	seen := make(map[string]bool)
+	for _, tc := range toolCases {
+		for _, pair := range tc.PrerequisitePairs {
+			if pair.PairID == "" || seen[pair.PairID] {
+				return protocol.SeedRequest{}, fmt.Errorf("invalid or duplicate tool prerequisite pair")
+			}
+			seen[pair.PairID] = true
+			wave.Pairs = append(wave.Pairs, pair)
+		}
+	}
+	return wave, nil
 }
 
 // submitDirect scores a harness the miner is already running, synchronously.
@@ -1481,6 +1505,24 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		endEmbeddingPhase = endMemoryPhase
 		defer endEmbeddingPhase()
 	}
+	// V8 tool routing is intentionally derived from fresh, seed-bound state.
+	// Load only the validator-internal prerequisite facts before tool execution;
+	// they are absent from v7 artifacts, so the frozen v7 ordering and bytes are
+	// untouched. Any seed failure is validator infrastructure and fails closed.
+	if req.BenchVersion >= protocol.BenchVersionV8 {
+		prerequisites, err := toolPrerequisiteWave(toolCases)
+		if err != nil {
+			s.store.Fail(runID, "invalid v8 tool prerequisite dataset")
+			return
+		}
+		if len(prerequisites.Pairs) > 0 {
+			s.store.SetStage(runID, store.StatusSeeding, 0, total)
+			if _, err := runner.SeedForVersion(ctx, harnessURL, prerequisites, req.BenchVersion); err != nil {
+				s.failV7Seeding(runID, "seeding v8 tool routing state failed: ", err)
+				return
+			}
+		}
+	}
 	effectiveCaseConcurrency := caseConcurrencyForVersion(req.BenchVersion)
 
 	// 4. tool cases — independent of the memory haystack and of each other, so
@@ -1785,7 +1827,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 //
 //   - v5/v6: the absolute p90 token-waste transform (efficiency.Apply) may
 //     discount the composite, exactly as historically.
-//   - v7 (quality-only contract): the composite is NEVER moved by token
+//   - v7+ (quality-only contract): the composite is NEVER moved by token
 //     usage. A neutral TokenEfficiency record still lands in the report so
 //     the audited observed usage is first-class alongside the quality score
 //     (details.token_usage carries the full metered block independently).

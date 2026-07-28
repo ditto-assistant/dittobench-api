@@ -77,7 +77,7 @@ func TestVersionedScoreRequiresSupportedBenchVersion(t *testing.T) {
 	}{
 		{name: "omitted", body: `{` + base + `}`, want: "bench_version is required"},
 		{name: "old v1", body: `{"bench_version":1,` + base + `}`, want: "unsupported bench_version"},
-		{name: "future", body: `{"bench_version":8,` + base + `}`, want: "unsupported bench_version"},
+		{name: "future", body: `{"bench_version":9,` + base + `}`, want: "unsupported bench_version"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rr := httptest.NewRecorder()
@@ -131,6 +131,16 @@ func TestBenchmarkV7IntrinsicallyRequiresTicketInference(t *testing.T) {
 	if rr.Code != http.StatusServiceUnavailable ||
 		!strings.Contains(rr.Body.String(), "ticket inference session is required") {
 		t.Fatalf("expected intrinsic v7 ticket inference 503, got %d %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestBenchmarkV8IntrinsicallyRequiresTicketInference(t *testing.T) {
+	s := newScoreTestServer()
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v2/score", strings.NewReader(`{"bench_version":8}`))
+	s.handleVersionedScore(rr, req)
+	if rr.Code != http.StatusServiceUnavailable || !strings.Contains(rr.Body.String(), "ticket inference session is required") {
+		t.Fatalf("expected intrinsic v8 ticket inference 503, got %d %s", rr.Code, rr.Body.String())
 	}
 }
 

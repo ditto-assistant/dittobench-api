@@ -75,7 +75,8 @@ func main() {
 		printManifest(validated)
 		return
 	}
-	if *benchVersion != protocol.BenchVersionV5 && *benchVersion != protocol.BenchVersionV7 {
+	if *benchVersion != protocol.BenchVersionV5 && *benchVersion != protocol.BenchVersionV7 &&
+		*benchVersion != protocol.BenchVersionV8 {
 		fatalf("unsupported calibration bench version %d", *benchVersion)
 	}
 	manifest, err := calibrationManifest(*benchVersion, *starterKitRevision)
@@ -116,8 +117,8 @@ func main() {
 			usage.Provider == "" || usage.ProfileRevision == "" || usage.Model == "" {
 			fatalf("%s: report is not a complete v%d proxy-metered run", path, *benchVersion)
 		}
-		if *benchVersion == protocol.BenchVersionV7 && usage.Model != llm.V7HarnessModel {
-			fatalf("%s: report does not match the v7 GPT-OSS contract", path)
+		if *benchVersion >= protocol.BenchVersionV7 && usage.Model != llm.V7HarnessModel {
+			fatalf("%s: report does not match the v7+ GPT-OSS contract", path)
 		}
 		key := datasetKey(report.Details.RunSize, report.Seed, report.Details.DatasetSHA256)
 		if _, ok := expected[key]; !ok {
@@ -162,7 +163,7 @@ func main() {
 			TotalTokens: budget.TotalTokens, Samples: len(reports), Aggregation: "nearest_rank_p90",
 			StarterKitRevision: manifest.StarterKitRevision,
 		}
-		if *benchVersion == protocol.BenchVersionV7 {
+		if *benchVersion >= protocol.BenchVersionV7 {
 			baseline.RawReferencePromptTokens = budget.PromptTokens
 			baseline.RawReferenceCompletionTokens = budget.CompletionTokens
 			baseline.RawReferenceTotalTokens = budget.TotalTokens
@@ -255,7 +256,7 @@ func calibrationManifest(benchVersion int, starterKitRevision string) (efficienc
 		return manifest, nil
 	}
 	if !canonicalGitRevision(starterKitRevision) {
-		return manifest, fmt.Errorf("v7 requires a canonical 40-character lowercase starter-kit git revision")
+		return manifest, fmt.Errorf("v7+ requires a canonical 40-character lowercase starter-kit git revision")
 	}
 	manifest.BenchVersion = benchVersion
 	manifest.StarterKitRevision = starterKitRevision
