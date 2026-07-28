@@ -15,6 +15,8 @@ import (
 
 type diagnosticSandbox struct {
 	diagnostics sandbox.RuntimeDiagnostics
+	logs        string
+	logsAfter   bool // true once Stop ran, proving Logs was NOT read before teardown
 	stopped     bool
 }
 
@@ -31,6 +33,12 @@ func (s *diagnosticSandbox) Stop(context.Context, *sandbox.Handle) {
 }
 func (s *diagnosticSandbox) Diagnostics(context.Context, *sandbox.Handle) sandbox.RuntimeDiagnostics {
 	return s.diagnostics
+}
+func (s *diagnosticSandbox) Logs(context.Context, *sandbox.Handle) string {
+	if s.stopped {
+		s.logsAfter = true
+	}
+	return s.logs
 }
 
 func TestFullRunConcurrencyIsOnePerScorer(t *testing.T) {

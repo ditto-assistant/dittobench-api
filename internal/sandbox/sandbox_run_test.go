@@ -242,3 +242,100 @@ func TestCleanupStaleRemovesOnlyOwnedExplicitResources(t *testing.T) {
 		t.Fatalf("expected five explicit docker calls, got %v", calls)
 	}
 }
+
+// --- container log capture (benchmark failure evidence) ---------------------
+
+func TestLogsReturnsBoundedTailOfContainerOutput(t *testing.T) {
+	d := NewLocalDocker()
+	var got []string
+	d.dockerCommand = func(_ context.Context, args ...string) ([]byte, error) {
+		got = args
+		return []byte(strings.Repeat("a", 10_000) + "BOOT FAILED"), nil
+	}
+
+	out := d.Logs(context.Background(), &Handle{ContainerID: "c1"})
+	if !strings.HasSuffix(out, "BOOT FAILED") {
+		t.Fatalf("tail did not keep the most recent output: %q", out[max(0, len(out)-40):])
+	}
+	// "…" + ContainerLogTailBytes bytes; the marker is multi-byte, so bound on
+	// the payload rather than on the whole string.
+	if len(out) > ContainerLogTailBytes+len("…") {
+		t.Fatalf("log tail is unbounded: %d bytes", len(out))
+	}
+	if got[0] != "logs" || !hasFlagPair(got, "--tail", containerLogLines) {
+		t.Fatalf("logs were not pre-bounded at the daemon: %v", got)
+	}
+}
+
+func TestLogsReturnsEmptyWhenTheContainerProducedNothing(t *testing.T) {
+	d := NewLocalDocker()
+	d.dockerCommand = func(_ context.Context, _ ...string) ([]byte, error) {
+		return []byte("   \n\n "), nil
+	}
+	if out := d.Logs(context.Background(), &Handle{ContainerID: "c1"}); out != "" {
+		t.Fatalf("whitespace-only output must read as no evidence, got %q", out)
+	}
+}
+
+func TestLogsReturnsEmptyWhenTheRuntimeCannotBeQueried(t *testing.T) {
+	d := NewLocalDocker()
+	d.dockerCommand = func(_ context.Context, _ ...string) ([]byte, error) {
+		return nil, errors.New("no such container")
+	}
+	if out := d.Logs(context.Background(), &Handle{ContainerID: "gone"}); out != "" {
+		t.Fatalf("unqueryable runtime must yield no evidence, got %q", out)
+	}
+	if out := d.Logs(context.Background(), nil); out != "" {
+		t.Fatalf("nil handle must yield no evidence, got %q", out)
+	}
+}
+
+// A harness that dumps its own environment on a boot failure must not carry an
+// injected credential back out through the failure envelope.
+func TestLogsRedactInjectedCredentialsAndPresignedQueries(t *testing.T) {
+	d := NewLocalDocker()
+	d.dockerCommand = func(_ context.Context, _ ...string) ([]byte, error) {
+		return []byte(
+			"env: SOME_API_KEY=super-secret-value-1234 " +
+				"fetch https://storage.example/artifact.tar?X-Goog-Signature=abcdef failed",
+		), nil
+	}
+	handle := &Handle{
+		ContainerID: "c1",
+		injectedSecrets: credentialEnvValues(map[string]string{
+			"SOME_API_KEY": "super-secret-value-1234",
+		}),
+	}
+
+	out := d.Logs(context.Background(), handle)
+	if strings.Contains(out, "super-secret-value-1234") {
+		t.Fatalf("injected credential survived redaction: %q", out)
+	}
+	if strings.Contains(out, "X-Goog-Signature") {
+		t.Fatalf("presigned query string survived redaction: %q", out)
+	}
+	// Redaction must not shred the diagnostic content around the secret.
+	if !strings.Contains(out, "https://storage.example/artifact.tar?<redacted>") ||
+		!strings.Contains(out, "failed") {
+		t.Fatalf("redaction destroyed diagnostic context: %q", out)
+	}
+}
+
+// The v7 lock injects the fixed non-secret placeholder "ticket" under three
+// credential-shaped keys. Masking it would replace a common word throughout
+// every harness log for no security benefit.
+func TestCredentialEnvValuesIgnoresShortPlaceholdersAndNonCredentialKeys(t *testing.T) {
+	got := credentialEnvValues(map[string]string{
+		"CHUTES_API_KEY":      "ticket",
+		"OPENAI_API_KEY":      "ticket",
+		"CHUTES_BASE_URL":     "http://host.docker.internal:11436/v1/inference",
+		"DITTOBENCH_MODEL":    "some/long-model-identifier",
+		"DITTOBENCH_DB":       "/tmp/dittobench.db",
+		"REAL_SECRET_TOKEN":   "0123456789abcdef",
+		"ANOTHER_PASSWORD_XX": "0123456789abcdef-longer",
+	})
+	want := []string{"0123456789abcdef-longer", "0123456789abcdef"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("credential values = %v, want %v (longest first)", got, want)
+	}
+}
