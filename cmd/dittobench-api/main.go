@@ -1825,6 +1825,13 @@ func (s *server) finishSandboxRun(runID string, handle *sandbox.Handle) {
 	job, ok := s.store.Get(runID)
 	if ok && job.Status == store.StatusFailed {
 		diagnostics := s.sandbox.Diagnostics(context.Background(), handle)
+		// Read the container's own output BEFORE the Stop below removes it.
+		// `docker logs` cannot read a removed container, so every prior failed
+		// benchmark run destroyed this evidence on the way out. It is the whole
+		// reason a submission could die 12 seconds into a 90-minute lease across
+		// four validators and leave neither the miner nor an operator anything to
+		// read but "exit_code=1 oom_killed=false".
+		logTail := s.sandbox.Logs(context.Background(), handle)
 		failure := &store.Failure{
 			Kind:      "sandbox_failure",
 			Code:      "sandbox_runtime",
@@ -1869,6 +1876,22 @@ func (s *server) finishSandboxRun(runID string, handle *sandbox.Handle) {
 				"run %s preserving scored-path classification kind=%s code=%s retryable=%t",
 				runID, prior.Kind, prior.Code, prior.Retryable,
 			)
+		}
+		// Attached last so it survives the prior-verdict merge above regardless of
+		// what the scored path put in its own diagnostics map, and so it rides
+		// EVERY failed sandbox run -- pre-health exits, mid-run crashes, and
+		// classified platform faults alike.
+		//
+		// It goes in the structured envelope rather than into `message`: the
+		// message becomes ditto-subnet's DittobenchError text, which
+		// errors.failure_detail truncates to 200 chars on its way to the ticket.
+		// Prepending 2 KB of log there would push the exit code and code name off
+		// the wire and turn the one machine-groupable field back into prose. The
+		// envelope has no such cap and is what an operator reads from
+		// GET /v1/runs/{id}.
+		if logTail != "" {
+			failure.Diagnostics["container_log_tail"] = logTail
+			log.Printf("run %s container log tail (%d bytes):\n%s", runID, len(logTail), logTail)
 		}
 		s.store.FailWith(runID, message, failure)
 	}

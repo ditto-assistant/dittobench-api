@@ -32,6 +32,8 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -59,6 +61,13 @@ type Sandbox interface {
 	// Diagnostics captures sanitized container resource evidence before Stop.
 	// It never returns miner output, environment variables, paths, or source.
 	Diagnostics(ctx context.Context, h *Handle) RuntimeDiagnostics
+	// Logs returns a bounded, redacted tail of the container's merged
+	// stdout+stderr, captured before Stop removes the container. Unlike
+	// Diagnostics this DOES return miner output -- that is the point: it is the
+	// harness's own boot failure, and it is the only evidence that explains why
+	// a container exited before health. Empty when the container produced
+	// nothing or the runtime could not be queried.
+	Logs(ctx context.Context, h *Handle) string
 }
 
 // Source identifies a submission to build. Exactly one of GitURL or TarballURL
@@ -92,6 +101,12 @@ type Handle struct {
 	// Stop removes it after removing the sole untrusted member.
 	NetworkName string
 	SourceIP    string
+	// injectedSecrets holds the credential-shaped env VALUES this run injected
+	// into the container. Logs masks them, so no value the validator put into
+	// the sandbox can be echoed back out of it by the harness's own output --
+	// deliberately or accidentally. Unexported: it is redaction state, not part
+	// of the handle's contract.
+	injectedSecrets []string
 }
 
 // RuntimeDiagnostics is bounded, source-free evidence captured before teardown.
@@ -573,6 +588,102 @@ df -Pk /tmp 2>/dev/null | tail -n 1 || true
 	return diagnostics
 }
 
+// ContainerLogTailBytes bounds the container log tail attached to a failed run.
+// It mirrors ditto-screener's _LOG_TAIL_BYTES so a screening rejection and a
+// benchmark failure hand an operator the same amount of evidence, and so the
+// two surfaces stay comparable when the same image fails on both.
+const ContainerLogTailBytes = 2000
+
+// containerLogLines pre-bounds what Docker is asked to return. The screener
+// reads the whole log and byte-tails it in Python; that is safe there because a
+// screening container is short-lived, but a benchmark harness runs for up to 90
+// minutes and can emit gigabytes. Asking Docker for the last N lines keeps the
+// unbounded case out of this process's memory entirely; ContainerLogTailBytes
+// then applies the same final bound the screener does.
+const containerLogLines = "500"
+
+// Logs returns a bounded, redacted tail of the container's merged stdout and
+// stderr. It must be called before Stop: `docker logs` cannot read a removed
+// container, which is exactly why the benchmark path used to report
+// "harness exited before health: exit_code=1" and nothing else -- the evidence
+// existed, and teardown destroyed it before anything read it.
+//
+// Returns "" when the container produced no output or the runtime could not be
+// queried, so a caller can distinguish "no evidence" from "empty evidence"
+// without inventing a placeholder (the screener makes the same distinction by
+// leaving its detail untouched when no section had content).
+func (d *LocalDocker) Logs(ctx context.Context, h *Handle) string {
+	if h == nil || h.ContainerID == "" {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	out, err := d.dockerOutput(ctx, "logs", "--tail", containerLogLines, h.ContainerID)
+	text := strings.TrimSpace(string(out))
+	if err != nil && text == "" {
+		return ""
+	}
+	if text == "" {
+		return ""
+	}
+	return tail(redactContainerLog(text, h.injectedSecrets), ContainerLogTailBytes)
+}
+
+// urlQueryPattern matches the query string of an http(s) URL. A presigned
+// artifact URL is the one credential that can plausibly reach a harness's own
+// output (it is handed to nothing in the sandbox today, but the log tail is a
+// new egress path and it should not be the thing that makes that change).
+var urlQueryPattern = regexp.MustCompile(`(https?://[^\s"'<>]*)\?[^\s"'<>]*`)
+
+// redactContainerLog masks values the validator injected before miner output is
+// stored or surfaced. The rule is deliberately mechanical: anything this run put
+// into the container's environment under a credential-shaped name cannot come
+// back out through the container's logs.
+//
+// Under benchmark v7 this is currently a no-op by construction -- every
+// credential-shaped value harnessSandboxEnv injects is the fixed non-secret
+// placeholder "ticket", which is below secretValueFloor and is not masked, so no
+// useful log text is destroyed. It exists so that if a real credential is ever
+// injected, it is redacted on the day it is added rather than on the day someone
+// notices it in a miner-visible envelope.
+func redactContainerLog(text string, secrets []string) string {
+	for _, secret := range secrets {
+		text = strings.ReplaceAll(text, secret, "<redacted>")
+	}
+	return urlQueryPattern.ReplaceAllString(text, "${1}?<redacted>")
+}
+
+// secretValueFloor is the shortest injected value worth masking. Short values
+// ("ticket", "relay", "1", "true") are placeholders and common English
+// substrings; masking them would shred the log without protecting anything.
+const secretValueFloor = 8
+
+// credentialEnvValues selects the injected values Logs will mask: those under a
+// key naming a credential, long enough to be one.
+func credentialEnvValues(env map[string]string) []string {
+	var values []string
+	for key, value := range env {
+		if len(value) < secretValueFloor || !credentialEnvKey(key) {
+			continue
+		}
+		values = append(values, value)
+	}
+	// Longest first, so masking a short secret cannot leave a fragment of a
+	// longer one that contains it.
+	sort.Slice(values, func(i, j int) bool { return len(values[i]) > len(values[j]) })
+	return values
+}
+
+func credentialEnvKey(name string) bool {
+	upper := strings.ToUpper(name)
+	for _, marker := range [...]string{"KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL"} {
+		if strings.Contains(upper, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 func parseRuntimeMetrics(diagnostics *RuntimeDiagnostics, output string) {
 	section := ""
 	for _, raw := range strings.Split(output, "\n") {
@@ -667,11 +778,12 @@ func (d *LocalDocker) Run(ctx context.Context, image string, env map[string]stri
 		return nil, err
 	}
 	return &Handle{
-		ContainerID: containerID,
-		BaseURL:     "http://127.0.0.1:" + hostPort,
-		ImageRef:    image,
-		NetworkName: network,
-		SourceIP:    sourceIP,
+		ContainerID:     containerID,
+		BaseURL:         "http://127.0.0.1:" + hostPort,
+		ImageRef:        image,
+		NetworkName:     network,
+		SourceIP:        sourceIP,
+		injectedSecrets: credentialEnvValues(env),
 	}, nil
 }
 
