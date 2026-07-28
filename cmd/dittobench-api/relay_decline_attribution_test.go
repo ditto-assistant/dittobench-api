@@ -67,8 +67,8 @@ func TestFinalizeFailureAttributionContract(t *testing.T) {
 		},
 		{
 			name: "lane saturated", err: fmt.Errorf("%w: 1 inference call(s) spent their whole backpressure budget", errInferenceLaneSaturated),
-			kind: "validator_infrastructure", code: "inference_lane_saturated", retryable: true,
-			why: "DELIBERATELY still no-fault: a miner cannot provision the lane",
+			kind: "validator_infrastructure", code: "model_relay_unavailable", retryable: true,
+			why: "DELIBERATELY still no-fault, and deliberately NOT a new code: a new infrastructure code is scoring_error on every validator that predates it",
 		},
 		{
 			name: "agent spent its allowance", err: fmt.Errorf("%w: the harness exhausted its own inference allowance 3 time(s)", errAgentInferenceDeclined),
@@ -274,7 +274,15 @@ func TestLaneSaturationStaysNoFault(t *testing.T) {
 	if failure.Kind != "validator_infrastructure" || !failure.Retryable {
 		t.Fatalf("a saturated platform lane was charged to the miner: %+v", failure)
 	}
-	if failure.Code != "inference_lane_saturated" {
+	// The code must stay one every DEPLOYED validator already allowlists.
+	// ditto-subnet maps an unrecognised infrastructure code to scoring_error,
+	// so a new code here would bill miners for a saturated platform rail on the
+	// whole fleet until it caught up -- the bug this change exists to stop,
+	// arriving through the rollout instead of through the classifier.
+	if failure.Code != "model_relay_unavailable" {
+		t.Fatalf("saturation shipped a code old validators charge to the miner: %+v", failure)
+	}
+	if failure.Diagnostics["relay_cause"] != "inference_lane_saturated" {
 		t.Fatalf("saturation is indistinguishable from an unreachable relay: %+v", failure)
 	}
 }
@@ -569,7 +577,63 @@ func TestCapacityExhaustionIsNamedButKeepsItsGrantEndToEnd(t *testing.T) {
 	if failure.Kind != "validator_infrastructure" || !failure.Retryable {
 		t.Fatalf("a miner was billed for a saturated platform rail: %+v", failure)
 	}
-	if failure.Code != "inference_lane_saturated" {
+	if failure.Code != "model_relay_unavailable" {
+		t.Fatalf("saturation shipped a code old validators charge to the miner: %+v", failure)
+	}
+	if failure.Diagnostics["relay_cause"] != "inference_lane_saturated" {
 		t.Fatalf("saturation is still indistinguishable from an unreachable relay: %+v", failure)
+	}
+}
+
+// The rollout invariant, which is a different property from the classification
+// invariant and is easy to satisfy the first and break the second.
+//
+// ditto-subnet's _sandbox_infrastructure_failure_code returns None for any code
+// outside its allowlist, and None becomes fail_job("scoring_error"). So the
+// no-fault class is only no-fault on validators that recognise the specific
+// code: introducing a NEW infrastructure code silently charges miners on every
+// validator that predates the matching release, for as long as the fleet lags.
+// It lags by design.
+//
+// The two directions are therefore NOT symmetric, and this pins the asymmetry:
+//
+//   - New AGENT codes are skew-safe. An old validator sees
+//     sandbox_failure/retryable=false and its terminal default is already the
+//     intended outcome, so it needs to know nothing about the code.
+//   - New INFRASTRUCTURE codes are not. Every no-fault failure this package can
+//     produce must use a code already deployed everywhere.
+//
+// `model_relay_unavailable` has been in that allowlist since the code existed.
+// If a future change wants a genuinely new no-fault code, the validator side
+// has to ship and the fleet has to roll FIRST, and this test is where that
+// conversation starts.
+func TestNoFaultFailuresOnlyUseCodesTheDeployedFleetAllowlists(t *testing.T) {
+	// ditto/validator/dittobench.py::_SANDBOX_INFRASTRUCTURE_CODES as deployed
+	// on the current fleet (v0.36.0 / v0.34.1).
+	deployed := map[string]bool{
+		"sandbox_oom":                    true,
+		"sandbox_tmpfs_exhausted":        true,
+		"sandbox_network_unavailable":    true,
+		"model_relay_unavailable":        true,
+		"embedding_provider_unavailable": true,
+	}
+	for _, err := range []error{
+		nil,
+		errors.New("relay unreachable"),
+		errors.New("benchmark v7 requires complete provider token usage"),
+		errors.New("relay restarted during benchmark"),
+		fmt.Errorf("%w: lane full", errInferenceLaneSaturated),
+		fmt.Errorf("%w: allowance spent", errAgentInferenceDeclined),
+	} {
+		failure := relayFinalizeFailure(err)
+		if failure.Kind != "validator_infrastructure" {
+			continue // agent-class failures are skew-safe by construction
+		}
+		if !deployed[failure.Code] {
+			t.Fatalf(
+				"no-fault code %q is not in the deployed fleet's allowlist; every validator that predates it would charge the miner instead",
+				failure.Code,
+			)
+		}
 	}
 }

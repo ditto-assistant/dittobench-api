@@ -558,16 +558,37 @@ func relayFinalizeFailure(err error) *store.Failure {
 			Retryable: false,
 		}
 	case errors.Is(err, errInferenceLaneSaturated):
-		// A distinct code so a saturated rail is legible to an operator without
-		// reading logs, but the SAME no-fault class. Lane saturation is
-		// genuinely ambiguous -- an under-provisioned platform, or one
-		// embed-heavy ticket allowed to crowd out its neighbours -- and a miner
-		// can neither provision the lane nor see its contention. Charging this
-		// one to the agent would be the mirror image of the bug being fixed.
+		// Saturation is distinguished in DIAGNOSTICS, not in the code, and the
+		// asymmetry is deliberate.
+		//
+		// The two new classifications are not equally safe to put on the wire.
+		// The agent one is: a validator that has never heard of
+		// `inference_allowance_exhausted` sees sandbox_failure/retryable=false,
+		// which its terminal default already handles correctly. Old validators
+		// do the right thing with it by construction.
+		//
+		// The no-fault direction is NOT. ditto-subnet's
+		// `_sandbox_infrastructure_failure_code` returns None for any code
+		// outside its allowlist, and None becomes fail_job("scoring_error") --
+		// so shipping a NEW infrastructure code charges a miner on every
+		// validator that predates the matching release. The fleet lags scorer
+		// releases by design, which means a new code here would bill miners for
+		// a saturated platform rail for as long as the skew lasts: precisely
+		// the mistake this whole change exists to stop, arriving through the
+		// rollout instead of through the classifier.
+		//
+		// `model_relay_unavailable` is already in every deployed validator's
+		// allowlist, so this stays no-fault on EVERY fleet version, including
+		// ones that will never be upgraded. Diagnostics carry the distinction
+		// for the operator; that field is not consulted by the subnet's
+		// classifier, so it cannot change the class anywhere.
 		return &store.Failure{
 			Kind:      "validator_infrastructure",
-			Code:      "inference_lane_saturated",
+			Code:      "model_relay_unavailable",
 			Retryable: true,
+			Diagnostics: map[string]any{
+				"relay_cause": "inference_lane_saturated",
+			},
 		}
 	default:
 		return &store.Failure{
