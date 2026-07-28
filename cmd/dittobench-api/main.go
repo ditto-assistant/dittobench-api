@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -694,6 +695,45 @@ func sandboxStartInfraFailure(err error) *store.Failure {
 	}
 }
 
+// screenedImageInfraFailure classifies a build-path error that is the
+// validator's OWN fault for a reason the miner cannot influence: it could not
+// ACQUIRE the screened image the platform produced and attested. The image is
+// platform output, fetched over the platform's own URL onto this validator's
+// disk, and this happens strictly before `docker run` -- the harness has not
+// executed a single instruction. There is no path by which an artifact can
+// steer a run into this bin.
+//
+// That last property is the safety argument, and it is what distinguishes this
+// from the failure mode that caused tonight's fleet starvation. The mnemox
+// family looped because a RUNNING artifact reliably triggered a no-fault
+// classification: its own ~60-minute hang minted the grant, raised the attempt
+// cap, and re-leased itself, reaching 10 attempts on a budget of 2 with zero
+// scores. A self-sustaining loop needs the artifact's behaviour in the loop.
+// Here the artifact is not running and its bytes have not been read.
+//
+// The complementary half of the guarantee lives in sandbox.loadScreenedImage:
+// only transient-by-construction acquisition failures carry
+// ErrScreenedImageUnavailable. Every DETERMINISTIC failure -- sha256/size/id
+// mismatch, malformed URL, 4xx other than 429, archive or attestation
+// rejection, and `docker image load` refusing a verified archive -- is left on
+// the terminal default on purpose, because it will fail identically forever and
+// a no-fault verdict on it would re-lease a permanently broken image without
+// bound.
+//
+// Returns nil for everything else. The generic
+// sandbox_failure/sandbox_runtime/retryable=false default is deliberately NOT
+// touched: a merely-unrecognised failure must never become no-fault.
+func screenedImageInfraFailure(err error) *store.Failure {
+	if err == nil || !errors.Is(err, sandbox.ErrScreenedImageUnavailable) {
+		return nil
+	}
+	return &store.Failure{
+		Kind:      "validator_infrastructure",
+		Code:      "screened_image_unavailable",
+		Retryable: true,
+	}
+}
+
 // submitResponse is returned by the direct (synchronous) path.
 type submitResponse struct {
 	RunID        string  `json:"run_id"`
@@ -1023,7 +1063,7 @@ func (s *server) runSandboxJob(ctx context.Context, runID string, req submitRequ
 	s.store.SetStatus(runID, store.StatusBuilding)
 	image, buildLog, fingerprint, err := s.sandbox.Build(ctx, sourceFromReq(req))
 	if err != nil {
-		s.store.Fail(runID, "build failed: "+err.Error())
+		s.store.FailWith(runID, "build failed: "+err.Error(), screenedImageInfraFailure(err))
 		log.Printf("sandbox job %s build failed: %v\n%s", runID, err, buildLog)
 		return
 	}
@@ -1199,7 +1239,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		s.store.SetStage(runID, store.StatusBuilding, 0, total)
 		img, buildLog, fp, err := s.sandbox.Build(ctx, sourceFromReq(req))
 		if err != nil {
-			s.store.Fail(runID, "build failed: "+err.Error())
+			s.store.FailWith(runID, "build failed: "+err.Error(), screenedImageInfraFailure(err))
 			log.Printf("run %s build failed: %v\n%s", runID, err, buildLog)
 			return
 		}

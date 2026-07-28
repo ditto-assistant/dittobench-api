@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -31,6 +32,43 @@ const (
 	maxAttachmentTotalBytes   = 64 << 20
 )
 
+// ErrScreenedImageUnavailable marks a failure to ACQUIRE the platform-produced
+// screened image, as opposed to a failure to VERIFY it. The distinction is the
+// entire safety argument for treating one as the validator's fault and the
+// other as terminal, so it is a typed sentinel rather than a substring match on
+// an error message that can drift.
+//
+// Wrapped ONLY by conditions that are transient by construction: a network
+// transport error, a 5xx/429 from the object store, a local filesystem or
+// Docker daemon fault. Each is a property of THIS validator host or THIS
+// network path at THIS moment, and a later attempt on another validator can
+// legitimately succeed.
+//
+// Deliberately NOT wrapped by any verification failure -- sha256 / size / image
+// id mismatch, a malformed URL, a 4xx other than 429, or archive and
+// attestation rejection. Those are deterministic in the bytes the platform
+// stored: they will fail identically on every future attempt, so marking them
+// no-fault would re-lease the same broken artifact forever. That is exactly the
+// loop that let the mnemox family reach 10 attempts against a budget of 2 with
+// zero scores while holding validator slots.
+var ErrScreenedImageUnavailable = errors.New("screened image unavailable")
+
+// unavailable wraps err as a transient acquisition failure.
+func unavailable(err error) error {
+	return fmt.Errorf("%w: %w", ErrScreenedImageUnavailable, err)
+}
+
+// retriableFetchStatus reports whether an object-store response status could
+// plausibly differ on a later attempt. 5xx is server-side by definition and 429
+// is explicitly "come back later". Every other non-200 -- 403 on an expired or
+// unauthorized grant, 404 on a missing blob -- is treated as terminal: a run
+// must not become no-fault because the platform lost or never wrote the object,
+// or the ticket would be re-leased indefinitely against a blob that is not
+// coming back.
+func retriableFetchStatus(status int) bool {
+	return status >= 500 || status == http.StatusTooManyRequests
+}
+
 type ociDescriptor struct {
 	MediaType   string            `json:"mediaType"`
 	Digest      string            `json:"digest"`
@@ -53,24 +91,32 @@ func (d *LocalDocker) loadScreenedImage(ctx context.Context, src Source, workdir
 	}
 	response, err := netguard.Client(d.AllowPrivate).Do(request)
 	if err != nil {
-		return "", "", fmt.Errorf("screened image fetch: %s", redactURL(err.Error(), src.ScreenedImageURL))
+		// Transport: DNS, TLS, connection refused, timeout. Nothing about the
+		// artifact; the miner's code has not run and cannot run.
+		return "", "", unavailable(fmt.Errorf("screened image fetch: %s", redactURL(err.Error(), src.ScreenedImageURL)))
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return "", "", fmt.Errorf("screened image fetch: unexpected status %d", response.StatusCode)
+		err := fmt.Errorf("screened image fetch: unexpected status %d", response.StatusCode)
+		if retriableFetchStatus(response.StatusCode) {
+			return "", "", unavailable(err)
+		}
+		return "", "", err
 	}
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
-		return "", "", fmt.Errorf("create screened image: %w", err)
+		// Local scratch disk: full, read-only, or out of inodes. Host condition.
+		return "", "", unavailable(fmt.Errorf("create screened image: %w", err))
 	}
 	hasher := sha256.New()
 	written, copyErr := io.Copy(io.MultiWriter(file, hasher), io.LimitReader(response.Body, src.ScreenedImageSize+1))
 	closeErr := file.Close()
 	if copyErr != nil {
-		return "", "", fmt.Errorf("screened image download: %w", copyErr)
+		// Stream truncated mid-download (reset, timeout, disk full).
+		return "", "", unavailable(fmt.Errorf("screened image download: %w", copyErr))
 	}
 	if closeErr != nil {
-		return "", "", fmt.Errorf("close screened image: %w", closeErr)
+		return "", "", unavailable(fmt.Errorf("close screened image: %w", closeErr))
 	}
 	if written != src.ScreenedImageSize {
 		return "", "", fmt.Errorf("screened image size mismatch: expected %d got %d", src.ScreenedImageSize, written)
