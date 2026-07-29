@@ -69,6 +69,9 @@ func deterministicToolScoreStrict(c protocol.ToolCase, calls []protocol.Observed
 	if truePositive == 0 {
 		return 0, append(notes, "no expected tool was called")
 	}
+	if c.FuzzyTrajectory && truePositive < expectedTotal {
+		return 0, append(notes, "v8 fuzzy trajectory: a required capability was not observed — case scored 0")
+	}
 
 	prec := ratio(truePositive, observedTotal)
 	rec := ratio(truePositive, expectedTotal)
@@ -80,10 +83,20 @@ func deterministicToolScoreStrict(c protocol.ToolCase, calls []protocol.Observed
 	}
 
 	argF1 := argCorrectness(c.ExpectedTools, calls, &notes)
+	if c.FuzzyTrajectory {
+		if !requiredOutcomesSatisfied(c.ExpectedTools, calls, &notes) {
+			return 0, append(notes, "v8 fuzzy trajectory: required outcome arguments were not observed — case scored 0")
+		}
+		// Fuzzy tasks accept a corrected retry. Once one call for each outcome
+		// tool carries every required value, an earlier exploratory attempt does
+		// not dilute the final outcome's argument score.
+		argF1 = 1
+	}
 	// Parallel (Unordered) cases: the expected calls are independent, so relative
-	// order carries no signal — award full order credit and grade on name/arg set.
+	// order carries no signal. Fuzzy trajectories are dependent tasks, but their
+	// data/outcome gates carry the dependency rather than one prescribed order.
 	order := 1.0
-	if !c.Unordered {
+	if !c.Unordered && !c.FuzzyTrajectory {
 		order = orderCredit(expectedNames, c.ExpectedTools, calls)
 	}
 
@@ -116,7 +129,7 @@ func deterministicToolScoreStrict(c protocol.ToolCase, calls []protocol.Observed
 
 	trajectory := order * (1 - penalty)
 	score := wName*nameScore + wArg*argF1 + wTrajectory*trajectory
-	if strict && !c.Unordered && order < 1 {
+	if strict && !c.Unordered && !c.FuzzyTrajectory && order < 1 {
 		// v7: hop order gates the WHOLE score for ordered multi-hop cases. The
 		// trajectory term already carries order at 0.2 weight; multiplying again
 		// is intentional — a fully out-of-order chain scores 0.
@@ -124,6 +137,74 @@ func deterministicToolScoreStrict(c protocol.ToolCase, calls []protocol.Observed
 		notes = append(notes, "v7 strict: out-of-order multi-hop — score multiplied by order credit")
 	}
 	return clamp01(round6(score)), notes
+}
+
+// requiredOutcomesSatisfied reports whether every expected tool with required
+// arguments has at least one observed call satisfying all of them. It is
+// intentionally retry-friendly: a fuzzy agent may make an exploratory or
+// malformed first attempt, inspect the error, and then perform the right action.
+func requiredOutcomesSatisfied(expected []protocol.ToolSpec, calls []protocol.ObservedToolCall, notes *[]string) bool {
+	for _, spec := range expected {
+		if len(spec.RequiredArgs) == 0 {
+			continue
+		}
+		satisfied := false
+		for _, call := range calls {
+			if call.Name != spec.Name {
+				continue
+			}
+			args := parseArgs(call.Args)
+			matches := true
+			for _, key := range sortedArgKeys(spec.RequiredArgs) {
+				got, ok := args[key]
+				if !ok || !fuzzyOutcomeArgEqual(got, spec.RequiredArgs[key]) {
+					matches = false
+					break
+				}
+			}
+			if matches {
+				satisfied = true
+				break
+			}
+		}
+		if !satisfied {
+			*notes = append(*notes, "no "+spec.Name+" call satisfied the required outcome arguments")
+			return false
+		}
+	}
+	return true
+}
+
+// fuzzyOutcomeArgEqual retains the frozen argument comparison and additionally
+// accepts a required numeric value as a punctuation-delimited token inside a
+// natural action payload (for example an email body ending "4,219."). The v7
+// comparator treats that final period as a decimal attachment; this v8-only
+// wrapper fixes the prose outcome without changing historical scores.
+func fuzzyOutcomeArgEqual(got any, want string) bool {
+	if argValueEqual(got, want) {
+		return true
+	}
+	want = strings.ToLower(strings.TrimSpace(want))
+	if !isPureNumber(want) {
+		return false
+	}
+	var gotStr string
+	switch value := got.(type) {
+	case string:
+		gotStr = value
+	default:
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return false
+		}
+		gotStr = string(encoded)
+	}
+	for _, token := range strings.Fields(strings.ToLower(gotStr)) {
+		if strings.Trim(token, `"'()[]{}!?;:.`) == want {
+			return true
+		}
+	}
+	return false
 }
 
 // forbiddenArgPresent reports whether any observed call to an expected tool

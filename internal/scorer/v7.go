@@ -319,6 +319,17 @@ func ApplyTrajectoryMismatch(benchVersion int, cs protocol.CaseScore, selfReport
 	return cs
 }
 
+// ApplyTrajectoryMismatchForCase preserves v7's anti-fabrication rule for
+// exact trajectories and exempts v8 fuzzy cases. Their validator-observed calls
+// are already authoritative, while repetitions and exploratory calls are part
+// of the allowed behavior and need not match a harness's compact self-report.
+func ApplyTrajectoryMismatchForCase(benchVersion int, c protocol.ToolCase, cs protocol.CaseScore, selfReported, observed []protocol.ObservedToolCall) protocol.CaseScore {
+	if benchVersion >= protocol.BenchVersionV8 && c.FuzzyTrajectory {
+		return cs
+	}
+	return ApplyTrajectoryMismatch(benchVersion, cs, selfReported, observed)
+}
+
 // sameNameMultiset reports whether two trajectories call the same tool names
 // the same number of times (order-insensitive: ordering is already scored by
 // the trajectory term; this only detects fabricated or hidden calls).

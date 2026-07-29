@@ -1553,10 +1553,10 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		} else {
 			cs = scorer.FinishTool(cs)
 		}
-		// v7: a fabricated self-report is itself costly — a non-empty
-		// self-reported trajectory that disagrees with the observed one halves
-		// the case. No-op pre-v7 and when nothing was observed.
-		cs = scorer.ApplyTrajectoryMismatch(req.BenchVersion, cs, resp.ToolCalls, observed)
+		// Exact v7+ trajectories retain the fabricated-self-report penalty.
+		// Outcome-driven v8 fuzzy cases rely on the authoritative observed calls
+		// and may legitimately summarize a longer exploratory trace.
+		cs = scorer.ApplyTrajectoryMismatchForCase(req.BenchVersion, c, cs, resp.ToolCalls, observed)
 		switch {
 		case len(observed) > 0:
 			toolWasObserved[i] = true
