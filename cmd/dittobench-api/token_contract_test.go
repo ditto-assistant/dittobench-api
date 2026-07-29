@@ -82,10 +82,8 @@ func TestV7DispatchedByPlatformAdmitsAndScoresQualityOnly(t *testing.T) {
 		t.Fatalf("safe-prod v7 admission rejected a correct route without a baseline: %v", err)
 	}
 
-	// The platform selects the bench per run; the validator scores exactly what
-	// it dispatched. Both v7 (rolled out) and v6 (rolled back) resolve with no
-	// per-version gate.
-	for _, v := range []int{protocol.BenchVersionV7, protocol.BenchVersionV6} {
+	// The platform selects the supported bench per run; v7 and gated v8 remain.
+	for _, v := range []int{protocol.BenchVersionV7, protocol.BenchVersionV8} {
 		if got, msg := requestedBenchVersion(v, true); got != v || msg != "" {
 			t.Fatalf("platform-dispatched bench_version %d rejected: (%d, %q)", v, got, msg)
 		}

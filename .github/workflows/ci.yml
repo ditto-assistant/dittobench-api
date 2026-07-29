@@ -40,9 +40,9 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        # ditto-subnet's release workflow builds `sandbox` (the scorer) and
-        # `relay` (the model-pinning gateway); Cloud Run deploys `runtime`.
-        target: [runtime, sandbox, relay]
+        # ditto-subnet's release workflow builds `sandbox` (the scorer);
+        # Cloud Run deploys `runtime`.
+        target: [runtime, sandbox]
     steps:
       - uses: actions/checkout@v4
       - name: Set up Docker Buildx

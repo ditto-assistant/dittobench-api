@@ -7,10 +7,9 @@ The final v7 contract also replaces validator-local embeddings with the
 ticket-bound OpenRouter profile
 `dittobench-v7-openrouter-pplx-embed-v1-0.6b-768-v1`: model
 `perplexity/pplx-embed-v1-0.6b`, Perplexity provider order, fallback disabled,
-data collection denied, float encoding, and 768 dimensions. The scorer still
-exposes only the frozen Ollama-compatible `embeddinggemma` operation to the
-harness. Provider credentials and routing fields never cross that boundary.
-Historical v2-v6 runs retain the local EmbeddingGemma path.
+data collection denied, float encoding, and 768 dimensions. The scorer exposes
+only that frozen embedding operation through the ticket-bound local broker.
+Provider credentials and routing fields never cross that boundary.
 
 The initial release calibrates one immutable logical OpenRouter route:
 throughput sorting, healthy fallback, denied data collection, and ZDR. A scored

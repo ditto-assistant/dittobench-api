@@ -309,6 +309,36 @@ func TestV7EmbeddingBrokerUsesSignedLockedPlatformRoute(t *testing.T) {
 	}
 }
 
+func TestV8EmbeddingBrokerUsesSignedLockedPlatformRoute(t *testing.T) {
+	vector := make([]float64, embeddingDimensions)
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != platformEmbeddingAPIPath {
+			t.Fatalf("unexpected hosted embedding route %s", r.URL.Path)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"object": "list", "model": hostedEmbeddingModel,
+			"data":  []map[string]any{{"object": "embedding", "index": 0, "embedding": vector}},
+			"usage": map[string]int{"prompt_tokens": 4, "total_tokens": 4},
+		})
+	}))
+	defer upstream.Close()
+
+	broker := newInferenceBroker(1)
+	proxyURL := configureBrokerUpstream(broker, upstream)
+	prepared := prepareBrokerSession(t, broker)
+	activateBrokerSessionFor(t, broker, prepared, proxyURL, "openrouter",
+		"openrouter-route-0123456789abcdef-v1", llm.V7HarnessModel)
+	runID := claimAndBindBrokerSession(t, broker, prepared["session_id"], "192.0.2.170", protocol.BenchVersionV8)
+	if !broker.beginEmbeddingPhase(prepared["session_id"], runID) {
+		t.Fatal("failed to admit v8 embedding phase")
+	}
+	defer broker.endEmbeddingPhase(prepared["session_id"], runID)
+	response := callEmbedding(broker, "192.0.2.170", "hosted v8 text")
+	if response.Code != http.StatusOK {
+		t.Fatalf("hosted v8 embedding status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestV7EmbeddingBrokerCountsPlatformFailureAsInfrastructure(t *testing.T) {
 	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "unavailable", http.StatusServiceUnavailable)

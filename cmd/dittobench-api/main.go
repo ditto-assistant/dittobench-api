@@ -377,13 +377,7 @@ type capabilitiesResponse struct {
 // shared with the version command so an operator can ask an unstarted container
 // exactly what a validator would negotiate with it.
 func supportedBenchVersions() []int {
-	versions := []int{protocol.BenchVersionV2, protocol.BenchVersionV3, protocol.BenchVersionV4}
-	if efficiency.ProductionReady() {
-		versions = append(versions, protocol.BenchVersionV5)
-	}
-	if efficiency.ProductionReadyForVersion(protocol.BenchVersionV6) {
-		versions = append(versions, protocol.BenchVersionV6)
-	}
+	versions := make([]int, 0, 2)
 	// Advertise v7 iff this scorer release is TECHNICALLY READY: the embedded
 	// audited GPT-OSS quality-only manifest with the exact route/embedding
 	// identity (efficiency.ReadyForV7QualityOnly). This is capability only —
@@ -980,12 +974,12 @@ func (s *server) handleScoreRequest(w http.ResponseWriter, r *http.Request, requ
 func requestedBenchVersion(requested int, requireExplicit bool) (int, string) {
 	if requested == 0 {
 		if requireExplicit {
-			return 0, "bench_version is required (supported: 2, 3, 4, 5, 6, 7, 8)"
+			return 0, "bench_version is required (supported: 7, 8)"
 		}
-		return 2, ""
+		return protocol.BenchVersionV7, ""
 	}
-	if !protocol.SupportedBenchVersion(requested) {
-		return 0, "unsupported bench_version (supported: 2, 3, 4, 5, 6, 7, 8)"
+	if requested != protocol.BenchVersionV7 && requested != protocol.BenchVersionV8 {
+		return 0, "unsupported bench_version (supported: 7, 8)"
 	}
 	return requested, ""
 }
