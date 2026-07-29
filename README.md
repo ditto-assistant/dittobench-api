@@ -400,8 +400,8 @@ caller-supplied harness URLs, so it guards against abuse:
   inference and hosted embedding identity.
 - `docs/judge-determinism.md`: why scoring is judge-free and how each case kind
   is graded.
-- `docs/token-efficiency-v5.md`: trusted proxy metering, the one-sided v5 token
-  waste penalty, phase gate, and reproducible starter-kit p90 budget process.
+- `docs/token-efficiency-v7.md`: the current quality-only scorer contract and
+  platform-owned dynamic relative efficiency policy.
 - `docs/hermes-benchmark/README.md`: the reproducible Hermes Agent adapter and
   sanitized full-v6 OpenRouter measurement.
 - `docs/openclaw-benchmark/README.md`: the native-memory OpenClaw adapter and

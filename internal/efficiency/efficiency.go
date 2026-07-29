@@ -40,12 +40,11 @@ const (
 //     docs/relative-efficiency-bonus-spec.md. The validator's only job is to
 //     expose the audited inputs that make that computable.
 //
-// The reviewed-measured manifest embedded below (the 60-run 2026-07 campaign,
-// raw p90 references with 75% allowances, scoring_enabled=false) is retained
-// as the canonical v7 REFERENCE IDENTITY and audited evidence; under this
-// contract its budgets are never activated for v7 scoring — the successor is
-// the platform-side relative bonus, not these absolute budgets. v5/v6 keep
-// the historical absolute transform byte-for-byte.
+// The reviewed-measured v7 manifest is retained only as the compatibility
+// identity already advertised by deployed validators. Its historical budgets
+// are never activated or refreshed. V8 uses a smaller quality-only contract
+// with no calibration grid; the platform-side relative bonus is the successor
+// to absolute starter budgets.
 const (
 	V7QualityOnlyFormula = "v7-quality-only-v1"
 	V7QualityOnlyReason  = "v7_quality_only_contract"
@@ -113,12 +112,9 @@ type Manifest struct {
 	Embedding          *EmbeddingContract   `json:"embedding,omitempty"`
 	Calibration        []CalibrationDataset `json:"calibration_datasets"`
 	Baselines          []Baseline           `json:"baselines"`
-	// Derived is the calibration-transfer provenance record (additive,
-	// omitted for reviewed-measured manifests). A manifest carrying it was
-	// DERIVED by the offline token model (internal/tokenmodel) rather than
-	// measured by a live campaign. No scoring or readiness gate consumes
-	// derived manifests today — the class is reserved for a later, explicit
-	// platform policy decision; ReadyForV7Production rejects them fail-closed.
+	// Derived is retained only so historical/research manifests remain
+	// parseable and are rejected fail-closed. The transfer tool that produced
+	// this provenance is retired; no scoring or readiness gate consumes it.
 	Derived *Derivation `json:"derived,omitempty"`
 }
 

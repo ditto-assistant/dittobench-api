@@ -146,7 +146,7 @@ against it via the `go.mod` replace directive marked
 - Full suite passes with the replace active; `gofmt`/`go vet` clean.
 - Only allowed drift observed: the v7 known vector moved to
   `1aa1ad26d6b5285258128f5e4a222a150e6d3781411ffdc982f0e336f8e1ee94`
-  (re-pinned in `cmd/tokenbaseline/main_test.go`). The v2/v3 vectors pinned by
+  (historically pinned by the now-retired token baseline tooling). The v2/v3 vectors pinned by
   `TestBenchVersionDatasetVectors` and every v5/v6 identity test are
   unchanged.
 - New v7 tool categories (`negation_no_tool`, `stale_context_web`,
@@ -170,20 +170,17 @@ Remaining pre-merge steps:
 
 1. Tag the datagen `v7-difficulty` release and swap the replace for the
    tagged `require` version (`go mod edit -dropreplace …` + version bump).
-2. Update `v7DatasetKnownVector` / the tokenbaseline vector pins to the
+2. Update `v7DatasetKnownVector` and the capability identity to the
    tagged release's v7 vector (the identity anchor for readiness and
    metering trust; no token budget depends on it under the quality-only
    contract).
 
 ## Rollout sequence (token contract)
 
-1. The in-flight 60-run v7 calibration campaign completes and is archived as
-   audited reference evidence (provenance: reviewed-measured).
-2. The v7 dataset difficulty changes land (this branch + datagen).
-3. v7 ships with the token penalty DISABLED and usage recorded
-   (`v7-quality-only-v1`).
-4. The platform adds the epoch-frozen relative efficiency bonus once enough
-   qualifying submissions exist (`docs/relative-efficiency-bonus-spec.md`).
+The 60-run calibration workflow described by the original plan is retired.
+V7+ ships with the scorer token penalty disabled and trusted usage recorded;
+the platform observes and then enables its model-use-gated, epoch-frozen
+relative efficiency bonus (`docs/relative-efficiency-bonus-spec.md`).
 
 ## Reviewer watch-items
 
@@ -197,6 +194,6 @@ Remaining pre-merge steps:
   champion-population false-positive calibration the v5 plan wanted before
   enabling the env flag — deliberate (new contract), worth a calibration
   pass.
-- The calibration-transfer tooling (`docs/token-calibration-transfer.md`) is
-  research-status and NOT wired into v7 scoring; its interpolation envelope
-  currently (correctly) refuses to derive budgets for the hardened suite.
+- The former calibration-transfer tooling was never wired into scoring and has
+  been removed. Do not rebuild it for v8; relative live cohorts are the
+  successor contract.
