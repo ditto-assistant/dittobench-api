@@ -766,6 +766,10 @@ func (b *inferenceBroker) handleTool(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "tool route not found")
 		return
 	}
+	if r.Method == http.MethodGet {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	if route.expectedSourceIP == "" || sourceIP(r.RemoteAddr) != route.expectedSourceIP {
 		writeError(w, http.StatusUnauthorized, "tool route unavailable")
 		return

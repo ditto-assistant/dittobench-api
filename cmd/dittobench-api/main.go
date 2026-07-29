@@ -300,6 +300,7 @@ func main() {
 	brokerMux.HandleFunc("GET /v1/inference/{rest...}", s.broker.handle)
 	brokerMux.HandleFunc("POST /v1/inference/{rest...}", s.broker.handle)
 	brokerMux.HandleFunc("POST /api/embed", s.broker.handleEmbedding)
+	brokerMux.HandleFunc("GET /v1/tools/{id}/tool", s.broker.handleTool)
 	brokerMux.HandleFunc("POST /v1/tools/{id}/tool", s.broker.handleTool)
 	brokerPort := envIntDefault("DITTOBENCH_BROKER_PORT", 11436)
 	if brokerPort < 1024 || brokerPort > 65535 || brokerPort == *port {
@@ -1430,7 +1431,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	}
 	toolEndpoint, stopToolSrv, err := s.startToolServer(toolSrv, toolSourceIP)
 	if err != nil {
-		s.store.Fail(runID, "tool endpoint start failed: "+err.Error())
+		s.store.FailWith(runID, "tool endpoint start failed: "+err.Error(), toolEndpointInfrastructureFailure())
 		return
 	}
 	defer stopToolSrv()
@@ -1451,21 +1452,8 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		log.Printf("run %s: tool_endpoint not advertised (remote harness unreachable); observable tool cases scored capped (practice)", runID)
 	}
 
-	// Reachability preflight: an advertised endpoint can still be unreachable
-	// from the harness's network namespace (Docker routing, network policy, a
-	// runtime fault). Validator state alone cannot distinguish that from a
-	// harness that legitimately never calls tools — both produce zero observed
-	// calls — so an active probe the harness participates in settles it before
-	// any case is scored. On the scored path a failed probe fails the run
-	// (rescheduled) instead of completing a zeroed report.
-	if toolEndpoint != "" {
-		if !s.enforcePreflight(ctx, runID, scope, harnessURL, toolEndpoint, toolSrv, seed, tools) {
-			return
-		}
-	}
-	// The tool preflight above is intentionally mechanical and does not touch the
-	// locked model. Probe that independent validator dependency before spending
-	// the dataset, then snapshot its monotonic health counters. The end snapshot
+	// Probe the independent validator relay dependency before spending the
+	// dataset, then snapshot its monotonic health counters. The end snapshot
 	// prevents a mid-run provider outage from being persisted as an indefensible
 	// low score even when a harness masks that outage behind HTTP 200 + an empty
 	// response.
@@ -1968,7 +1956,12 @@ func (s *server) startToolServer(h http.Handler, sandboxSourceIP string) (endpoi
 			return "", func() {}, registerErr
 		}
 		port := envIntDefault("DITTOBENCH_BROKER_PORT", 11436)
-		return fmt.Sprintf("http://host.docker.internal:%d/v1/tools/%s/tool", port, id), unregister, nil
+		endpoint = fmt.Sprintf("http://host.docker.internal:%d/v1/tools/%s/tool", port, id)
+		if err := verifyToolEndpoint(fmt.Sprintf("http://127.0.0.1:%d/v1/tools/%s/tool", port, id)); err != nil {
+			unregister()
+			return "", func() {}, err
+		}
+		return endpoint, unregister, nil
 	}
 	// Bind IPv4 explicitly: a container reaching the host via host.docker.internal
 	// (Docker Desktop's host-gateway) connects over IPv4, and a Go dual-stack "[::]"
@@ -1981,6 +1974,9 @@ func (s *server) startToolServer(h http.Handler, sandboxSourceIP string) (endpoi
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /tool", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
 	mux.Handle("POST /tool", h)
 	srv := &http.Server{Handler: mux}
 	go func() {
@@ -2004,7 +2000,39 @@ func (s *server) startToolServer(h http.Handler, sandboxSourceIP string) (endpoi
 		// port. Leave the endpoint unadvertised; observable cases score capped.
 		endpoint = ""
 	}
+	if err := verifyToolEndpoint(fmt.Sprintf("http://127.0.0.1:%d/tool", port)); err != nil {
+		stop()
+		return "", func() {}, err
+	}
 	return endpoint, stop, nil
+}
+
+// verifyToolEndpoint checks the validator-owned listener without asking the
+// miner harness to implement or execute a synthetic probe case. A failed check
+// is a platform fault and aborts the run; a healthy endpoint that receives no
+// scored-case calls is the harness's own observable result.
+func verifyToolEndpoint(endpoint string) error {
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(endpoint)
+	if err != nil {
+		return fmt.Errorf("tool endpoint self-check failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("tool endpoint self-check returned HTTP %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func toolEndpointInfrastructureFailure() *store.Failure {
+	// Reuse the fleet-recognized network code. Older validators deliberately
+	// reject unknown infrastructure codes, which would charge the miner for a
+	// scorer rollout they predate.
+	return &store.Failure{
+		Kind:      "validator_infrastructure",
+		Code:      "sandbox_network_unavailable",
+		Retryable: true,
+	}
 }
 
 // evaluate generates the dataset, runs the harness over it, scores it, and

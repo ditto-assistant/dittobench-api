@@ -1306,6 +1306,14 @@ func TestToolRouteIsSourceBoundAndRemoved(t *testing.T) {
 		t.Fatalf("sibling source status=%d called=%d", recorder.Code, called)
 	}
 
+	request.Method = http.MethodGet
+	recorder = httptest.NewRecorder()
+	broker.handleTool(recorder, request)
+	if recorder.Code != http.StatusNoContent || called != 0 {
+		t.Fatalf("self-check status=%d called=%d", recorder.Code, called)
+	}
+
+	request.Method = http.MethodPost
 	request.RemoteAddr = "192.0.2.20:1234"
 	recorder = httptest.NewRecorder()
 	broker.handleTool(recorder, request)
