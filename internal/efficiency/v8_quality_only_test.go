@@ -6,21 +6,21 @@ import (
 	"github.com/ditto-assistant/dittobench-datagen/protocol"
 )
 
-func TestV8QualityOnlyManifestFailsClosedOnIdentityDrift(t *testing.T) {
-	manifest := V8ManifestSnapshot()
-	if !ReadyForV8QualityOnly(manifest) {
-		t.Fatal("embedded v8 manifest is not ready")
+func TestV8QualityOnlyContractFailsClosedOnIdentityDrift(t *testing.T) {
+	contract := V8ContractSnapshot()
+	if !ReadyForV8QualityOnly(contract) {
+		t.Fatal("embedded v8 contract is not ready")
 	}
-	mutations := []func(*Manifest){
-		func(m *Manifest) { m.ScoringEnabled = true },
-		func(m *Manifest) { m.DatasetKnownVector = "" },
-		func(m *Manifest) { m.StarterKitRevision = "" },
-		func(m *Manifest) { m.Calibration[0].DatasetSHA256 = "" },
-		func(m *Manifest) { m.Baselines = []Baseline{{ID: "unexpected"}} },
-		func(m *Manifest) { m.Embedding.Model = "attacker/model" },
+	mutations := []func(*QualityOnlyContract){
+		func(c *QualityOnlyContract) { c.SchemaVersion++ },
+		func(c *QualityOnlyContract) { c.DatasetKnownVector = "" },
+		func(c *QualityOnlyContract) { c.ScorerTokenPolicy = "absolute-baseline" },
+		func(c *QualityOnlyContract) { c.EfficiencyAuthority = "scorer" },
+		func(c *QualityOnlyContract) { c.Harness.Model = "attacker/model" },
+		func(c *QualityOnlyContract) { c.Embedding.Model = "attacker/model" },
 	}
 	for i, mutate := range mutations {
-		candidate := V8ManifestSnapshot()
+		candidate := V8ContractSnapshot()
 		mutate(&candidate)
 		if ReadyForV8QualityOnly(candidate) {
 			t.Fatalf("mutation %d did not fail closed", i)

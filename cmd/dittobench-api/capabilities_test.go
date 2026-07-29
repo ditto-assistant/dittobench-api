@@ -93,15 +93,15 @@ func TestCapabilitiesReportBoundReleaseIdentity(t *testing.T) {
 }
 
 func TestV8CapabilityIsQualityOnlyAndFailClosed(t *testing.T) {
-	if efficiency.ReadyForV8QualityOnly(efficiency.Manifest{}) {
-		t.Fatal("missing v8 manifest was accepted")
+	if efficiency.ReadyForV8QualityOnly(efficiency.QualityOnlyContract{}) {
+		t.Fatal("missing v8 contract was accepted")
 	}
-	manifest := efficiency.V8ManifestSnapshot()
-	if !efficiency.ReadyForV8QualityOnly(manifest) || !efficiency.ProductionReadyForVersion(8) {
+	contract := efficiency.V8ContractSnapshot()
+	if !efficiency.ReadyForV8QualityOnly(contract) || !efficiency.ProductionReadyForVersion(8) {
 		t.Fatal("embedded v8 quality-only contract must be technically ready")
 	}
-	if manifest.ScoringEnabled || len(manifest.Baselines) != 0 {
-		t.Fatalf("v8 must not activate an absolute token baseline: %+v", manifest)
+	if contract.ScorerTokenPolicy != "quality-only" || contract.EfficiencyAuthority != "ditto-platform-relative-cohort-v1" {
+		t.Fatalf("v8 must delegate efficiency to the platform cohort: %+v", contract)
 	}
 	readiness := efficiency.V8Readiness()
 	if !efficiency.ValidV8Readiness(readiness) || readiness.Provenance != efficiency.ProvenanceReviewedContract {

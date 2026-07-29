@@ -75,8 +75,7 @@ func main() {
 		printManifest(validated)
 		return
 	}
-	if *benchVersion != protocol.BenchVersionV5 && *benchVersion != protocol.BenchVersionV7 &&
-		*benchVersion != protocol.BenchVersionV8 {
+	if *benchVersion != protocol.BenchVersionV5 && *benchVersion != protocol.BenchVersionV7 {
 		fatalf("unsupported calibration bench version %d", *benchVersion)
 	}
 	manifest, err := calibrationManifest(*benchVersion, *starterKitRevision)
@@ -255,8 +254,14 @@ func calibrationManifest(benchVersion int, starterKitRevision string) (efficienc
 	if benchVersion == protocol.BenchVersionV5 {
 		return manifest, nil
 	}
+	if benchVersion != protocol.BenchVersionV7 {
+		return manifest, fmt.Errorf(
+			"benchmark v%d does not use static token calibration; v8+ efficiency is platform-relative",
+			benchVersion,
+		)
+	}
 	if !canonicalGitRevision(starterKitRevision) {
-		return manifest, fmt.Errorf("v7+ requires a canonical 40-character lowercase starter-kit git revision")
+		return manifest, fmt.Errorf("v7 requires a canonical 40-character lowercase starter-kit git revision")
 	}
 	manifest.BenchVersion = benchVersion
 	manifest.StarterKitRevision = starterKitRevision
