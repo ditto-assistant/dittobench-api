@@ -413,7 +413,7 @@ const (
 )
 
 const (
-	v8DatasetKnownVector  = "52f8d61618728e7e8712a32d2e0b21878eaf9a9c6835932e3727d6f35ecc4579"
+	v8DatasetKnownVector  = "3d2aac8bf03cd094aca08a56509d1275c4ddb9c9aa3c4a5712cb43a62c1ff15a"
 	v8ScorerTokenPolicy   = "quality-only"
 	v8EfficiencyAuthority = "ditto-platform-relative-cohort-v1"
 )
