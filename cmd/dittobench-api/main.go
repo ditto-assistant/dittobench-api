@@ -18,6 +18,7 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -1420,6 +1421,16 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		}
 		harnessURL = handle.BaseURL
 		ctx = runner.TrustSandbox(ctx)
+	} else if inferenceSessionID != "" {
+		// The local practice path deliberately skips the sandbox, but ticket
+		// inference is still source-bound. Only admit a literal loopback harness:
+		// this preserves the broker's one-source invariant without allowing a
+		// caller-selected remote host to inherit the ticket capability.
+		sourceIP, ok := loopbackHarnessSourceIP(harnessURL)
+		if !ok || !s.broker.bindSource(inferenceSessionID, runID, sourceIP) {
+			s.store.Fail(runID, "local ticket inference requires a loopback harness")
+			return
+		}
 	}
 
 	var healthErr error
@@ -1820,6 +1831,18 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	s.store.Finish(runID, report)
 	log.Printf("run %s done: bench_version=%d composite=%.3f tool_mean=%.3f memory_mean=%.3f observed=%d capped=%d",
 		runID, req.BenchVersion, report.Composite, report.ToolMean, report.MemoryMean, observedTool, cappedTool)
+}
+
+func loopbackHarnessSourceIP(rawURL string) (string, bool) {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return "", false
+	}
+	ip := net.ParseIP(parsed.Hostname())
+	if ip == nil || !ip.IsLoopback() {
+		return "", false
+	}
+	return ip.String(), true
 }
 
 // applyTokenContract applies the bench version's token contract to a scored

@@ -22,3 +22,26 @@ func TestRunScope(t *testing.T) {
 		t.Fatalf("blank dataset_sha256 must be practice, got %v", got)
 	}
 }
+
+func TestLoopbackHarnessSourceIP(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+		ok   bool
+	}{
+		{name: "ipv4", raw: "http://127.0.0.1:19001", want: "127.0.0.1", ok: true},
+		{name: "ipv6", raw: "http://[::1]:19001", want: "::1", ok: true},
+		{name: "remote ip", raw: "https://192.0.2.1/harness", ok: false},
+		{name: "hostname is not silently resolved", raw: "http://localhost:19001", ok: false},
+		{name: "invalid", raw: "://bad", ok: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, ok := loopbackHarnessSourceIP(test.raw)
+			if got != test.want || ok != test.ok {
+				t.Fatalf("loopbackHarnessSourceIP(%q) = (%q, %v), want (%q, %v)", test.raw, got, ok, test.want, test.ok)
+			}
+		})
+	}
+}
