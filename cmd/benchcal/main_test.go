@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/ditto-assistant/dittobench-datagen/gen"
 	"github.com/ditto-assistant/dittobench-datagen/protocol"
 )
 
@@ -139,6 +140,21 @@ func TestCalibrateWithMemProfileSeam(t *testing.T) {
 		"preference-application": 0.1,
 		"contradiction":          0.1,
 		"abstention":             0.1,
+	}
+	// The current benchmark may introduce new memory question families. Build
+	// the test profile over the exact five generated suites that calibrateWith
+	// will score so an unlisted family cannot silently take the neutral 0.5
+	// fallback and make this seam test vacuous.
+	for seed := int64(1); seed <= 5; seed++ {
+		suite, err := gen.GenerateMemorySuiteForVersion(
+			gen.NewRNG(seed), seed, 20, 1, 0, benchVersion,
+		)
+		if err != nil {
+			t.Fatalf("generate memory suite for seed %d: %v", seed, err)
+		}
+		for _, staged := range suite.Cases {
+			lowAll[staged.Case.QuestionType] = 0.1
+		}
 	}
 	cfg := defaultConfig()
 	cfg.memProfile = lowAll

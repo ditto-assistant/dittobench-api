@@ -3,8 +3,31 @@ package efficiency
 import (
 	"testing"
 
+	"github.com/ditto-assistant/dittobench-datagen/gen"
 	"github.com/ditto-assistant/dittobench-datagen/protocol"
 )
+
+func TestV8DatasetKnownVectorMatchesPinnedGenerator(t *testing.T) {
+	const seed = int64(123456789)
+	profile, ok := gen.ProfileForVersion("full", protocol.BenchVersionV8)
+	if !ok {
+		t.Fatal("resolve full v8 profile")
+	}
+	dataset, err := gen.GenerateDataset(seed, profile, protocol.BenchVersionV8)
+	if err != nil {
+		t.Fatalf("generate full v8 dataset: %v", err)
+	}
+	got, _, err := dataset.SHA256Hex()
+	if err != nil {
+		t.Fatalf("hash full v8 dataset: %v", err)
+	}
+	if got != v8DatasetKnownVector {
+		t.Fatalf("pinned v8 generator produced %s, want %s", got, v8DatasetKnownVector)
+	}
+	if got := V8ContractSnapshot().DatasetKnownVector; got != v8DatasetKnownVector {
+		t.Fatalf("embedded v8 contract vector %s, want %s", got, v8DatasetKnownVector)
+	}
+}
 
 func TestV8QualityOnlyContractFailsClosedOnIdentityDrift(t *testing.T) {
 	contract := V8ContractSnapshot()
