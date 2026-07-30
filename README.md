@@ -23,10 +23,9 @@ transcript, so there is no central scorer to trust.
 A subnet validator scores miner submissions and sets on-chain weights from the
 results. This repo is the scoring half of that job. Per submission it:
 
-1. Loads the exact image built by the trusted screener when screened-image
-   metadata is present. Legacy records fall back to building the crate in a
-   Docker sandbox (`git_url` or `tarball_url`). The source tarball is still
-   unpacked for structural anti-copy fingerprinting.
+1. Loads the exact language-neutral OCI image built by the trusted screener.
+   The source tarball is unpacked only for bounded, cross-language anti-copy
+   fingerprinting; V7/V8 validator tickets never rebuild miner source.
 2. Generates a fresh randomized DittoBench dataset, so no two evaluations match
    and a memorized lookup table cannot score.
 3. Seeds the harness, runs every tool and memory case, and grades each case
@@ -42,22 +41,28 @@ recomputes the deterministic weights it sets on-chain. Because scoring is
 judge-free and reproducible from the seed, any validator or third party can
 re-derive a composite independently; no validator has to trust another's number.
 
-Loading or building an image needs a Docker daemon, so a validator runs the engine on a VM or
-similar host, not on a daemon-less platform. Run it directly:
+Loading an image needs a Docker daemon, so a validator runs the engine on a VM
+or similar host, not on a daemon-less platform. Point it at a dedicated
+rootless daemon and require that boundary before accepting work:
 
 ```sh
+export DOCKER_HOST=unix:///run/ditto-validator-docker/docker.sock
+export DITTOBENCH_REQUIRE_ROOTLESS_DOCKER=1
 go run ./cmd/dittobench-api   # listens on :8000 (or $PORT; -port to override)
 ```
 
-Or build the validator image, which adds the Docker CLI and Git to the same
-statically linked API binary:
+The validator image adds the Docker CLI and Git to the same statically linked
+API binary. If it is itself containerized, mount only the dedicated rootless
+socket and set the same policy flag; do not mount `/var/run/docker.sock`:
 
 ```sh
 docker build --target sandbox -t dittobench-api:sandbox .
 docker run --rm \
   --user 65532:65532 \
-  --group-add "$(stat -c '%g' /var/run/docker.sock)" \
-  -v /var/run/docker.sock:/var/run/docker.sock \
+  --group-add "$(stat -c '%g' /run/ditto-validator-docker/docker.sock)" \
+  -v /run/ditto-validator-docker/docker.sock:/run/docker.sock \
+  -e DOCKER_HOST=unix:///run/docker.sock \
+  -e DITTOBENCH_REQUIRE_ROOTLESS_DOCKER=1 \
   -p 127.0.0.1:8000:8000 \
   dittobench-api:sandbox
 ```
@@ -67,11 +72,13 @@ Docker socket's group on the host; in Compose, use `group_add` with that numeric
 GID. Docker Desktop users may need the socket GID exposed inside its VM instead
 of the macOS host's value.
 
-> **Security:** mounting the raw Docker socket gives this service
-> host-root-equivalent control even when its process is non-root. Use this image
-> only on an isolated validator host, never on a shared or public application
-> host. The resource and capability limits applied to miner containers do not
-> reduce the API container's control of the daemon.
+> **Security:** a rootful Docker socket is host-root-equivalent control even
+> when the API process is non-root. The rootless daemon must run as a separate,
+> empty host identity with no validator credentials. V7/V8 images are built by
+> screeners without credentials, then run read-only with bounded tmpfs, memory,
+> CPU, PIDs, file descriptors, IPC, logs, dropped capabilities, and
+> no-new-privileges. Rootless limits a daemon/container escape to that empty
+> identity; it does not make a shared host safe.
 
 The binary is self-contained: dataset generation, execution, and grading run
 locally with no external services. For how it slots into the worker, see the
@@ -88,7 +95,7 @@ https://dittobench-api-22790208601.us-central1.run.app
 ```
 
 Practice covers tool-calling correctness, memory recall, and tool efficiency. It
-does not build crates (the hosted instance has no Docker daemon), so to practice
+does not build images (the hosted instance has no Docker daemon), so to practice
 you expose a reachable harness and submit its URL. No API key is needed; your
 harness brings whatever model access it uses. Every request rotates the dataset
 seed, so you cannot overfit to the practice set. The authoritative evaluation is
@@ -101,7 +108,7 @@ the on-chain validator run.
 | Latency (measured)     | yes (reported)     | yes                |
 | Memory / embeddings    | yes (`run_size`)   | yes                |
 | Fresh anti-cheat data  | yes                | yes                |
-| Crate Docker build     | no (use `harness_url`) | yes            |
+| Harness image execution | no (use `harness_url`) | yes            |
 | TAO / chain            | no                 | yes                |
 
 ## How it fits with the starter kit
@@ -269,13 +276,15 @@ The locked models are scored against every harness; their identities are frozen
 in code and in the platform-issued ticket, not selected by validator or miner
 environment.
 
-### Crate build (on-chain only)
+### Harness images (on-chain only)
 
-The `git_url` Docker-build mode (`internal/sandbox`) clones a submission, builds
-it (resolving its `ditto-harness` git dependency), runs the container, and scores
-it. It needs a Docker daemon, so it is unavailable on the hosted practice
-instance and is the validator's path. To practice against the hosted endpoint,
-submit a reachable `harness_url` instead.
+The active V7/V8 path loads the content-addressed image produced by the trusted
+screener, then runs its HTTP contract. Rust, Python, TypeScript/JavaScript, Go,
+Java, C/C++, C#, Ruby, or any other language is valid: the runtime contract is
+only a root `Dockerfile` and the documented HTTP endpoints. Local development
+may still build `git_url`/`tarball_url` source, but no GitHub/provider credential
+is mounted into that untrusted build. The hosted practice instance has no Docker
+daemon; submit a reachable `harness_url` there instead.
 
 ### `GET /v1/runs/{id}`
 Fetch the job: `status`, `mode`, and (when `done`) the full `ScoreReport` with

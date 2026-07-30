@@ -3,6 +3,8 @@ package sandbox
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -46,6 +48,87 @@ func TestStartTimeoutDefaultsToTwoMinutes(t *testing.T) {
 	}
 }
 
+func TestAvailableRequiresRootlessWhenConfigured(t *testing.T) {
+	d := NewLocalDocker()
+	d.RequireRootless = true
+	d.HostGatewayIP = "192.0.2.10"
+	d.dockerCommand = func(_ context.Context, args ...string) ([]byte, error) {
+		if !reflect.DeepEqual(args, []string{"info", "--format", "{{json .SecurityOptions}}"}) {
+			t.Fatalf("unexpected Docker probe: %v", args)
+		}
+		return []byte(`["name=seccomp,profile=builtin","name=cgroupns"]`), nil
+	}
+	if err := d.Available(context.Background()); err == nil || !strings.Contains(err.Error(), "not rootless") {
+		t.Fatalf("rootful daemon passed required-rootless policy: %v", err)
+	}
+	d.dockerCommand = func(_ context.Context, _ ...string) ([]byte, error) {
+		return []byte(`["name=seccomp,profile=builtin","name=rootless"]`), nil
+	}
+	if err := d.Available(context.Background()); err != nil {
+		t.Fatalf("rootless daemon rejected: %v", err)
+	}
+}
+
+func TestV8IsolationReadyRequiresEnabledAndVerifiedRootless(t *testing.T) {
+	d := NewLocalDocker()
+	d.HostGatewayIP = "192.0.2.10"
+	d.RequireRootless = false
+	if err := d.V8IsolationReady(context.Background()); err == nil || !strings.Contains(err.Error(), "not enabled") {
+		t.Fatalf("v8 accepted an executor without mandatory rootless policy: %v", err)
+	}
+	d.RequireRootless = true
+	d.dockerCommand = func(context.Context, ...string) ([]byte, error) {
+		return []byte(`["name=seccomp,profile=builtin","name=rootless"]`), nil
+	}
+	if err := d.V8IsolationReady(context.Background()); err != nil {
+		t.Fatalf("verified rootless executor rejected for v8: %v", err)
+	}
+}
+
+func TestRunArgsRootlessUsesExplicitOuterGateway(t *testing.T) {
+	d := NewLocalDocker()
+	d.RequireRootless = true
+	d.HostGatewayIP = "192.0.2.44"
+	args := d.runArgsForNetwork("operator-image:latest", nil, "ditto-job-test", "abc123")
+	if !hasFlagPair(args, "--add-host", "host.docker.internal:192.0.2.44") {
+		t.Fatalf("rootless runtime did not bind the trusted outer gateway: %v", args)
+	}
+}
+
+func TestCloneCredentialUsesEphemeralAskpassAndNeverHelperContents(t *testing.T) {
+	tokenPath := filepath.Join(t.TempDir(), "github-token")
+	const token = "secret-token-never-in-build-context"
+	if err := os.WriteFile(tokenPath, []byte(token+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d := NewLocalDocker()
+	d.GitHubTokenFile = tokenPath
+	env, cleanup, err := d.cloneEnvironment()
+	if err != nil {
+		t.Fatal(err)
+	}
+	askpass := ""
+	for _, item := range env {
+		if strings.HasPrefix(item, "GIT_ASKPASS=") {
+			askpass = strings.TrimPrefix(item, "GIT_ASKPASS=")
+		}
+	}
+	if askpass == "" {
+		t.Fatal("missing ephemeral askpass helper")
+	}
+	helper, err := os.ReadFile(askpass)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(helper), token) {
+		t.Fatal("credential was written into askpass helper")
+	}
+	cleanup()
+	if _, err := os.Stat(askpass); !os.IsNotExist(err) {
+		t.Fatalf("askpass helper survived cleanup: %v", err)
+	}
+}
+
 // hasFlagPair reports whether args contains the adjacent pair [flag, value].
 func hasFlagPair(args []string, flag, value string) bool {
 	for i := 0; i+1 < len(args); i++ {
@@ -66,6 +149,15 @@ func TestRunArgs_DefaultsHardenAndBound(t *testing.T) {
 	}
 	if !hasFlagPair(args, "--security-opt", "no-new-privileges") {
 		t.Errorf("expected --security-opt no-new-privileges, got %v", args)
+	}
+	if !hasFlagPair(args, "--ipc", "none") {
+		t.Errorf("expected private IPC namespace, got %v", args)
+	}
+	if !hasFlagPair(args, "--log-driver", "local") ||
+		!hasFlagPair(args, "--log-opt", "max-size=8m") ||
+		!hasFlagPair(args, "--log-opt", "max-file=1") ||
+		!hasFlagPair(args, "--log-opt", "compress=false") {
+		t.Errorf("expected bounded local container logs, got %v", args)
 	}
 	if !hasFlagPair(args, "--publish", "127.0.0.1:0:8080") {
 		t.Errorf("expected loopback publish, got %v", args)

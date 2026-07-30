@@ -1,13 +1,12 @@
-// Package sandbox builds and runs an untrusted miner harness in an isolated
-// container, mirroring the SN118 on-chain validator's "build the submitted
-// harness, run it in a Docker sandbox, score it, tear it down" loop — minus
-// the chain.
+// Package sandbox loads and runs an untrusted miner harness in an isolated
+// container. Active V7/V8 validator work uses only the exact image produced by
+// the trusted screener; local development retains a source-build path.
 //
 // The Sandbox interface lets the API swap execution backends without touching
 // the submit handler:
 //
-//   - LocalDocker (this file): `docker build` + `docker run` on the host
-//     daemon. Good for self-hosting the practice validator and for local dev.
+//   - LocalDocker (this file): screened-image load + `docker run` on a dedicated
+//     rootless daemon, with source builds retained for local development.
 //   - CloudBuild (future, for the Cloud Run deployment): Cloud Build to build
 //     the image + a Cloud Run Job to run it. Cloud Run has no local Docker
 //     daemon, so the LocalDocker backend cannot run there; see README.
@@ -16,11 +15,9 @@
 // plus opt-in hardening for untrusted (on-chain) submissions — `--cap-drop ALL`
 // (Harden) and an egress allowlist via a restricted network + forward proxy
 // (EgressNetwork/EgressProxy; see the Sandbox egress section in
-// docs/model-lock.md). With the egress config unset it stays "good-faith
-// practice" grade (full-egress bridge), which is fine for the miner's own
-// practice submissions; the on-chain validator turns the egress + cap-drop
-// hardening on and provisions the proxy + host firewall. Deeper isolation
-// (seccomp/gVisor/Kata) is a later hardening step.
+// docs/model-lock.md). Production also requires an operator-owned rootless
+// endpoint; a rootful Docker socket remains explicitly incompatible with the
+// hardened boundary.
 package sandbox
 
 import (
@@ -148,15 +145,14 @@ type LocalDocker struct {
 	TmpfsLimit string
 	// CPULimit is passed to docker --cpus.
 	CPULimit string
-	// BuildTimeout bounds a single `docker build` (Rust cold builds are slow).
+	// BuildTimeout bounds a single `docker build` (cold dependency builds are slow).
 	BuildTimeout time.Duration
 	// StartTimeout bounds image unpack + container creation. Concurrent screened
 	// image starts can exceed Docker's usual fast path without being hung.
 	StartTimeout time.Duration
-	// GitHubTokenFile, if set, is mounted into the build as the BuildKit secret
-	// `gh_token` so the build can fetch the private ditto-harness dependency
-	// over HTTPS. No-op once that repo is public. Defaults from the
-	// GITHUB_TOKEN_FILE env var.
+	// GitHubTokenFile, if set, is used only by the host-side git clone for a
+	// private source repository. It is never copied or mounted into an untrusted
+	// build context. Defaults from GITHUB_TOKEN_FILE.
 	GitHubTokenFile string
 	// AllowPrivate relaxes the SSRF guard on TarballURL fetches (local dev only,
 	// e.g. a minio/localhost presigned URL). Mirrors the submit-handler flag.
@@ -173,6 +169,15 @@ type LocalDocker struct {
 	// empty. AppArmor is opt-in because it is unavailable on some hosts.
 	SeccompProfile  string
 	AppArmorProfile string
+	// RequireRootless fails availability checks unless the selected Docker daemon
+	// advertises rootless mode. Operators can provision the endpoint first, then
+	// enable DITTOBENCH_REQUIRE_ROOTLESS_DOCKER without changing scoring.
+	RequireRootless bool
+	// HostGatewayIP is the trusted scorer/broker address visible from containers
+	// owned by a nested rootless daemon. Rootless Docker cannot use the rootful
+	// host-gateway magic to reach its outer network namespace, so production
+	// normally discovers eth0 and may override it explicitly.
+	HostGatewayIP string
 	// EgressNetwork, when set, attaches the container to this user-defined docker
 	// network — the egress-restricted sandbox network (allowlisting proxy + host
 	// firewall) — instead of the default full-egress bridge. Empty = today's
@@ -208,6 +213,8 @@ func NewLocalDocker() *LocalDocker {
 		Harden:          envBoolDefault("DITTOBENCH_SANDBOX_HARDEN", true),
 		SeccompProfile:  strings.TrimSpace(os.Getenv("DITTOBENCH_SANDBOX_SECCOMP_PROFILE")),
 		AppArmorProfile: strings.TrimSpace(os.Getenv("DITTOBENCH_SANDBOX_APPARMOR_PROFILE")),
+		RequireRootless: envBool("DITTOBENCH_REQUIRE_ROOTLESS_DOCKER"),
+		HostGatewayIP:   strings.TrimSpace(os.Getenv("DITTOBENCH_SANDBOX_HOST_GATEWAY_IP")),
 		EgressNetwork:   strings.TrimSpace(os.Getenv("DITTOBENCH_SANDBOX_EGRESS_NETWORK")),
 		EgressProxy:     strings.TrimSpace(os.Getenv("DITTOBENCH_SANDBOX_EGRESS_PROXY")),
 	}
@@ -258,24 +265,55 @@ func envIntDefault(name string, def int) int {
 	return def
 }
 
-// Available checks that the docker CLI and daemon are reachable.
+// Available checks that Docker is reachable and satisfies operator policy.
 func (d *LocalDocker) Available(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "docker", "version", "--format", "{{.Server.Version}}")
-	if out, err := cmd.CombinedOutput(); err != nil {
+	out, err := d.dockerOutput(ctx, "info", "--format", "{{json .SecurityOptions}}")
+	if err != nil {
 		return fmt.Errorf("docker daemon unavailable: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	if d.RequireRootless {
+		var options []string
+		if err := json.Unmarshal(out, &options); err != nil {
+			return fmt.Errorf("docker daemon unavailable: invalid security options: %w", err)
+		}
+		rootless := false
+		for _, option := range options {
+			if strings.Contains(strings.ToLower(option), "rootless") {
+				rootless = true
+				break
+			}
+		}
+		if !rootless {
+			return fmt.Errorf("docker daemon unavailable: configured endpoint is not rootless")
+		}
+		if _, err := d.sandboxHostGateway(); err != nil {
+			return fmt.Errorf("docker daemon unavailable: %w", err)
+		}
+	}
+	return nil
+}
+
+// V8IsolationReady reports whether this live executor satisfies the mandatory
+// V8 untrusted-runtime boundary. V7 remains available during the additive
+// rollout, but a scorer must not advertise V8 merely because its binary embeds
+// the V8 dataset contract while it still points at a rootful daemon.
+func (d *LocalDocker) V8IsolationReady(ctx context.Context) error {
+	if !d.RequireRootless {
+		return fmt.Errorf("v8 executor isolation unavailable: rootless policy is not enabled")
+	}
+	if err := d.Available(ctx); err != nil {
+		return fmt.Errorf("v8 executor isolation unavailable: %w", err)
 	}
 	return nil
 }
 
 // Build materializes the submission in a temp dir, then either loads the
-// screener-built image or builds the source with BuildKit. We
-// clone ourselves (rather than docker's git-context form) so a PRIVATE
-// submission repo can be authenticated with the gh token; docker's remote
-// build-context fetch is unauthenticated and 404s on private repos. A mounted
-// gh_token BuildKit secret then lets the in-image cargo build fetch the private
-// ditto-harness crate over HTTPS.
+// screener-built image or, for local/legacy practice only, builds the source
+// with BuildKit. V7/V8 validator tickets require the exact screener-built image.
+// A private source repository may use host-side askpass authentication, but no
+// credential enters the build context, image, Dockerfile, or command line.
 func (d *LocalDocker) Build(ctx context.Context, src Source) (string, string, *protocol.CodeFingerprint, error) {
 	if src.GitURL == "" && src.TarballURL == "" {
 		return "", "", nil, fmt.Errorf("sandbox: one of git_url or tarball_url is required")
@@ -301,24 +339,26 @@ func (d *LocalDocker) Build(ctx context.Context, src Source) (string, string, *p
 		}
 		contextDir = cdir
 	} else {
-		cloneURL, err := d.authedCloneURL(src.GitURL)
+		cloneEnv, cleanupAuth, err := d.cloneEnvironment()
 		if err != nil {
 			return "", "", nil, err
 		}
+		defer cleanupAuth()
 		cloneArgs := []string{"clone", "--depth", "1"}
 		if src.GitRef != "" {
 			cloneArgs = append(cloneArgs, "--branch", src.GitRef)
 		}
-		cloneArgs = append(cloneArgs, cloneURL, workdir)
-		if out, err := exec.CommandContext(ctx, "git", cloneArgs...).CombinedOutput(); err != nil {
-			// Redact a token that may appear in the URL within git's error output.
-			return "", "", nil, fmt.Errorf("git clone failed: %s: %w", redact(strings.TrimSpace(string(out))), err)
+		cloneArgs = append(cloneArgs, src.GitURL, workdir)
+		cmd := exec.CommandContext(ctx, "git", cloneArgs...)
+		cmd.Env = cloneEnv
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return "", "", nil, fmt.Errorf("git clone failed: %s: %w", strings.TrimSpace(string(out)), err)
 		}
 	}
 
-	// 1b. Structural fingerprint of the materialized crate, for the platform's
+	// 1b. Structural fingerprint of the materialized harness, for the platform's
 	//     anti-copy gate. Computed here (the only place the tree is unpacked and a
-	//     Rust parser is available) while contextDir still exists — the deferred
+	//     parser is available) while contextDir still exists — the deferred
 	//     RemoveAll wipes it on return. Best-effort: nil on any problem, never
 	//     failing the build over a moderation signal.
 	fingerprint := astfp.FromDir(ctx, contextDir)
@@ -340,9 +380,6 @@ func (d *LocalDocker) Build(ctx context.Context, src Source) (string, string, *p
 	}
 	image := "dittobench-sub:" + safeTag(src) + "-" + buildIdentity
 	args := []string{"build", "-t", image}
-	if d.GitHubTokenFile != "" {
-		args = append(args, "--secret", "id=gh_token,src="+d.GitHubTokenFile)
-	}
 	args = append(args, contextDir)
 
 	cmd := exec.CommandContext(ctx, "docker", args...)
@@ -356,36 +393,53 @@ func (d *LocalDocker) Build(ctx context.Context, src Source) (string, string, *p
 	return image, tail(buf.String(), 2000), fingerprint, nil
 }
 
-// authedCloneURL injects the gh token into an https github URL so private
-// submission repos can be cloned. Non-github or non-https URLs are returned
-// unchanged (relying on ambient git credentials).
-func (d *LocalDocker) authedCloneURL(gitURL string) (string, error) {
+// cloneEnvironment returns an ephemeral askpass environment for host-side git
+// authentication. The helper reads the token from its process environment, so
+// neither the token nor a token-bearing URL appears in argv, .git/config, the
+// Docker build context, or a layer. The caller always invokes cleanup.
+func (d *LocalDocker) cloneEnvironment() ([]string, func(), error) {
 	if d.GitHubTokenFile == "" {
-		return gitURL, nil
-	}
-	const prefix = "https://github.com/"
-	if !strings.HasPrefix(gitURL, prefix) {
-		return gitURL, nil
+		return append(os.Environ(), "GIT_TERMINAL_PROMPT=0"), func() {}, nil
 	}
 	tok, err := os.ReadFile(d.GitHubTokenFile)
 	if err != nil {
-		return "", fmt.Errorf("read github token file: %w", err)
+		return nil, func() {}, fmt.Errorf("read github token file: %w", err)
 	}
 	token := strings.TrimSpace(string(tok))
 	if token == "" {
-		return gitURL, nil
+		return append(os.Environ(), "GIT_TERMINAL_PROMPT=0"), func() {}, nil
 	}
-	return "https://x-access-token:" + token + "@github.com/" + strings.TrimPrefix(gitURL, prefix), nil
-}
-
-// redact removes an x-access-token credential from a string before logging.
-func redact(s string) string {
-	if i := strings.Index(s, "x-access-token:"); i >= 0 {
-		if j := strings.Index(s[i:], "@"); j >= 0 {
-			return s[:i] + "x-access-token:***" + s[i+j:]
-		}
+	helper, err := os.CreateTemp("", "dittobench-git-askpass-")
+	if err != nil {
+		return nil, func() {}, fmt.Errorf("create git askpass helper: %w", err)
 	}
-	return s
+	path := helper.Name()
+	cleanup := func() { _ = os.Remove(path) }
+	const script = `#!/bin/sh
+case "$1" in
+  *Username*) printf '%s\n' x-access-token ;;
+  *) printf '%s\n' "$DITTO_GITHUB_TOKEN" ;;
+esac
+`
+	if _, err := helper.WriteString(script); err != nil {
+		_ = helper.Close()
+		cleanup()
+		return nil, func() {}, fmt.Errorf("write git askpass helper: %w", err)
+	}
+	if err := helper.Close(); err != nil {
+		cleanup()
+		return nil, func() {}, fmt.Errorf("close git askpass helper: %w", err)
+	}
+	if err := os.Chmod(path, 0o700); err != nil {
+		cleanup()
+		return nil, func() {}, fmt.Errorf("protect git askpass helper: %w", err)
+	}
+	env := append(os.Environ(),
+		"GIT_TERMINAL_PROMPT=0",
+		"GIT_ASKPASS="+path,
+		"DITTO_GITHUB_TOKEN="+token,
+	)
+	return env, cleanup, nil
 }
 
 // pidsLimit returns the configured --pids-limit, defaulting to 512 so a
@@ -463,12 +517,21 @@ func (d *LocalDocker) runArgsForNetwork(image string, env map[string]string, net
 		"--init",
 		"--user", "65532:65532",
 		"--read-only",
+		"--ipc", "none",
 		"--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=" + d.tmpfsLimit(),
 		"--memory", d.MemoryLimit,
 		"--cpus", d.CPULimit,
 		"--pids-limit", strconv.Itoa(d.pidsLimit()),
 		"--ulimit", "nofile=1024:1024",
 		"--security-opt", "no-new-privileges",
+		"--log-driver", "local",
+		"--log-opt", "max-size=8m",
+		"--log-opt", "max-file=1",
+		// Docker 28's containerd-backed local driver defaults compression on,
+		// but compression is invalid when the retained-file count is one. Keep
+		// the tighter single-file/8 MiB bound and disable unusable rotation
+		// compression explicitly so rootless executors fail closed consistently.
+		"--log-opt", "compress=false",
 	}
 	if identity != "" {
 		args = append(args,
@@ -493,12 +556,17 @@ func (d *LocalDocker) runArgsForNetwork(image string, env map[string]string, net
 		// egress section in docs/model-lock.md.
 		args = append(args, "--network", network)
 	}
-	// Let the harness reach host services (e.g. the Ollama embeddings server) at
-	// the documented host.docker.internal name. On Linux Docker this needs an
-	// explicit host-gateway mapping — unlike Docker Desktop, which injects it
-	// automatically — so the miner's OLLAMA_BASE_URL default resolves.
+	// Let the harness reach only the trusted ticket broker at the documented
+	// host.docker.internal name. The executor firewall admits the broker port and
+	// rejects metadata, sibling, provider, and public-network destinations.
+	hostGateway := "host-gateway"
+	if d.RequireRootless {
+		if discovered, err := d.sandboxHostGateway(); err == nil {
+			hostGateway = discovered
+		}
+	}
 	args = append(args,
-		"--add-host", "host.docker.internal:host-gateway",
+		"--add-host", "host.docker.internal:"+hostGateway,
 		"--publish", "127.0.0.1:0:"+d.HarnessPort, // random host port, loopback only
 	)
 	for k, v := range env {
@@ -506,7 +574,7 @@ func (d *LocalDocker) runArgsForNetwork(image string, env map[string]string, net
 	}
 	if d.EgressProxy != "" {
 		// Force the harness's outbound calls through the allowlisting proxy; the
-		// host gateway (Ollama) + loopback bypass it via NO_PROXY.
+		// ticket broker and loopback bypass it via NO_PROXY.
 		args = append(args,
 			"-e", "HTTPS_PROXY="+d.EgressProxy,
 			"-e", "HTTP_PROXY="+d.EgressProxy,
@@ -514,6 +582,36 @@ func (d *LocalDocker) runArgsForNetwork(image string, env map[string]string, net
 		)
 	}
 	return append(args, image)
+}
+
+func (d *LocalDocker) sandboxHostGateway() (string, error) {
+	if value := strings.TrimSpace(d.HostGatewayIP); value != "" {
+		parsed := net.ParseIP(value)
+		if parsed == nil || parsed.To4() == nil || parsed.IsLoopback() || parsed.IsUnspecified() {
+			return "", fmt.Errorf("invalid rootless sandbox host gateway")
+		}
+		return value, nil
+	}
+	iface, err := net.InterfaceByName("eth0")
+	if err != nil {
+		return "", fmt.Errorf("discover rootless sandbox host gateway: eth0 unavailable")
+	}
+	addrs, err := iface.Addrs()
+	if err != nil {
+		return "", fmt.Errorf("discover rootless sandbox host gateway: %w", err)
+	}
+	candidates := make([]string, 0, len(addrs))
+	for _, addr := range addrs {
+		ip, _, parseErr := net.ParseCIDR(addr.String())
+		if parseErr == nil && ip.To4() != nil && !ip.IsLoopback() && !ip.IsUnspecified() {
+			candidates = append(candidates, ip.String())
+		}
+	}
+	if len(candidates) == 0 {
+		return "", fmt.Errorf("discover rootless sandbox host gateway: eth0 has no IPv4 address")
+	}
+	sort.Strings(candidates)
+	return candidates[0], nil
 }
 
 func isolatedIdentity() (string, error) {

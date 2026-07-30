@@ -14,13 +14,17 @@ import (
 )
 
 type diagnosticSandbox struct {
-	diagnostics sandbox.RuntimeDiagnostics
-	logs        string
-	logsAfter   bool // true once Stop ran, proving Logs was NOT read before teardown
-	stopped     bool
+	diagnostics    sandbox.RuntimeDiagnostics
+	logs           string
+	logsAfter      bool // true once Stop ran, proving Logs was NOT read before teardown
+	stopped        bool
+	v8IsolationErr error
 }
 
 func (*diagnosticSandbox) Available(context.Context) error { return nil }
+func (s *diagnosticSandbox) V8IsolationReady(context.Context) error {
+	return s.v8IsolationErr
+}
 func (*diagnosticSandbox) Build(context.Context, sandbox.Source) (string, string, *protocol.CodeFingerprint, error) {
 	return "", "", nil, nil
 }

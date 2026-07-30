@@ -26,11 +26,28 @@ const (
 	ociImageIndexMediaType    = "application/vnd.oci.image.index.v1+json"
 	ociImageManifestMediaType = "application/vnd.oci.image.manifest.v1+json"
 	ociImageConfigMediaType   = "application/vnd.oci.image.config.v1+json"
+	dockerManifestMediaType   = "application/vnd.docker.distribution.manifest.v2+json"
+	dockerConfigMediaType     = "application/vnd.docker.container.image.v1+json"
+	dockerLayerMediaType      = "application/vnd.docker.image.rootfs.diff.tar"
 	inTotoMediaType           = "application/vnd.in-toto+json"
 	maxAttestationDescriptors = 32
 	maxAttachmentBlobBytes    = 16 << 20
 	maxAttachmentTotalBytes   = 64 << 20
+	maxClassicImageLayers     = 1024
 )
+
+type dockerSchema2Descriptor struct {
+	MediaType string `json:"mediaType"`
+	Digest    string `json:"digest"`
+	Size      int64  `json:"size"`
+}
+
+type dockerSchema2Manifest struct {
+	SchemaVersion int                       `json:"schemaVersion"`
+	MediaType     string                    `json:"mediaType"`
+	Config        dockerSchema2Descriptor   `json:"config"`
+	Layers        []dockerSchema2Descriptor `json:"layers"`
+}
 
 // ErrScreenedImageUnavailable marks a failure to ACQUIRE the platform-produced
 // screened image, as opposed to a failure to VERIFY it. The distinction is the
@@ -125,7 +142,8 @@ func (d *LocalDocker) loadScreenedImage(ctx context.Context, src Source, workdir
 	if !strings.EqualFold(got, src.ScreenedImageSHA256) {
 		return "", "", fmt.Errorf("screened image sha256 mismatch: got %s", got)
 	}
-	archiveTagged, err := validateDockerSaveArchive(path, src.ScreenedImageRef, src.ScreenedImageID)
+	acceptedLoadedIDs := map[string]struct{}{src.ScreenedImageID: {}}
+	archiveTagged, err := validateDockerSaveArchiveWithStoreIDs(path, src.ScreenedImageRef, src.ScreenedImageID, acceptedLoadedIDs)
 	if err != nil {
 		return "", "", fmt.Errorf("invalid screened image archive: %w", err)
 	}
@@ -150,11 +168,23 @@ func (d *LocalDocker) loadScreenedImage(ctx context.Context, src Source, workdir
 		// `docker image save <immutable-id>` intentionally carries no RepoTags.
 		// The archive parser proved there is exactly one image and bound its bytes
 		// to the signed ID; materialize the expected ref from that immutable ID.
-		loadedID := d.inspectImageID(ctx, src.ScreenedImageID)
-		if loadedID != src.ScreenedImageID {
+		loadedRef := src.ScreenedImageID
+		loadedID := d.inspectImageID(ctx, loadedRef)
+		if loadedID == "" {
+			for candidate := range acceptedLoadedIDs {
+				if candidate == src.ScreenedImageID {
+					continue
+				}
+				if candidateID := d.inspectImageID(ctx, candidate); candidateID != "" {
+					loadedRef, loadedID = candidate, candidateID
+					break
+				}
+			}
+		}
+		if _, ok := acceptedLoadedIDs[loadedID]; !ok {
 			return "", tail(string(loadOut), 4000), fmt.Errorf("untagged screened image id mismatch: expected %s got %s", src.ScreenedImageID, loadedID)
 		}
-		if out, err := exec.CommandContext(ctx, "docker", "image", "tag", src.ScreenedImageID, src.ScreenedImageRef).CombinedOutput(); err != nil {
+		if out, err := exec.CommandContext(ctx, "docker", "image", "tag", loadedRef, src.ScreenedImageRef).CombinedOutput(); err != nil {
 			return "", tail(string(loadOut), 4000), fmt.Errorf("tag untagged screened image: %s: %w", strings.TrimSpace(string(out)), err)
 		}
 	}
@@ -163,8 +193,27 @@ func (d *LocalDocker) loadScreenedImage(ctx context.Context, src Source, workdir
 		return "", tail(string(loadOut), 4000), fmt.Errorf("loaded archive missing expected image ref: %w", err)
 	}
 	loadedID := strings.TrimSpace(string(inspectOut))
-	if loadedID != src.ScreenedImageID {
+	if _, ok := acceptedLoadedIDs[loadedID]; !ok {
 		return "", tail(string(loadOut), 4000), fmt.Errorf("screened image id mismatch: expected %s got %s", src.ScreenedImageID, loadedID)
+	}
+	volumeOut, volumeErr := exec.CommandContext(
+		ctx,
+		"docker",
+		"image",
+		"inspect",
+		"--format",
+		"{{if .Config.Volumes}}declared{{end}}",
+		src.ScreenedImageRef,
+	).CombinedOutput()
+	if volumeErr != nil {
+		return "", tail(string(volumeOut), 4000), fmt.Errorf("inspect screened image policy: %w", volumeErr)
+	}
+	switch strings.TrimSpace(string(volumeOut)) {
+	case "":
+	case "declared":
+		return "", tail(string(volumeOut), 4000), fmt.Errorf("screened image declares writable volumes")
+	default:
+		return "", tail(string(volumeOut), 4000), fmt.Errorf("inspect screened image policy returned invalid output")
 	}
 	identity, err := isolatedIdentity()
 	if err != nil {
@@ -172,7 +221,7 @@ func (d *LocalDocker) loadScreenedImage(ctx context.Context, src Source, workdir
 	}
 	localRef := "dittobench-sub:" + safeTag(src) + "-" + identity
 	if out, err := exec.CommandContext(ctx, "docker", "image", "tag", src.ScreenedImageRef, localRef).CombinedOutput(); err != nil {
-		return "", tail(string(loadOut), 4000), fmt.Errorf("tag screened image: %s: %w", strings.TrimSpace(string(out)), err)
+		return "", tail(string(out), 4000), fmt.Errorf("tag screened image: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 	// The local request-scoped tag now owns the image. Drop/restore the archive's
 	// globally named screener ref immediately; Stop removes localRef after use.
@@ -184,6 +233,16 @@ func (d *LocalDocker) loadScreenedImage(ctx context.Context, src Source, workdir
 }
 
 func validateDockerSaveArchive(path, expectedRef, expectedID string) (bool, error) {
+	return validateDockerSaveArchiveWithStoreIDs(path, expectedRef, expectedID, nil)
+}
+
+// validateDockerSaveArchiveWithStoreIDs binds the signed image-config digest
+// to every Docker ID the validated archive can acquire after load. Classic
+// graphdriver stores expose the config digest as `.Id`; Docker 28's containerd
+// image store exposes the deterministic schema-2 manifest digest instead. Both
+// identities are derived from the same validated bytes here, before Docker is
+// invoked, so accepting the latter does not weaken the signed config boundary.
+func validateDockerSaveArchiveWithStoreIDs(path, expectedRef, expectedID string, acceptedLoadedIDs map[string]struct{}) (bool, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return false, err
@@ -203,6 +262,8 @@ func validateDockerSaveArchive(path, expectedRef, expectedID string) (bool, erro
 	smallBlobTotal := int64(0)
 	expectedDigestCount := 0
 	expectedDigestOK := false
+	expectedConfigSize := int64(0)
+	classicLayers := make(map[string]dockerSchema2Descriptor)
 	for {
 		header, err := reader.Next()
 		if err == io.EOF {
@@ -261,6 +322,7 @@ func validateDockerSaveArchive(path, expectedRef, expectedID string) (bool, erro
 				expectedDigestOK = strings.EqualFold(hex.EncodeToString(digest[:]), expectedHex)
 				verifiedSmallBlobs[name] = expectedDigestOK
 			} else {
+				expectedConfigSize = header.Size
 				hasher := sha256.New()
 				written, err := io.Copy(hasher, io.LimitReader(reader, header.Size+1))
 				if err != nil {
@@ -270,6 +332,28 @@ func validateDockerSaveArchive(path, expectedRef, expectedID string) (bool, erro
 					return false, fmt.Errorf("read image config: expected %d bytes got %d", header.Size, written)
 				}
 				expectedDigestOK = strings.EqualFold(hex.EncodeToString(hasher.Sum(nil)), expectedHex)
+			}
+			continue
+		}
+		if strings.HasSuffix(name, "/layer.tar") {
+			if len(classicLayers) >= maxClassicImageLayers {
+				return false, fmt.Errorf("classic image has too many layers")
+			}
+			if _, duplicate := classicLayers[name]; duplicate {
+				return false, fmt.Errorf("duplicate classic image layer %q", name)
+			}
+			hasher := sha256.New()
+			written, err := io.Copy(hasher, io.LimitReader(reader, header.Size+1))
+			if err != nil {
+				return false, fmt.Errorf("read classic image layer %s: %w", name, err)
+			}
+			if written != header.Size {
+				return false, fmt.Errorf("read classic image layer %s: expected %d bytes got %d", name, header.Size, written)
+			}
+			classicLayers[name] = dockerSchema2Descriptor{
+				MediaType: dockerLayerMediaType,
+				Digest:    "sha256:" + hex.EncodeToString(hasher.Sum(nil)),
+				Size:      header.Size,
 			}
 			continue
 		}
@@ -299,6 +383,7 @@ func validateDockerSaveArchive(path, expectedRef, expectedID string) (bool, erro
 	var manifest []struct {
 		Config   string   `json:"Config"`
 		RepoTags []string `json:"RepoTags"`
+		Layers   []string `json:"Layers"`
 	}
 	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
 		return false, fmt.Errorf("decode manifest.json: %w", err)
@@ -346,12 +431,45 @@ func validateDockerSaveArchive(path, expectedRef, expectedID string) (bool, erro
 			}
 		}
 		oci = primaryCount == 1
+		if acceptedLoadedIDs != nil {
+			for digest := range runnableDigests {
+				acceptedLoadedIDs[digest] = struct{}{}
+			}
+		}
 	}
 	if !classic && !oci {
 		return false, fmt.Errorf("archive index does not bind the expected image id")
 	}
 	if expectedDigestCount != 1 || !expectedDigestOK {
 		return false, fmt.Errorf("archive bytes do not contain the expected image id digest")
+	}
+	if classic && acceptedLoadedIDs != nil {
+		if expectedConfigSize <= 0 || len(manifest[0].Layers) > maxClassicImageLayers {
+			return false, fmt.Errorf("classic image config or layer count is invalid")
+		}
+		layers := make([]dockerSchema2Descriptor, 0, len(manifest[0].Layers))
+		for _, layerName := range manifest[0].Layers {
+			descriptor, ok := classicLayers[strings.TrimPrefix(layerName, "./")]
+			if !ok {
+				return false, fmt.Errorf("classic image manifest references missing layer %q", layerName)
+			}
+			layers = append(layers, descriptor)
+		}
+		storeManifest, err := json.Marshal(dockerSchema2Manifest{
+			SchemaVersion: 2,
+			MediaType:     dockerManifestMediaType,
+			Config: dockerSchema2Descriptor{
+				MediaType: dockerConfigMediaType,
+				Digest:    expectedID,
+				Size:      expectedConfigSize,
+			},
+			Layers: layers,
+		})
+		if err != nil {
+			return false, fmt.Errorf("encode classic image store manifest: %w", err)
+		}
+		digest := sha256.Sum256(storeManifest)
+		acceptedLoadedIDs["sha256:"+hex.EncodeToString(digest[:])] = struct{}{}
 	}
 	return archiveTagged, nil
 }

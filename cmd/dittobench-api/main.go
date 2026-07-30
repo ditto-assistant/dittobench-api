@@ -400,6 +400,33 @@ func supportedBenchVersions() []int {
 	return versions
 }
 
+type v8IsolationReporter interface {
+	V8IsolationReady(context.Context) error
+}
+
+// runtimeSupportedBenchVersions intersects the immutable scorer contract with
+// the live untrusted-execution boundary. A code-only `version` report can still
+// prove that the image contains V8, while the validator-facing capability omits
+// V8 until the configured executor verifies rootless mode. V7 stays advertised
+// during that additive migration.
+func (s *server) runtimeSupportedBenchVersions(ctx context.Context) []int {
+	versions := supportedBenchVersions()
+	if s.sandbox == nil {
+		return versions
+	}
+	reporter, ok := s.sandbox.(v8IsolationReporter)
+	if ok && reporter.V8IsolationReady(ctx) == nil {
+		return versions
+	}
+	filtered := versions[:0]
+	for _, version := range versions {
+		if version != protocol.BenchVersionV8 {
+			filtered = append(filtered, version)
+		}
+	}
+	return filtered
+}
+
 // handleCapabilities reports public release metadata to a co-located validator.
 // Identity is derived from the compiled binary (see internal/release), falling
 // back to the deploy-time environment only for an image that embedded nothing,
@@ -408,7 +435,7 @@ func supportedBenchVersions() []int {
 // A bearer token would not authenticate the scorer: the scorer itself would hold
 // the token and could use it while lying. Keeping this read-only response
 // secretless avoids an operator cutover without weakening the identity binding.
-func (s *server) handleCapabilities(w http.ResponseWriter, _ *http.Request) {
+func (s *server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	if s.softwareVersion == "" || !canonicalSourceRevision(s.sourceRevision) {
 		writeError(w, http.StatusServiceUnavailable, "scorer release identity unavailable")
@@ -417,7 +444,7 @@ func (s *server) handleCapabilities(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, capabilitiesResponse{
 		SoftwareVersion:        s.softwareVersion,
 		SourceRevision:         s.sourceRevision,
-		SupportedBenchVersions: supportedBenchVersions(),
+		SupportedBenchVersions: s.runtimeSupportedBenchVersions(r.Context()),
 		FullRunCapacity:        maxConcurrentRuns,
 		MemoryPhaseCapacity:    maxConcurrentMemoryPhases,
 		V7Calibration:          efficiency.V7CalibrationReadiness(),
