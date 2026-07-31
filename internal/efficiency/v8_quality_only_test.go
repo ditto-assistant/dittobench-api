@@ -3,6 +3,7 @@ package efficiency
 import (
 	"testing"
 
+	"github.com/ditto-assistant/dittobench-datagen/catalog"
 	"github.com/ditto-assistant/dittobench-datagen/gen"
 	"github.com/ditto-assistant/dittobench-datagen/protocol"
 )
@@ -26,6 +27,18 @@ func TestV8DatasetKnownVectorMatchesPinnedGenerator(t *testing.T) {
 	}
 	if got := V8ContractSnapshot().DatasetKnownVector; got != v8DatasetKnownVector {
 		t.Fatalf("embedded v8 contract vector %s, want %s", got, v8DatasetKnownVector)
+	}
+	for _, tc := range dataset.ToolCases {
+		for _, expected := range tc.ExpectedTools {
+			if expected.Name == "get_agent_job_status" {
+				t.Fatalf("v8 case %s requires app-owned job status polling", tc.ID)
+			}
+		}
+	}
+	for _, tool := range catalog.CatalogForVersion(protocol.BenchVersionV8) {
+		if tool.Name == "get_agent_job_status" {
+			t.Fatal("v8 catalog advertises app-owned job status polling")
+		}
 	}
 }
 

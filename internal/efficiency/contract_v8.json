@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "bench_version": 8,
-  "dataset_known_vector": "13ca6776945caa083c5af110ce1e7524609d88deb3b9bfba86acc105e8b497c7",
+  "dataset_known_vector": "fc5cfb3db2e6b1eaedf747535bbf7c6b044b3c369b8b78cf1f24741d225c36ff",
   "scorer_token_policy": "quality-only",
   "efficiency_authority": "ditto-platform-relative-cohort-v1",
   "harness": {
