@@ -74,9 +74,9 @@ jobs:
               raise SystemExit(0)
 
           occurrences = compose.count(old_sha)
-          if occurrences != 4:
+          if occurrences != 3:
               raise SystemExit(
-                  f"expected the old DittoBench SHA four times, found {occurrences}"
+                  f"expected the old DittoBench SHA three times, found {occurrences}"
               )
           compose_path.write_text(compose.replace(old_sha, api_sha))
 
