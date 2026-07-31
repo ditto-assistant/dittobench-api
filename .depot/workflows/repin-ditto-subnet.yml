@@ -97,7 +97,7 @@ jobs:
           PY
       - name: Set up uv
         if: steps.update.outputs.changed == 'true'
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
       - name: Run focused compose validation
         if: steps.update.outputs.changed == 'true'
         working-directory: target
