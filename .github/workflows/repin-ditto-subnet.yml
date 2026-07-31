@@ -117,7 +117,6 @@ jobs:
           docker buildx create --name "$builder" --driver docker-container --use
 
           context="https://github.com/ditto-assistant/dittobench-api.git?ref=refs/heads/main&checksum=${GITHUB_SHA}"
-          docker buildx build --builder "$builder" --no-cache --target relay "$context"
           docker buildx build --builder "$builder" --no-cache --target sandbox "$context"
 
       - name: Commit and push the update branch

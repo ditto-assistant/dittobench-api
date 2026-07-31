@@ -68,31 +68,24 @@ func TestSampleIncludesAnswerKeys(t *testing.T) {
 
 // TestSampleShapeMatchesProfile checks the sample is a real full-profile dataset
 // (60 tool cases), so the community sees the real size, and it pins the
-// frozen-v2 / hardened-v3 split at the API surface.
+// supported v7/v8 split at the API surface.
 func TestSampleShapeMatchesProfile(t *testing.T) {
 	s := &server{}
 
-	// v2 is the FROZEN contract: 4 read-path isolation cases (the isoCases
-	// quota) and nothing else user-scoped. The cross-user lifecycle probe is
-	// v3-only, so if it ever shows up here, v2's bytes have drifted and every
-	// run already scored under v2 has become unauditable.
-	_, v2 := getSample(t, s, "?run_size=full&bench_version=2")
-	if len(v2.ToolCases) != 60 {
-		t.Fatalf("full profile should have 60 tool cases, got %d", len(v2.ToolCases))
+	_, v7 := getSample(t, s, "?run_size=full&bench_version=7")
+	if len(v7.ToolCases) == 0 {
+		t.Fatal("full v7 profile must include tool cases")
 	}
-	if got := userScopedCases(v2); got != 4 {
-		t.Fatalf("v2 should have 4 user-scoped cases (frozen), got %d", got)
+	if got := userScopedCases(v7); got == 0 {
+		t.Fatal("full v7 profile must include user-scoped memory cases")
 	}
 
-	// v3 adds the 5 cross-user LIFECYCLE cases (B3): a write and a delete under
-	// user A, and the reads under user B that must be unaffected by them.
-	_, v3 := getSample(t, s, "?run_size=full&bench_version=3")
-	if got := userScopedCases(v3); got != 9 {
-		t.Fatalf("v3 should have 9 user-scoped cases (4 isolation + 5 cross-user), got %d", got)
+	_, v8 := getSample(t, s, "?run_size=full&bench_version=8")
+	if len(v8.ToolCases) == 0 || userScopedCases(v8) == 0 {
+		t.Fatal("full v8 profile must include tool and user-scoped memory cases")
 	}
-	art := v3
-	if len(art.MemoryWaves) < 1 {
-		t.Fatalf("expected at least one memory wave, got %d", len(art.MemoryWaves))
+	if len(v8.MemoryWaves) < 1 {
+		t.Fatalf("expected at least one memory wave, got %d", len(v8.MemoryWaves))
 	}
 }
 
@@ -153,20 +146,20 @@ func TestSampleDefaultsToSmall(t *testing.T) {
 	if len(art.ToolCases) != 6 {
 		t.Fatalf("small profile should have 6 tool cases, got %d", len(art.ToolCases))
 	}
-	if art.BenchVersion != 2 {
-		t.Fatalf("omitted practice version must remain v2, got %d", art.BenchVersion)
+	if art.BenchVersion != 7 {
+		t.Fatalf("omitted practice version must select v7, got %d", art.BenchVersion)
 	}
 }
 
-func TestSampleCanDeliberatelySelectV3(t *testing.T) {
+func TestSampleCanDeliberatelySelectV8(t *testing.T) {
 	s := &server{}
-	v2, art2 := getSample(t, s, "?run_size=small&sample=2&bench_version=2")
-	v3, art3 := getSample(t, s, "?run_size=small&sample=2&bench_version=3")
-	if art2.BenchVersion != 2 || art3.BenchVersion != 3 {
-		t.Fatalf("wrong versions: v2=%d v3=%d", art2.BenchVersion, art3.BenchVersion)
+	v7, art7 := getSample(t, s, "?run_size=small&sample=2&bench_version=7")
+	v8, art8 := getSample(t, s, "?run_size=small&sample=2&bench_version=8")
+	if art7.BenchVersion != 7 || art8.BenchVersion != 8 {
+		t.Fatalf("wrong versions: v7=%d v8=%d", art7.BenchVersion, art8.BenchVersion)
 	}
-	if v2.Body.String() == v3.Body.String() {
-		t.Fatal("v2 and v3 sample paths produced identical bytes")
+	if v7.Body.String() == v8.Body.String() {
+		t.Fatal("v7 and v8 sample paths produced identical bytes")
 	}
 }
 

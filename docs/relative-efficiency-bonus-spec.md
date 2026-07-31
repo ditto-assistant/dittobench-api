@@ -1,7 +1,8 @@
 # Relative efficiency bonus — platform-layer specification (v7+)
 
-Status: SPEC for the platform team. Nothing in this document runs in the
-validator. Under the v7 quality-only contract the validator's composite is a
+Status: IMPLEMENTED in `ditto-platform` behind operator-controlled shadow and
+enforcement settings. Nothing in this document runs in the validator. Under
+the v7+ quality-only contract the validator's composite is a
 pure function of (dataset, transcript) — deterministic and time-invariant —
 and audited token usage is recorded, never scored. Efficiency incentives live
 here, in the platform layer, computed over frozen cohorts.
@@ -10,11 +11,9 @@ here, in the platform layer, computed over frozen cohorts.
 
 A deterministic validator must produce the same score for the same artifact
 regardless of WHEN it runs. Any relative-efficiency term inside the validator
-would break that (the comparison set changes over time), and any absolute
-budget requires live recalibration every time the suite or the locked model
-moves (see docs/token-calibration-transfer.md for what that costs). The
-platform, by contrast, already owns time-indexed state (the KOTH ledger) and
-can freeze cohorts by epoch.
+would break that (the comparison set changes over time). Absolute starter-kit
+budgets and their 60-run calibration workflow are retired. The platform already
+owns time-indexed state (the KOTH ledger) and can freeze cohorts by epoch.
 
 ## Inputs the validator exposes (all already produced today)
 
@@ -100,10 +99,7 @@ For each cohort `(bench_version, run_size, epoch)`:
 
 ## Rollout sequence
 
-1. The 60-run v7 calibration campaign completes and is archived as audited
-   reference evidence (provenance: reviewed-measured).
-2. The v7 dataset difficulty changes land (in flight in datagen).
-3. v7 ships with the token penalty DISABLED and usage recorded
-   (`v7-quality-only-v1` — this repo, already wired).
-4. Once enough qualifying v7 submissions exist per cohort (`N_min`), the
-   platform enables the frozen relative bonus per this spec.
+1. Validators report quality-only scores plus complete trusted usage.
+2. The platform observes the model-use verdict and relative bonus in shadow.
+3. Backroom enables enforcement and bonus assignment only after the live cohort
+   is healthy. No scorer deploy or calibration campaign is part of this step.

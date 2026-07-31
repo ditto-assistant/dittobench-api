@@ -254,20 +254,20 @@ curl -X POST https://dittobench-api-22790208601.us-central1.run.app/v1/submit \
 | run_size | tool cases | memory cases | seeding waves | raw-pairs frac | isolation |
 | -------- | ---------- | ------------ | ------------- | -------------- | --------- |
 | small    | 6          | 6            | 1             | 0              | 0         |
-| medium   | 20         | 20           | 2             | 0.3            | 2         |
-| full     | 60         | 50           | 2             | 0.35           | 4         |
+| medium   | 40         | 52           | 4             | 0.45           | 4         |
+| full     | 84         | 185          | 5             | 0.5            | 10        |
 
 Config for the `run_size` path (all optional):
 
 | Source                  | Default            | Purpose                                              |
 | ----------------------- | ------------------ | ---------------------------------------------------- |
-| `HARNESS_GATEWAY_URL` env | `http://host.docker.internal:11434` | the chat gateway serving the locked model |
-| `HARNESS_EMBED_URL` env | `http://host.docker.internal:11434` | trusted scorer-to-Ollama upstream; scored harnesses receive the source-bound broker instead |
-| `DITTOBENCH_EMBEDDING_UPSTREAM_URL` env | `http://host.docker.internal:11434/api/embed` | broker-only embedding upstream; only the `/api/embed` operation is exposed, and it always forwards the locked `embeddinggemma` whatever model the harness names |
+| `DITTOBENCH_PLATFORM_INFERENCE_PROXY_URL` env | required in production | exact platform chat endpoint accepted during ticket activation |
+| `DITTOBENCH_EMBEDDING_UPSTREAM_URL` env | required in production | exact platform embedding endpoint used by the source-bound broker |
+| `DITTOBENCH_BROKER_PORT` env | `11436` | harness-only local listener for ticket-scoped chat and embeddings |
 
-The locked model is scored against every harness; its id and provider are frozen
-in code (`internal/llm`, `cmd/dittobench-api`), not env-tunable
-(`docs/model-lock.md`).
+The locked models are scored against every harness; their identities are frozen
+in code and in the platform-issued ticket, not selected by validator or miner
+environment.
 
 ### Crate build (on-chain only)
 
@@ -366,9 +366,9 @@ caller-supplied harness URLs, so it guards against abuse:
   plus a single active `run_size` job per scorer; both return `429`. A full
   miner container is capped at 3 GiB RAM, 2 CPUs, 512 PIDs, and a 512 MiB
   writable `/tmp`; the root filesystem remains read-only. Keeping concurrency
-  at one prevents those limits from overcommitting the validator's documented
-  16 GiB host alongside Ollama, Docker, the relay, Pylon, and the worker. A
-  request-body cap rejects oversized payloads.
+  is bounded separately so those limits cannot overcommit the validator host
+  alongside Docker, Pylon, and the worker. A request-body cap rejects oversized
+  payloads.
 - `DITTOBENCH_ALLOW_PRIVATE_HARNESS`: set truthy for local dev or the Docker
   sandbox (loopback containers) to relax the SSRF guard. Leave it unset in
   production; the guard is on by default.
@@ -380,10 +380,8 @@ caller-supplied harness URLs, so it guards against abuse:
   needed when local source/image URLs themselves resolve to private addresses.
   Imported archive and local runner tags are removed after each run so validator
   disks do not accumulate submission images.
-- Benchmark v3 always removes the source-build fallback: only the screener-built,
-  digest- and image-ID-bound archive may run. Benchmark v2 intentionally keeps
-  source builds available for validators that update later in the asynchronous
-  rollout; no fleet-wide requirement environment variable is used.
+- Benchmark v7 and v8 require the screener-built, digest- and image-ID-bound
+  archive; the source-build fallback is retired.
 - Miner containers run as an unprivileged UID with a read-only root filesystem,
   an ephemeral no-exec `/tmp`, all capabilities dropped, no-new-privileges,
   bounded CPU/memory/PIDs/file descriptors, and request-scoped cleanup.
@@ -398,13 +396,12 @@ caller-supplied harness URLs, so it guards against abuse:
 
 ## See also
 
-- `PROTOCOL.md`: the shared wire contract (dataset, `/run`, score report).
+- `PROTOCOL.md`: the shared wire contract, including ticket-scoped platform
+  inference and hosted embedding identity.
 - `docs/judge-determinism.md`: why scoring is judge-free and how each case kind
   is graded.
-- `docs/model-lock.md`: the locked harness model and the gateway
-  (`cmd/model-relay` fronting Chutes).
-- `docs/token-efficiency-v5.md`: trusted proxy metering, the one-sided v5 token
-  waste penalty, phase gate, and reproducible starter-kit p90 budget process.
+- `docs/token-efficiency-v7.md`: the current quality-only scorer contract and
+  platform-owned dynamic relative efficiency policy.
 - `docs/hermes-benchmark/README.md`: the reproducible Hermes Agent adapter and
   sanitized full-v6 OpenRouter measurement.
 - `docs/openclaw-benchmark/README.md`: the native-memory OpenClaw adapter and

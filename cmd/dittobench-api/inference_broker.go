@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/ditto-assistant/dittobench-api/internal/llm"
+	"github.com/ditto-assistant/dittobench-datagen/protocol"
 	"github.com/google/uuid"
 )
 
@@ -1130,7 +1131,7 @@ type embeddingResponse struct {
 }
 
 // handleEmbedding exposes only the deterministic embedding operation to the
-// source-bound harness. Ollama's model-management, generation, discovery, and
+// source-bound harness. Provider discovery, model management, generation, and
 // administrative APIs remain unreachable from the sandbox.
 func (b *inferenceBroker) handleEmbedding(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost || r.URL.Path != embeddingAPIPath {
@@ -1487,7 +1488,9 @@ func (b *inferenceBroker) forwardPlatformEmbedding(ctx context.Context, session 
 		return embeddingResponse{}, err
 	}
 	session.mu.Lock()
-	if session.benchVersion != 7 || !session.activeLocked(time.Now()) {
+	if (session.benchVersion != protocol.BenchVersionV7 &&
+		session.benchVersion != protocol.BenchVersionV8) ||
+		!session.activeLocked(time.Now()) {
 		session.mu.Unlock()
 		return embeddingResponse{}, fmt.Errorf("embedding session unavailable")
 	}

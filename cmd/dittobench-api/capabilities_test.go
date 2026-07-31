@@ -61,15 +61,7 @@ func TestCapabilitiesReportBoundReleaseIdentity(t *testing.T) {
 	if !strings.Contains(rr.Body.String(), `"profile_revision":"openrouter-route-a471cd87ae7df5b9-v1"`) {
 		t.Fatalf("advertised v7 must expose its reviewed aggregate route: %s", rr.Body.String())
 	}
-	// v2-v4 are always advertised; v5 is negotiated only once reviewed token
-	// baselines make efficiency.ProductionReady() true (the #54 release gate).
-	want := []int{2, 3, 4}
-	if efficiency.ProductionReady() {
-		want = append(want, 5)
-	}
-	if efficiency.ProductionReadyForVersion(6) {
-		want = append(want, 6)
-	}
+	want := []int{}
 	// v7 is advertised iff the validator is technically ready (the embedded
 	// quality-only manifest). No env var / activation flag gates advertisement;
 	// dispatch is the platform's rollout decision.

@@ -1,5 +1,10 @@
 # DittoBench v5 relay-token waste penalty
 
+> **Historical contract only.** Benchmark v5/v6 execution is retired. Do not
+> run or refresh its starter-kit calibration campaign. The frozen manifest and
+> evidence remain solely to reproduce historical scores; v7+ uses trusted usage
+> with a platform-owned relative efficiency bonus.
+
 DittoBench v5 measures model tokens at the validator-owned relay. A miner's
 `prompt_tokens` and `output_tokens` fields are never trusted or scored. Every
 frozen-model call crosses the relay outside miner control, where the upstream
@@ -58,7 +63,7 @@ Latency is not scored: absolute latency mixes provider and hardware capacity
 with harness behavior. Provider-boundary and per-case latency stay available
 for audit and later within-validator/reference-normalized analysis.
 
-## Calibration
+## Historical calibration record
 
 [`internal/efficiency/baselines_v5.json`](../internal/efficiency/baselines_v5.json)
 pins:
@@ -70,21 +75,9 @@ pins:
   upstream model id;
 - an explicit `scoring_enabled` phase gate.
 
-Twenty samples make nearest-rank p90 the 18th ordered run without interpolation.
-To calibrate or refresh:
-
-1. Check out the pinned starter-kit revision and build it through the normal
-   screened-image path.
-2. Run all 60 pinned datasets through each certified relay profile: 20 seeds
-   for small, medium, and full. This is 120 runs for two providers.
-3. Save completed reports containing trusted
-   `details.token_usage.source=model_proxy_provider_response` usage.
-4. Run `go run ./cmd/tokenbaseline <report.json>...`. It rejects wrong datasets,
-   missing/inconsistent usage, duplicate seeds, and incomplete groups, then
-   emits deterministic nearest-rank-p90 budgets with content-derived ids.
-5. Review the full distributions and reference-harness chat quality in a PR.
-   Provider, model, relay-profile, starter-kit, dataset, or formula changes
-   require a new baseline identity rather than editing numbers in place.
+Twenty samples made nearest-rank p90 the 18th ordered run without interpolation.
+The removed `cmd/tokenbaseline` command produced this frozen record. It is not a
+supported operational workflow and must not be used to prepare a new benchmark.
 
 The reviewed phase-B manifest contains 20 audited observations in each group
 and `scoring_enabled` is true:

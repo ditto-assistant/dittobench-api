@@ -18,18 +18,18 @@ func newScoreTestServer() *server {
 }
 
 func TestValidateBenchVersionResultRejectsContradictions(t *testing.T) {
-	if err := validateBenchVersionResult(3, 3, &protocol.RunDetails{BenchVersion: 3}); err != nil {
-		t.Fatalf("matching v3 result rejected: %v", err)
+	if err := validateBenchVersionResult(8, 8, &protocol.RunDetails{BenchVersion: 8}); err != nil {
+		t.Fatalf("matching v8 result rejected: %v", err)
 	}
 	for _, tc := range []struct {
 		artifact int
 		details  *protocol.RunDetails
 	}{
-		{artifact: 2, details: &protocol.RunDetails{BenchVersion: 3}},
-		{artifact: 3, details: &protocol.RunDetails{BenchVersion: 2}},
-		{artifact: 3, details: nil},
+		{artifact: 7, details: &protocol.RunDetails{BenchVersion: 8}},
+		{artifact: 8, details: &protocol.RunDetails{BenchVersion: 7}},
+		{artifact: 8, details: nil},
 	} {
-		if err := validateBenchVersionResult(3, tc.artifact, tc.details); err == nil {
+		if err := validateBenchVersionResult(8, tc.artifact, tc.details); err == nil {
 			t.Fatalf("accepted contradictory result: artifact=%d details=%+v", tc.artifact, tc.details)
 		}
 	}
@@ -45,12 +45,12 @@ func TestHandleScorePreconditions(t *testing.T) {
 		name, body, wantSubstr string
 	}{
 		{"bad json", `{`, "invalid or oversized JSON body"},
-		{"missing seed", `{"run_size":"full","dataset_sha256":"` + datasetSHA + `","harness_url":"http://h"}`, "seed is required"},
-		{"missing hash", `{"seed":42,"run_size":"full","harness_url":"http://h"}`, "dataset_sha256 is required"},
-		{"malformed hash", `{"seed":42,"run_size":"full","dataset_sha256":"abc","harness_url":"http://h"}`, "64 lowercase hex"},
-		{"missing run_size", `{"seed":42,"dataset_sha256":"` + datasetSHA + `","harness_url":"http://h"}`, "run_size is required"},
-		{"no source", `{"seed":42,"run_size":"full","dataset_sha256":"` + datasetSHA + `"}`, "exactly one of"},
-		{"two sources", `{"seed":42,"run_size":"full","dataset_sha256":"` + datasetSHA + `","harness_url":"http://h","git_url":"http://g"}`, "exactly one of"},
+		{"missing seed", `{"bench_version":7,"inference_session_id":"test","run_size":"full","dataset_sha256":"` + datasetSHA + `","harness_url":"http://h"}`, "seed is required"},
+		{"missing hash", `{"bench_version":7,"inference_session_id":"test","seed":42,"run_size":"full","harness_url":"http://h"}`, "dataset_sha256 is required"},
+		{"malformed hash", `{"bench_version":7,"inference_session_id":"test","seed":42,"run_size":"full","dataset_sha256":"abc","harness_url":"http://h"}`, "64 lowercase hex"},
+		{"missing run_size", `{"bench_version":7,"inference_session_id":"test","seed":42,"dataset_sha256":"` + datasetSHA + `","harness_url":"http://h"}`, "run_size is required"},
+		{"no source", `{"bench_version":7,"inference_session_id":"test","seed":42,"run_size":"full","dataset_sha256":"` + datasetSHA + `"}`, "exactly one of"},
+		{"two sources", `{"bench_version":7,"inference_session_id":"test","seed":42,"run_size":"full","dataset_sha256":"` + datasetSHA + `","harness_url":"http://h","git_url":"http://g"}`, "exactly one of"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -103,19 +103,18 @@ func TestVerifyDatasetHashFailsClosed(t *testing.T) {
 	}
 }
 
-func TestCanonicalScoreRequiresTicketInferenceWhenEnforced(t *testing.T) {
+func TestRetiredBenchmarkVersionsAreRejected(t *testing.T) {
 	s := newScoreTestServer()
 	s.requireTicketInference = true
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(
 		http.MethodPost,
 		"/v2/score",
-		strings.NewReader(`{"bench_version":5}`),
+		strings.NewReader(`{"bench_version":6}`),
 	)
 	s.handleVersionedScore(rr, req)
-	if rr.Code != http.StatusServiceUnavailable ||
-		!strings.Contains(rr.Body.String(), "ticket inference session is required") {
-		t.Fatalf("expected ticket inference 503, got %d %s", rr.Code, rr.Body.String())
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "unsupported bench_version") {
+		t.Fatalf("expected retired-version 400, got %d %s", rr.Code, rr.Body.String())
 	}
 }
 
@@ -144,13 +143,18 @@ func TestBenchmarkV8IntrinsicallyRequiresTicketInference(t *testing.T) {
 	}
 }
 
-func TestRequestedBenchVersionLegacyCompatibility(t *testing.T) {
-	if got, msg := requestedBenchVersion(0, false); got != 2 || msg != "" {
-		t.Fatalf("legacy omitted version must select exact v2, got (%d, %q)", got, msg)
+func TestRequestedBenchVersionSupportsOnlyV7AndV8(t *testing.T) {
+	if got, msg := requestedBenchVersion(0, false); got != 7 || msg != "" {
+		t.Fatalf("omitted practice version must select v7, got (%d, %q)", got, msg)
 	}
-	for _, version := range []int{2, 3} {
+	for _, version := range []int{7, 8} {
 		if got, msg := requestedBenchVersion(version, true); got != version || msg != "" {
 			t.Fatalf("explicit v%d rejected: (%d, %q)", version, got, msg)
+		}
+	}
+	for version := 2; version <= 6; version++ {
+		if got, msg := requestedBenchVersion(version, true); got != 0 || !strings.Contains(msg, "unsupported") {
+			t.Fatalf("retired v%d accepted: (%d, %q)", version, got, msg)
 		}
 	}
 }
