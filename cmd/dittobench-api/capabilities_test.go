@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -108,6 +109,28 @@ func TestV8CapabilityIsQualityOnlyAndFailClosed(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("technically ready v8 was not advertised")
+	}
+}
+
+func TestV8CapabilityRequiresLiveExecutorIsolation(t *testing.T) {
+	s := &server{
+		softwareVersion: "0.10.0",
+		sourceRevision:  testSourceRevision,
+		sandbox: &diagnosticSandbox{
+			v8IsolationErr: errors.New("rootless policy is not enabled"),
+		},
+	}
+	got := capabilitiesOf(t, s)
+	foundV7, foundV8 := false, false
+	for _, version := range got.SupportedBenchVersions {
+		foundV7 = foundV7 || version == protocol.BenchVersionV7
+		foundV8 = foundV8 || version == protocol.BenchVersionV8
+	}
+	if efficiency.ProductionReadyForVersion(protocol.BenchVersionV7) && !foundV7 {
+		t.Fatal("the additive rootless migration must not withdraw v7")
+	}
+	if foundV8 {
+		t.Fatal("v8 was advertised without a verified rootless executor")
 	}
 }
 

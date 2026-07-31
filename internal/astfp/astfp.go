@@ -1,11 +1,13 @@
-// Package astfp computes an AST-level structural fingerprint of a submitted
-// Rust harness crate. It is the structural counterpart to the platform's lexical
+// Package astfp computes a structural fingerprint of a submitted harness. It
+// uses tree-sitter's Rust AST when Rust is present and a language-aware,
+// identifier/literal-neutral token structure for other source languages. It is
+// the structural counterpart to the platform's lexical
 // content fingerprint (ditto-platform ditto/api_server/fingerprint.py): where the
 // lexical signal survives reformatting and localized edits, this survives
 // identifier renaming and reformatting because it hashes only the *shape* of the
 // parse tree, never the text of identifiers or literals.
 //
-// How it works. Each .rs file under the extracted crate is parsed with
+// How it works. Each .rs file under the extracted harness is parsed with
 // tree-sitter-rust; a pre-order walk emits the sequence of *named node types*
 // (e.g. function_item, let_declaration, binary_expression) — the leaves that
 // carry a name or a literal contribute only their node type, never their text,
@@ -20,10 +22,13 @@
 // ScoreReport as advisory (unsigned) moderation metadata; the platform's anti-copy
 // gate holds a cross-miner structural near-duplicate for human review.
 //
-// It is computed here, in the scorer, because this is where the crate is already
-// unpacked and a Rust parser is available — the platform (a Python payment
-// service) has neither. Everything is pure + deterministic: the same crate always
-// yields the same sketch.
+// Other common compiled and interpreted source files use a bounded generic
+// tokenizer that retains keywords/operators while replacing identifiers and
+// literals. This keeps renamed Python, TypeScript, Go, Java, C/C++, C#, Ruby,
+// PHP, Swift, Kotlin, Scala, Elixir/Erlang, Lua, Dart, Zig, shell, and similar
+// harnesses comparable without making any language an admission requirement.
+// Everything is pure + deterministic: the same source tree yields the same
+// sketch.
 package astfp
 
 import (
@@ -36,6 +41,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/ditto-assistant/dittobench-datagen/protocol"
 	sitter "github.com/smacker/go-tree-sitter"
@@ -50,7 +56,8 @@ const (
 	Version = 1
 	// A shingle is this many consecutive named node types. Small enough that a
 	// localized edit disturbs few shingles; large enough to be distinctive.
-	shingleNodes = 6
+	shingleNodes         = 6
+	genericShingleTokens = 10
 	// Bottom-k sketch budget — fixed-size summary, exact when the shingle set is
 	// smaller than k (the common case).
 	minhashK = 256
@@ -73,9 +80,9 @@ const (
 	ctxCheckEvery = 8192
 )
 
-// FromDir walks the extracted crate at dir and returns its structural
-// fingerprint (a protocol.CodeFingerprint sketch), or nil when the crate has no
-// parseable Rust or trips a guard.
+// FromDir walks the extracted harness at dir and returns its structural
+// fingerprint (a protocol.CodeFingerprint sketch), or nil when it has no
+// supported parseable source or trips a guard.
 //
 // It never returns an error: fingerprinting is a best-effort moderation signal
 // layered on an already-verified, about-to-be-scored submission, so a crate that
@@ -94,7 +101,11 @@ func FromDir(ctx context.Context, dir string) *protocol.CodeFingerprint {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if d.IsDir() || !strings.HasSuffix(path, ".rs") {
+		if d.IsDir() {
+			return nil
+		}
+		kind, supported := sourceKind(path)
+		if !supported {
 			return nil
 		}
 		files++
@@ -105,7 +116,11 @@ func FromDir(ctx context.Context, dir string) *protocol.CodeFingerprint {
 		if rerr != nil {
 			return nil
 		}
-		for _, s := range fileShingles(ctx, parser, src) {
+		fileHashes := genericFileShingles(kind, src)
+		if kind == "rust" {
+			fileHashes = fileShingles(ctx, parser, src)
+		}
+		for _, s := range fileHashes {
 			shingles[s] = struct{}{}
 			if len(shingles) > maxShingles {
 				return fs.SkipAll
@@ -117,6 +132,140 @@ func FromDir(ctx context.Context, dir string) *protocol.CodeFingerprint {
 		return nil
 	}
 	return sketch(shingles)
+}
+
+var sourceKinds = map[string]string{
+	".rs": "rust", ".py": "python", ".pyw": "python",
+	".js": "javascript", ".jsx": "javascript", ".mjs": "javascript", ".cjs": "javascript",
+	".ts": "typescript", ".tsx": "typescript", ".mts": "typescript", ".cts": "typescript",
+	".go": "go", ".java": "java", ".kt": "kotlin", ".kts": "kotlin",
+	".c": "c", ".h": "c", ".cc": "cpp", ".cpp": "cpp", ".cxx": "cpp", ".hh": "cpp", ".hpp": "cpp",
+	".cs": "csharp", ".rb": "ruby", ".php": "php", ".swift": "swift",
+	".scala": "scala", ".sc": "scala", ".ex": "elixir", ".exs": "elixir",
+	".erl": "erlang", ".hrl": "erlang", ".fs": "fsharp", ".fsx": "fsharp",
+	".lua": "lua", ".dart": "dart", ".zig": "zig",
+	".sh": "shell", ".bash": "shell", ".zsh": "shell",
+	".vue": "web", ".svelte": "web",
+}
+
+func sourceKind(path string) (string, bool) {
+	kind, ok := sourceKinds[strings.ToLower(filepath.Ext(path))]
+	return kind, ok
+}
+
+var structuralKeywords = map[string]struct{}{
+	"as": {}, "async": {}, "await": {}, "break": {}, "case": {}, "catch": {},
+	"class": {}, "const": {}, "continue": {}, "def": {}, "defer": {}, "do": {},
+	"else": {}, "elif": {}, "enum": {}, "except": {}, "export": {}, "extends": {},
+	"false": {}, "finally": {}, "fn": {}, "for": {}, "foreach": {}, "from": {},
+	"func": {}, "function": {}, "go": {}, "if": {}, "implements": {}, "import": {},
+	"in": {}, "interface": {}, "let": {}, "loop": {}, "match": {}, "mod": {},
+	"new": {}, "nil": {}, "none": {}, "null": {}, "package": {}, "pass": {},
+	"private": {}, "protected": {}, "public": {}, "raise": {}, "return": {},
+	"select": {}, "self": {}, "static": {}, "struct": {}, "super": {}, "switch": {},
+	"this": {}, "throw": {}, "trait": {}, "true": {}, "try": {}, "type": {},
+	"typeof": {}, "union": {}, "unsafe": {}, "use": {}, "var": {}, "while": {},
+	"with": {}, "yield": {},
+}
+
+func genericFileShingles(kind string, src []byte) []string {
+	tokens := genericTokens(kind, []rune(string(src)))
+	if len(tokens) == 0 {
+		return nil
+	}
+	if len(tokens) < genericShingleTokens {
+		return []string{hashShingle("generic:" + kind + ":" + strings.Join(tokens, " "))}
+	}
+	out := make([]string, 0, len(tokens)-genericShingleTokens+1)
+	for i := 0; i+genericShingleTokens <= len(tokens); i++ {
+		out = append(out, hashShingle("generic:"+kind+":"+strings.Join(tokens[i:i+genericShingleTokens], " ")))
+	}
+	return out
+}
+
+func genericTokens(kind string, src []rune) []string {
+	tokens := make([]string, 0, min(len(src)/3, maxNodesPerFile))
+	hashComment := kind == "python" || kind == "ruby" || kind == "shell" || kind == "php"
+	for i := 0; i < len(src) && len(tokens) < maxNodesPerFile; {
+		r := src[i]
+		if unicode.IsSpace(r) {
+			i++
+			continue
+		}
+		if hashComment && r == '#' {
+			for i < len(src) && src[i] != '\n' {
+				i++
+			}
+			continue
+		}
+		if r == '/' && i+1 < len(src) && src[i+1] == '/' {
+			i += 2
+			for i < len(src) && src[i] != '\n' {
+				i++
+			}
+			continue
+		}
+		if r == '/' && i+1 < len(src) && src[i+1] == '*' {
+			i += 2
+			for i+1 < len(src) && !(src[i] == '*' && src[i+1] == '/') {
+				i++
+			}
+			if i+1 < len(src) {
+				i += 2
+			}
+			continue
+		}
+		if r == '\'' || r == '"' || r == '`' {
+			quote := r
+			i++
+			for i < len(src) {
+				if src[i] == '\\' {
+					i += 2
+					continue
+				}
+				if src[i] == quote {
+					i++
+					break
+				}
+				i++
+			}
+			tokens = append(tokens, "literal")
+			continue
+		}
+		if unicode.IsDigit(r) {
+			i++
+			for i < len(src) && (unicode.IsDigit(src[i]) || unicode.IsLetter(src[i]) || strings.ContainsRune("._", src[i])) {
+				i++
+			}
+			tokens = append(tokens, "number")
+			continue
+		}
+		if r == '_' || unicode.IsLetter(r) {
+			start := i
+			i++
+			for i < len(src) && (src[i] == '_' || unicode.IsLetter(src[i]) || unicode.IsDigit(src[i])) {
+				i++
+			}
+			word := strings.ToLower(string(src[start:i]))
+			if _, keyword := structuralKeywords[word]; keyword {
+				tokens = append(tokens, word)
+			} else {
+				tokens = append(tokens, "identifier")
+			}
+			continue
+		}
+		if i+1 < len(src) {
+			pair := string(src[i : i+2])
+			if strings.Contains(" == != <= >= -> => :: := && || ++ -- += -= *= /= ** ?? ?. << >> ", " "+pair+" ") {
+				tokens = append(tokens, pair)
+				i += 2
+				continue
+			}
+		}
+		tokens = append(tokens, string(r))
+		i++
+	}
+	return tokens
 }
 
 // readCapped reads the whole file up to max bytes; a file larger than the cap is

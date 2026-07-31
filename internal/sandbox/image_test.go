@@ -274,6 +274,33 @@ func TestValidateDockerSaveArchiveAcceptsUntaggedSingleID(t *testing.T) {
 	}
 }
 
+func TestLoadScreenedImageAcceptsDerivedContainerdStoreID(t *testing.T) {
+	archive, imageID := makeScreenedImageArchive(t)
+	accepted := map[string]struct{}{imageID: {}}
+	if _, err := validateDockerSaveArchiveWithStoreIDs(writeArchive(t, archive), testScreenedImageRef, imageID, accepted); err != nil {
+		t.Fatal(err)
+	}
+	containerdID := ""
+	for candidate := range accepted {
+		if candidate != imageID {
+			containerdID = candidate
+		}
+	}
+	if containerdID == "" {
+		t.Fatal("classic archive did not derive a containerd store manifest id")
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(archive)
+	}))
+	defer server.Close()
+	installFakeDocker(t, "", containerdID)
+	src := screenedImageSource(server.URL, archive, imageID)
+	if _, _, err := (&LocalDocker{AllowPrivate: true}).loadScreenedImage(context.Background(), src, t.TempDir()); err != nil {
+		t.Fatalf("load with containerd store id %s: %v", containerdID, err)
+	}
+}
+
 func TestValidateDockerSaveArchiveRejectsMultipleImageIDs(t *testing.T) {
 	archive, imageID := makeScreenedImageArchiveVariant(t, nil, true)
 	path := filepath.Join(t.TempDir(), "image.tar")
@@ -328,6 +355,10 @@ echo "$@" >> "$FAKE_DOCKER_LOG"
 if [ "$1 $2" = "image inspect" ]; then
   [ -f "$FAKE_DOCKER_STATE" ] || exit 1
   [ "$FAKE_DOCKER_MODE" = "inspect-fail" ] && exit 1
+  if [ "$4" = "{{if .Config.Volumes}}declared{{end}}" ]; then
+    [ "$FAKE_DOCKER_MODE" = "volumes" ] && echo declared
+    exit 0
+  fi
   echo "$FAKE_DOCKER_IMAGE_ID"
   exit 0
 fi
@@ -362,7 +393,7 @@ func TestLoadScreenedImageVerifiesArchiveAndDockerID(t *testing.T) {
 
 	fakeBin := t.TempDir()
 	fakeDocker := filepath.Join(fakeBin, "docker")
-	script := fmt.Sprintf("#!/bin/sh\nif [ \"$1 $2\" = \"image inspect\" ]; then echo %s; fi\nexit 0\n", imageID)
+	script := fmt.Sprintf("#!/bin/sh\nif [ \"$1 $2\" = \"image inspect\" ]; then if [ \"$4\" = \"{{if .Config.Volumes}}declared{{end}}\" ]; then exit 0; fi; echo %s; fi\nexit 0\n", imageID)
 	if err := os.WriteFile(fakeDocker, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -433,6 +464,7 @@ func TestLoadScreenedImageCleansUpFailures(t *testing.T) {
 		{"docker-load", "load-fail", expectedID, "docker image load failed"},
 		{"missing-ref", "inspect-fail", expectedID, "loaded archive missing expected image ref"},
 		{"image-id", "", "sha256:" + repeatHex("56", 32), "screened image id mismatch"},
+		{"declared-volume", "volumes", expectedID, "declares writable volumes"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			logPath := installFakeDocker(t, tc.mode, tc.actualID)

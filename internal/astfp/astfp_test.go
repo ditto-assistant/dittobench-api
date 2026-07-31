@@ -223,16 +223,87 @@ func TestFromDir_ConcurrentRaceFree(t *testing.T) {
 	wg.Wait()
 }
 
-func TestFromDir_NoRustReturnsNil(t *testing.T) {
+func TestFromDir_NoSupportedSourceReturnsNil(t *testing.T) {
 	ctx := context.Background()
 	dir := writeCrate(t, map[string]string{
 		"README.md":  "# not rust",
 		"Cargo.toml": "[package]\nname = \"x\"",
 	})
 	if fp := FromDir(ctx, dir); fp != nil {
-		t.Fatalf("expected nil for a crate with no .rs, got %+v", fp)
+		t.Fatalf("expected nil without supported source, got %+v", fp)
 	}
 	if fp := FromDir(ctx, t.TempDir()); fp != nil {
 		t.Fatalf("expected nil for empty dir, got %+v", fp)
+	}
+}
+
+func TestFromDir_GenericLanguagesAreFingerprintable(t *testing.T) {
+	for name, source := range map[string]string{
+		"python/app.py": `
+async def answer(request):
+    records = await search(request.query)
+    return {"answer": records[0].value}
+`,
+		"typescript/app.ts": `
+export async function answer(request: Request): Promise<Response> {
+  const records = await search(request.query)
+  return { answer: records[0].value }
+}
+`,
+		"go/main.go": `
+package main
+func answer(request Request) Response {
+    records := search(request.Query)
+    return Response{Answer: records[0].Value}
+}
+`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if fp := FromDir(context.Background(), writeCrate(t, map[string]string{name: source})); fp == nil || fp.Card == 0 {
+				t.Fatalf("%s source did not produce a structural fingerprint: %+v", name, fp)
+			}
+		})
+	}
+}
+
+func TestFromDir_GenericIdentifierAndLiteralChangesAreInvisible(t *testing.T) {
+	original := `
+async def answer(request):
+    records = await search(request.query)
+    if len(records) > 2:
+        return {"answer": records[0].value}
+    return {"answer": "missing"}
+`
+	renamed := `
+async def resolve(payload):
+    matches = await lookup(payload.text)
+    if len(matches) > 99:
+        return {"result": matches[0].content}
+    return {"result": "unknown"}
+`
+	a := FromDir(context.Background(), writeCrate(t, map[string]string{"app.py": original}))
+	b := FromDir(context.Background(), writeCrate(t, map[string]string{"service.py": renamed}))
+	if j := jaccard(a, b); j != 1.0 {
+		t.Fatalf("generic identifier/literal changes should be invisible, jaccard=%v", j)
+	}
+}
+
+func TestFromDir_GenericDistinctProgramsDiffer(t *testing.T) {
+	a := FromDir(context.Background(), writeCrate(t, map[string]string{"app.py": `
+def answer(request):
+    records = search(request.query)
+    return records[0]
+`}))
+	b := FromDir(context.Background(), writeCrate(t, map[string]string{"app.py": `
+class Queue:
+    def run(self):
+        while True:
+            try:
+                yield self.items.pop()
+            except IndexError:
+                break
+`}))
+	if j := jaccard(a, b); j > 0.5 {
+		t.Fatalf("distinct generic programs should differ, jaccard=%v", j)
 	}
 }
