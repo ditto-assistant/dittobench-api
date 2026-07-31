@@ -112,7 +112,7 @@ func TestV8CapabilityIsQualityOnlyAndFailClosed(t *testing.T) {
 	}
 }
 
-func TestV8CapabilityRequiresLiveExecutorIsolation(t *testing.T) {
+func TestV8CapabilityRequiresLiveExecutorReadiness(t *testing.T) {
 	s := &server{
 		softwareVersion: "0.10.0",
 		sourceRevision:  testSourceRevision,

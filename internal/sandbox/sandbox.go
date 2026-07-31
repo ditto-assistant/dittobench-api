@@ -295,14 +295,11 @@ func (d *LocalDocker) Available(ctx context.Context) error {
 	return nil
 }
 
-// V8IsolationReady reports whether this live executor satisfies the mandatory
-// V8 untrusted-runtime boundary. V7 remains available during the additive
-// rollout, but a scorer must not advertise V8 merely because its binary embeds
-// the V8 dataset contract while it still points at a rootful daemon.
+// V8IsolationReady reports whether the configured executor is reachable and
+// satisfies the operator-selected isolation policy. RequireRootless remains a
+// fail-closed hardening option, but the reviewed privileged-DinD compatibility
+// stack can serve V8 while older managed validators migrate to rootless DinD.
 func (d *LocalDocker) V8IsolationReady(ctx context.Context) error {
-	if !d.RequireRootless {
-		return fmt.Errorf("v8 executor isolation unavailable: rootless policy is not enabled")
-	}
 	if err := d.Available(ctx); err != nil {
 		return fmt.Errorf("v8 executor isolation unavailable: %w", err)
 	}
