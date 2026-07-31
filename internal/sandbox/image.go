@@ -29,6 +29,7 @@ const (
 	dockerManifestMediaType   = "application/vnd.docker.distribution.manifest.v2+json"
 	dockerConfigMediaType     = "application/vnd.docker.container.image.v1+json"
 	dockerLayerMediaType      = "application/vnd.docker.image.rootfs.diff.tar"
+	dockerLayerGzipMediaType  = "application/vnd.docker.image.rootfs.diff.tar.gzip"
 	inTotoMediaType           = "application/vnd.in-toto+json"
 	maxAttestationDescriptors = 32
 	maxAttachmentBlobBytes    = 16 << 20
@@ -255,9 +256,10 @@ func validateDockerSaveArchiveWithStoreIDs(path, expectedRef, expectedID string,
 	reader := tar.NewReader(file)
 	var manifestBytes []byte
 	var indexBytes []byte
-	var expectedOCIIndexBytes []byte
+	var expectedImageDescriptorBytes []byte
 	verifiedSmallBlobs := make(map[string]bool)
 	smallBlobBytes := make(map[string][]byte)
+	ociBlobSizes := make(map[string]int64)
 	smallBlobCount := 0
 	smallBlobTotal := int64(0)
 	expectedDigestCount := 0
@@ -273,6 +275,12 @@ func validateDockerSaveArchiveWithStoreIDs(path, expectedRef, expectedID string,
 			return false, fmt.Errorf("read tar: %w", err)
 		}
 		name := strings.TrimPrefix(header.Name, "./")
+		if _, ok := ociBlobDigest(name); ok {
+			if _, duplicate := ociBlobSizes[name]; duplicate {
+				return false, fmt.Errorf("duplicate OCI blob %q", name)
+			}
+			ociBlobSizes[name] = header.Size
+		}
 		if name == "manifest.json" {
 			if manifestBytes != nil {
 				return false, fmt.Errorf("duplicate manifest.json")
@@ -311,16 +319,19 @@ func validateDockerSaveArchiveWithStoreIDs(path, expectedRef, expectedID string,
 				if header.Size <= 0 || header.Size > 4<<20 {
 					return false, fmt.Errorf("expected OCI index has invalid size %d", header.Size)
 				}
-				expectedOCIIndexBytes, err = io.ReadAll(io.LimitReader(reader, header.Size+1))
+				expectedImageDescriptorBytes, err = io.ReadAll(io.LimitReader(reader, header.Size+1))
 				if err != nil {
-					return false, fmt.Errorf("read expected OCI index: %w", err)
+					return false, fmt.Errorf("read expected OCI descriptor: %w", err)
 				}
-				if int64(len(expectedOCIIndexBytes)) != header.Size {
-					return false, fmt.Errorf("read expected OCI index: expected %d bytes got %d", header.Size, len(expectedOCIIndexBytes))
+				if int64(len(expectedImageDescriptorBytes)) != header.Size {
+					return false, fmt.Errorf("read expected OCI descriptor: expected %d bytes got %d", header.Size, len(expectedImageDescriptorBytes))
 				}
-				digest := sha256.Sum256(expectedOCIIndexBytes)
+				digest := sha256.Sum256(expectedImageDescriptorBytes)
 				expectedDigestOK = strings.EqualFold(hex.EncodeToString(digest[:]), expectedHex)
 				verifiedSmallBlobs[name] = expectedDigestOK
+				if expectedDigestOK {
+					smallBlobBytes[name] = expectedImageDescriptorBytes
+				}
 			} else {
 				expectedConfigSize = header.Size
 				hasher := sha256.New()
@@ -402,7 +413,12 @@ func validateDockerSaveArchiveWithStoreIDs(path, expectedRef, expectedID string,
 	}
 	oci := false
 	if !classic && indexBytes != nil {
-		runnableDigests, err := validatePrimaryOCIIndex(expectedOCIIndexBytes, smallBlobBytes)
+		primaryMediaType, runnableDigests, err := validatePrimaryOCIImage(
+			expectedImageDescriptorBytes,
+			expectedID,
+			smallBlobBytes,
+			ociBlobSizes,
+		)
 		if err != nil {
 			return false, err
 		}
@@ -420,7 +436,7 @@ func validateDockerSaveArchiveWithStoreIDs(path, expectedRef, expectedID string,
 			if descriptor.Digest == expectedID {
 				primaryCount++
 				name := strings.TrimPrefix(descriptor.Annotations["io.containerd.image.name"], "docker.io/")
-				if descriptor.MediaType != ociImageIndexMediaType ||
+				if descriptor.MediaType != primaryMediaType ||
 					(name != expectedRef && (archiveTagged || name != "")) {
 					return false, fmt.Errorf("expected image descriptor has invalid media type or name")
 				}
@@ -472,6 +488,61 @@ func validateDockerSaveArchiveWithStoreIDs(path, expectedRef, expectedID string,
 		acceptedLoadedIDs["sha256:"+hex.EncodeToString(digest[:])] = struct{}{}
 	}
 	return archiveTagged, nil
+}
+
+// validatePrimaryOCIImage accepts the two immutable identities emitted by
+// current Docker image stores. A provenance-bearing BuildKit result is an OCI
+// image index; `--provenance=false` instead makes Docker expose the schema-2
+// image manifest itself as `.Id`. Both are content-addressed, single-image
+// roots in the surrounding OCI archive and remain bound to expectedID.
+func validatePrimaryOCIImage(data []byte, expectedID string, blobs map[string][]byte, blobSizes map[string]int64) (string, map[string]struct{}, error) {
+	var header struct {
+		SchemaVersion int    `json:"schemaVersion"`
+		MediaType     string `json:"mediaType"`
+	}
+	if err := json.Unmarshal(data, &header); err != nil {
+		return "", nil, fmt.Errorf("decode expected OCI descriptor: %w", err)
+	}
+	switch header.MediaType {
+	case ociImageIndexMediaType:
+		runnable, err := validatePrimaryOCIIndex(data, blobs)
+		return ociImageIndexMediaType, runnable, err
+	case dockerManifestMediaType:
+		if err := validateDockerSchema2ImageManifest(data, blobSizes, blobs); err != nil {
+			return "", nil, err
+		}
+		return dockerManifestMediaType, map[string]struct{}{expectedID: {}}, nil
+	default:
+		return "", nil, fmt.Errorf("expected OCI descriptor has unsupported media type %q", header.MediaType)
+	}
+}
+
+func validateDockerSchema2ImageManifest(data []byte, blobSizes map[string]int64, verifiedBlobs map[string][]byte) error {
+	var manifest dockerSchema2Manifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return fmt.Errorf("decode expected Docker manifest: %w", err)
+	}
+	if manifest.SchemaVersion != 2 || manifest.MediaType != dockerManifestMediaType ||
+		manifest.Config.MediaType != dockerConfigMediaType ||
+		!canonicalSHA256Digest(manifest.Config.Digest) || manifest.Config.Size <= 0 ||
+		len(manifest.Layers) > maxClassicImageLayers {
+		return fmt.Errorf("expected Docker manifest has invalid shape")
+	}
+	configName := "blobs/sha256/" + strings.TrimPrefix(manifest.Config.Digest, "sha256:")
+	if blobSizes[configName] != manifest.Config.Size || verifiedBlobs[configName] == nil {
+		return fmt.Errorf("expected Docker manifest references invalid config")
+	}
+	for _, layer := range manifest.Layers {
+		if (layer.MediaType != dockerLayerMediaType && layer.MediaType != dockerLayerGzipMediaType) ||
+			!canonicalSHA256Digest(layer.Digest) || layer.Size <= 0 {
+			return fmt.Errorf("expected Docker manifest contains an invalid layer descriptor")
+		}
+		name := "blobs/sha256/" + strings.TrimPrefix(layer.Digest, "sha256:")
+		if blobSizes[name] != layer.Size {
+			return fmt.Errorf("expected Docker manifest references a missing or size-mismatched layer")
+		}
+	}
+	return nil
 }
 
 func validatePrimaryOCIIndex(data []byte, blobs map[string][]byte) (map[string]struct{}, error) {

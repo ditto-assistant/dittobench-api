@@ -174,6 +174,88 @@ func makeOCIIndexArchive(t *testing.T, mutate func(*[]ociDescriptor)) ([]byte, s
 	return archive.Bytes(), imageID
 }
 
+func makeDockerSchema2OCIArchive(t *testing.T, mutate func(map[string]any), includeLayer bool) ([]byte, string) {
+	t.Helper()
+	config := []byte(`{"architecture":"amd64","os":"linux"}`)
+	configDigest := sha256.Sum256(config)
+	configID := "sha256:" + hex.EncodeToString(configDigest[:])
+	layer := []byte("screened image layer")
+	layerDigest := sha256.Sum256(layer)
+	layerID := "sha256:" + hex.EncodeToString(layerDigest[:])
+	manifest := map[string]any{
+		"schemaVersion": 2,
+		"mediaType":     dockerManifestMediaType,
+		"config": map[string]any{
+			"mediaType": dockerConfigMediaType,
+			"digest":    configID,
+			"size":      len(config),
+		},
+		"layers": []map[string]any{{
+			"mediaType": dockerLayerGzipMediaType,
+			"digest":    layerID,
+			"size":      len(layer),
+		}},
+	}
+	if mutate != nil {
+		mutate(manifest)
+	}
+	primary, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	primaryDigest := sha256.Sum256(primary)
+	imageID := "sha256:" + hex.EncodeToString(primaryDigest[:])
+	configName := "blobs/sha256/" + strings.TrimPrefix(configID, "sha256:")
+	layerName := "blobs/sha256/" + strings.TrimPrefix(layerID, "sha256:")
+	manifestBytes, err := json.Marshal([]map[string]any{{
+		"Config": configName, "RepoTags": nil, "Layers": []string{layerName},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	indexBytes, err := json.Marshal(map[string]any{
+		"schemaVersion": 2,
+		"mediaType":     ociImageIndexMediaType,
+		"manifests": []map[string]any{{
+			"mediaType": dockerManifestMediaType,
+			"digest":    imageID,
+			"size":      len(primary),
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := []struct {
+		name string
+		body []byte
+	}{
+		{configName, config},
+		{"blobs/sha256/" + strings.TrimPrefix(imageID, "sha256:"), primary},
+		{"manifest.json", manifestBytes},
+		{"index.json", indexBytes},
+	}
+	if includeLayer {
+		files = append(files, struct {
+			name string
+			body []byte
+		}{layerName, layer})
+	}
+	var archive bytes.Buffer
+	writer := tar.NewWriter(&archive)
+	for _, file := range files {
+		if err := writer.WriteHeader(&tar.Header{Name: file.name, Mode: 0o600, Size: int64(len(file.body))}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := writer.Write(file.body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return archive.Bytes(), imageID
+}
+
 func writeArchive(t *testing.T, archive []byte) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "image.tar")
@@ -208,6 +290,42 @@ func TestValidateDockerSaveArchiveAcceptsBoundedAttestations(t *testing.T) {
 			}
 			if tagged {
 				t.Fatal("untagged OCI index reported as tagged")
+			}
+		})
+	}
+}
+
+func TestValidateDockerSaveArchiveAcceptsProvenanceDisabledDockerStoreID(t *testing.T) {
+	archive, imageID := makeDockerSchema2OCIArchive(t, nil, true)
+	tagged, err := validateDockerSaveArchive(writeArchive(t, archive), testScreenedImageRef, imageID)
+	if err != nil {
+		t.Fatalf("valid provenance-disabled Docker archive rejected: %v", err)
+	}
+	if tagged {
+		t.Fatal("untagged Docker archive reported as tagged")
+	}
+}
+
+func TestValidateDockerSaveArchiveRejectsMalformedDockerStoreManifest(t *testing.T) {
+	tests := []struct {
+		name         string
+		mutate       func(map[string]any)
+		includeLayer bool
+	}{
+		{"wrong schema", func(manifest map[string]any) { manifest["schemaVersion"] = 1 }, true},
+		{"foreign layer", func(manifest map[string]any) {
+			manifest["layers"].([]map[string]any)[0]["mediaType"] = "application/vnd.docker.image.rootfs.foreign.diff.tar.gzip"
+		}, true},
+		{"wrong config size", func(manifest map[string]any) {
+			manifest["config"].(map[string]any)["size"] = 999
+		}, true},
+		{"missing layer", nil, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			archive, imageID := makeDockerSchema2OCIArchive(t, tc.mutate, tc.includeLayer)
+			if _, err := validateDockerSaveArchive(writeArchive(t, archive), testScreenedImageRef, imageID); err == nil {
+				t.Fatal("malformed Docker store manifest was accepted")
 			}
 		})
 	}
