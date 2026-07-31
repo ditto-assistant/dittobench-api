@@ -58,15 +58,21 @@ type versionReport struct {
 	SupportedBenchVersions  []int          `json:"supported_bench_versions"`
 	V7Advertised            bool           `json:"v7_advertised"`
 	V7ManifestSHA256        string         `json:"v7_manifest_sha256"`
+	V8Advertised            bool           `json:"v8_advertised"`
+	V8ManifestSHA256        string         `json:"v8_manifest_sha256"`
 }
 
 func newVersionReport(identity release.Identity) versionReport {
 	v7 := efficiency.V7CalibrationReadiness()
+	v8 := efficiency.V8Readiness()
 	versions := supportedBenchVersions()
-	advertised := false
+	v7Advertised, v8Advertised := false, false
 	for _, version := range versions {
 		if version == protocol.BenchVersionV7 {
-			advertised = true
+			v7Advertised = true
+		}
+		if version == protocol.BenchVersionV8 {
+			v8Advertised = true
 		}
 	}
 	return versionReport{
@@ -79,8 +85,10 @@ func newVersionReport(identity release.Identity) versionReport {
 		SourceRevisionMismatch:  identity.SourceRevisionMismatch,
 		SourceRevisionCanonical: canonicalSourceRevision(identity.SourceRevision),
 		SupportedBenchVersions:  versions,
-		V7Advertised:            advertised,
+		V7Advertised:            v7Advertised,
 		V7ManifestSHA256:        v7.ManifestSHA256,
+		V8Advertised:            v8Advertised,
+		V8ManifestSHA256:        v8.ManifestSHA256,
 	}
 }
 
@@ -105,6 +113,8 @@ func writeVersion(w io.Writer, identity release.Identity, asJSON bool) error {
 		{"supported_bench_versions", strings.Join(versions, ",")},
 		{"v7_advertised", fmt.Sprintf("%t", report.V7Advertised)},
 		{"v7_manifest_sha256", orNone(report.V7ManifestSHA256)},
+		{"v8_advertised", fmt.Sprintf("%t", report.V8Advertised)},
+		{"v8_manifest_sha256", orNone(report.V8ManifestSHA256)},
 	}
 	if _, err := fmt.Fprintln(w, "dittobench-api"); err != nil {
 		return err

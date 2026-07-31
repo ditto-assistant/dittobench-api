@@ -116,8 +116,8 @@ func main() {
 			usage.Provider == "" || usage.ProfileRevision == "" || usage.Model == "" {
 			fatalf("%s: report is not a complete v%d proxy-metered run", path, *benchVersion)
 		}
-		if *benchVersion == protocol.BenchVersionV7 && usage.Model != llm.V7HarnessModel {
-			fatalf("%s: report does not match the v7 GPT-OSS contract", path)
+		if *benchVersion >= protocol.BenchVersionV7 && usage.Model != llm.V7HarnessModel {
+			fatalf("%s: report does not match the v7+ GPT-OSS contract", path)
 		}
 		key := datasetKey(report.Details.RunSize, report.Seed, report.Details.DatasetSHA256)
 		if _, ok := expected[key]; !ok {
@@ -162,7 +162,7 @@ func main() {
 			TotalTokens: budget.TotalTokens, Samples: len(reports), Aggregation: "nearest_rank_p90",
 			StarterKitRevision: manifest.StarterKitRevision,
 		}
-		if *benchVersion == protocol.BenchVersionV7 {
+		if *benchVersion >= protocol.BenchVersionV7 {
 			baseline.RawReferencePromptTokens = budget.PromptTokens
 			baseline.RawReferenceCompletionTokens = budget.CompletionTokens
 			baseline.RawReferenceTotalTokens = budget.TotalTokens
@@ -253,6 +253,12 @@ func calibrationManifest(benchVersion int, starterKitRevision string) (efficienc
 	manifest := efficiency.ManifestSnapshot()
 	if benchVersion == protocol.BenchVersionV5 {
 		return manifest, nil
+	}
+	if benchVersion != protocol.BenchVersionV7 {
+		return manifest, fmt.Errorf(
+			"benchmark v%d does not use static token calibration; v8+ efficiency is platform-relative",
+			benchVersion,
+		)
 	}
 	if !canonicalGitRevision(starterKitRevision) {
 		return manifest, fmt.Errorf("v7 requires a canonical 40-character lowercase starter-kit git revision")

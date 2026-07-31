@@ -1,0 +1,38 @@
+package efficiency
+
+import (
+	"testing"
+
+	"github.com/ditto-assistant/dittobench-datagen/protocol"
+)
+
+func TestV8QualityOnlyContractFailsClosedOnIdentityDrift(t *testing.T) {
+	contract := V8ContractSnapshot()
+	if !ReadyForV8QualityOnly(contract) {
+		t.Fatal("embedded v8 contract is not ready")
+	}
+	mutations := []func(*QualityOnlyContract){
+		func(c *QualityOnlyContract) { c.SchemaVersion++ },
+		func(c *QualityOnlyContract) { c.DatasetKnownVector = "" },
+		func(c *QualityOnlyContract) { c.ScorerTokenPolicy = "absolute-baseline" },
+		func(c *QualityOnlyContract) { c.EfficiencyAuthority = "scorer" },
+		func(c *QualityOnlyContract) { c.Harness.Model = "attacker/model" },
+		func(c *QualityOnlyContract) { c.Embedding.Model = "attacker/model" },
+	}
+	for i, mutate := range mutations {
+		candidate := V8ContractSnapshot()
+		mutate(&candidate)
+		if ReadyForV8QualityOnly(candidate) {
+			t.Fatalf("mutation %d did not fail closed", i)
+		}
+	}
+}
+
+func TestV8InheritsV7QualityOnlyTokenContract(t *testing.T) {
+	report := testReport(0.91)
+	usage := completeUsage(12_000_000, 500_000)
+	got := ApplyForVersion(protocol.BenchVersionV8, report, usage, nil)
+	if got.Multiplier != 1 || got.AdjustedComposite != report.Composite || got.PenaltyApplied {
+		t.Fatalf("v8 token usage moved quality score: %+v", got)
+	}
+}

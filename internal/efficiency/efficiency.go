@@ -88,6 +88,21 @@ type EmbeddingContract struct {
 	CatalogSHA256 string `json:"catalog_sha256"`
 }
 
+// QualityOnlyContract is the v8 scorer-readiness contract. It deliberately has
+// no starter baseline or calibration grid: the scorer records trusted usage but
+// never applies an absolute token transform. Relative efficiency is computed
+// by ditto-platform from an epoch-frozen live cohort after model-use integrity
+// checks have qualified the run.
+type QualityOnlyContract struct {
+	SchemaVersion       int                      `json:"schema_version"`
+	BenchVersion        int                      `json:"bench_version"`
+	DatasetKnownVector  string                   `json:"dataset_known_vector"`
+	ScorerTokenPolicy   string                   `json:"scorer_token_policy"`
+	EfficiencyAuthority string                   `json:"efficiency_authority"`
+	Harness             CalibrationRouteIdentity `json:"harness"`
+	Embedding           EmbeddingContract        `json:"embedding"`
+}
+
 type Manifest struct {
 	SchemaVersion      int                  `json:"schema_version"`
 	FormulaVersion     string               `json:"formula_version"`
@@ -156,6 +171,7 @@ type SmokeRun struct {
 // accepts today.
 const (
 	ProvenanceReviewedMeasured     = "reviewed-measured"
+	ProvenanceReviewedContract     = "reviewed-contract"
 	ProvenanceDerivedSmokeVerified = "derived-smoke-validated"
 	ProvenanceDerivedUnvalidated   = "derived-unvalidated"
 )
@@ -200,8 +216,12 @@ var manifestJSON []byte
 //go:embed baselines_v7.json
 var manifestV7JSON []byte
 
+//go:embed contract_v8.json
+var contractV8JSON []byte
+
 var productionManifest = mustManifest(manifestJSON, protocol.BenchVersionV5)
 var productionV7Manifest = mustManifest(manifestV7JSON, protocol.BenchVersionV7)
+var productionV8Contract = mustQualityOnlyContract(contractV8JSON)
 
 func mustManifest(body []byte, benchVersion int) Manifest {
 	var manifest Manifest
@@ -212,6 +232,14 @@ func mustManifest(body []byte, benchVersion int) Manifest {
 		panic("embedded token baseline manifest has incompatible contract metadata")
 	}
 	return manifest
+}
+
+func mustQualityOnlyContract(body []byte) QualityOnlyContract {
+	var contract QualityOnlyContract
+	if err := json.Unmarshal(body, &contract); err != nil {
+		panic(fmt.Sprintf("invalid embedded quality-only contract: %v", err))
+	}
+	return contract
 }
 
 func ManifestSnapshot() Manifest {
@@ -231,6 +259,8 @@ func V7ManifestSnapshot() Manifest {
 	}
 	return copy
 }
+
+func V8ContractSnapshot() QualityOnlyContract { return productionV8Contract }
 
 // ProductionReady is true only after reviewed baselines exist for every run
 // size on both certified provider profiles. Until then v5 remains hidden from
@@ -252,9 +282,37 @@ func ProductionReadyForVersion(benchVersion int) bool {
 		return ProductionReady()
 	case protocol.BenchVersionV7:
 		return ReadyForV7QualityOnly(productionV7Manifest)
+	case protocol.BenchVersionV8:
+		return ReadyForV8QualityOnly(productionV8Contract)
 	default:
 		return false
 	}
+}
+
+// V8Readiness carries the immutable dataset and route identity for the v8
+// quality-only contract. No token baseline is implied or consumed.
+func V8Readiness() CalibrationReadiness {
+	readiness := CalibrationReadiness{SupportedRoutes: []CalibrationRouteIdentity{}}
+	if !ReadyForV8QualityOnly(productionV8Contract) {
+		return readiness
+	}
+	readiness.SupportedRoutes = []CalibrationRouteIdentity{{
+		Provider: v7AggregateProvider, ProfileRevision: v7AggregateProfile,
+		Model: llm.V7HarnessModel,
+	}}
+	sum := sha256.Sum256(contractV8JSON)
+	readiness.ManifestSHA256 = fmt.Sprintf("%x", sum[:])
+	readiness.Provenance = ProvenanceReviewedContract
+	return readiness
+}
+
+func ValidV8Readiness(readiness CalibrationReadiness) bool {
+	return canonicalSHA256(readiness.ManifestSHA256) &&
+		len(readiness.SupportedRoutes) == 1 &&
+		readiness.SupportedRoutes[0] == (CalibrationRouteIdentity{
+			Provider: v7AggregateProvider, ProfileRevision: v7AggregateProfile,
+			Model: llm.V7HarnessModel,
+		})
 }
 
 // V7CalibrationReadiness returns only identities proven by the embedded,
@@ -354,6 +412,12 @@ const (
 	v7AllowancePolicy          = "starter_raw_p90_floor_75_percent_v1"
 )
 
+const (
+	v8DatasetKnownVector  = "3d2aac8bf03cd094aca08a56509d1275c4ddb9c9aa3c4a5712cb43a62c1ff15a"
+	v8ScorerTokenPolicy   = "quality-only"
+	v8EfficiencyAuthority = "ditto-platform-relative-cohort-v1"
+)
+
 // v7ContractShapeValid validates every element of the reviewed aggregate
 // GPT-OSS v7 contract EXCEPT the scoring_enabled flag: the locked harness model
 // identity, the aggregate route + hosted embedding profile, the starter-kit
@@ -428,6 +492,29 @@ func ReadyForV7Production(manifest Manifest) bool {
 // behind ProductionReadyForVersion(V7) and the v7 capability readiness.
 func ReadyForV7QualityOnly(manifest Manifest) bool {
 	return !manifest.ScoringEnabled && v7ContractShapeValid(manifest)
+}
+
+// ReadyForV8QualityOnly binds the immutable dataset and provider identities
+// needed to run v8. It intentionally rejects any scorer-side token policy other
+// than quality-only: model-use integrity and the dynamic relative efficiency
+// bonus are platform-owned, so v8 never waits for or consumes a 60-run starter
+// calibration campaign.
+func ReadyForV8QualityOnly(contract QualityOnlyContract) bool {
+	return contract.SchemaVersion == 1 &&
+		contract.BenchVersion == protocol.BenchVersionV8 &&
+		contract.DatasetKnownVector == v8DatasetKnownVector &&
+		contract.ScorerTokenPolicy == v8ScorerTokenPolicy &&
+		contract.EfficiencyAuthority == v8EfficiencyAuthority &&
+		contract.Harness == (CalibrationRouteIdentity{
+			Provider:        v7AggregateProvider,
+			ProfileRevision: v7AggregateProfile,
+			Model:           llm.V7HarnessModel,
+		}) &&
+		contract.Embedding == (EmbeddingContract{
+			Provider: v7EmbeddingProvider, Model: v7EmbeddingModel,
+			Profile: v7EmbeddingProfile, Dimensions: v7EmbeddingDimensions,
+			CatalogSHA256: v7EmbeddingCatalogSHA256,
+		})
 }
 
 func canonicalSHA256(value string) bool {

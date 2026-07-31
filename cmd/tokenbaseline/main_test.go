@@ -62,6 +62,13 @@ func TestV7StarterKitRevisionMustBeCanonicalGitSHA(t *testing.T) {
 	}
 }
 
+func TestV8RejectsRetiredStaticTokenCalibration(t *testing.T) {
+	_, err := calibrationManifest(protocol.BenchVersionV8, "62223b028acceb38ad0db98790402f1e2361dd18")
+	if err == nil {
+		t.Fatal("v8 unexpectedly accepted the retired static calibration workflow")
+	}
+}
+
 func TestSortBaselinesUsesFullRouteIdentityBeforeRunSize(t *testing.T) {
 	baselines := []efficiency.Baseline{
 		{Provider: "groq", ProfileRevision: "b", Model: "m1", RunSize: "small"},

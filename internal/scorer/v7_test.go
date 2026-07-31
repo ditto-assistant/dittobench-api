@@ -131,6 +131,19 @@ func TestApplyTrajectoryMismatch(t *testing.T) {
 	}
 }
 
+func TestApplyTrajectoryMismatchForFuzzyV8IgnoresCompactSelfReport(t *testing.T) {
+	cs := protocol.CaseScore{Score: 1.0}
+	c := protocol.ToolCase{FuzzyTrajectory: true}
+	self := []protocol.ObservedToolCall{{Name: "gmail_send"}}
+	observed := []protocol.ObservedToolCall{{Name: "search_memories"}, {Name: "search_web"}, {Name: "gmail_send"}}
+	if got := ApplyTrajectoryMismatchForCase(protocol.BenchVersionV8, c, cs, self, observed).Score; got != 1 {
+		t.Fatalf("fuzzy v8 compact self-report was penalized: %v", got)
+	}
+	if got := ApplyTrajectoryMismatchForCase(protocol.BenchVersionV7, c, cs, self, observed).Score; got != 0.5 {
+		t.Fatalf("v7 mismatch compatibility changed: %v", got)
+	}
+}
+
 // ---- v7 strict deterministic trajectory ----
 
 func TestV7StrictForbiddenArgZeroesCase(t *testing.T) {

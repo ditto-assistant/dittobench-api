@@ -49,6 +49,45 @@ func TestUnorderedParallelIgnoresOrder(t *testing.T) {
 	}
 }
 
+func TestV8FuzzyTrajectoryGradesCapabilitiesAndOutcomeNotExactTrace(t *testing.T) {
+	c := protocol.ToolCase{
+		ID: "fuzzy", Category: "world_contact_research_email_result_usage",
+		ExpectedTools: []protocol.ToolSpec{
+			{Name: "search_web"},
+			{Name: "gmail_send", RequiredArgs: map[string]string{"to": "new@example.com", "body": "4,219"}},
+		},
+		MaxToolCalls: 15, AllowExtraTools: true, FuzzyTrajectory: true,
+	}
+	calls := []protocol.ObservedToolCall{
+		call("gmail_send", `{"to":"old@example.com","body":"checking"}`),
+		call("discover_capabilities", `{"query":"email"}`),
+		call("search_web", `{"query":"the current figure"}`),
+		call("gmail_send", `{"to":"new@example.com","body":"The figure is 4,219."}`),
+	}
+	for i := 0; i < 20; i++ {
+		calls = append(calls, call("search_memories", `{"query":"contact context"}`))
+	}
+	got, notes := deterministicToolScoreStrict(c, calls, true)
+	if !near(got, 1) {
+		t.Fatalf("correct fuzzy outcome with retries, exploration, and >15 calls = %v, want 1; notes=%v", got, notes)
+	}
+
+	missingCapability := []protocol.ObservedToolCall{
+		call("gmail_send", `{"to":"new@example.com","body":"The figure is 4,219."}`),
+	}
+	if got, _ := deterministicToolScoreStrict(c, missingCapability, true); got != 0 {
+		t.Fatalf("fuzzy case missing search capability = %v, want 0", got)
+	}
+
+	wrongOutcome := []protocol.ObservedToolCall{
+		call("search_web", `{}`),
+		call("gmail_send", `{"to":"old@example.com","body":"The figure is 4,219."}`),
+	}
+	if got, _ := deterministicToolScoreStrict(c, wrongOutcome, true); got != 0 {
+		t.Fatalf("fuzzy case with wrong mutation target = %v, want 0", got)
+	}
+}
+
 func TestArgScoringExactValue(t *testing.T) {
 	c := protocol.ToolCase{
 		ID: "c", Category: "link_read", MaxToolCalls: 1,

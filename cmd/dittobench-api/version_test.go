@@ -61,6 +61,7 @@ func TestVersionCommandReportsBinaryProvenance(t *testing.T) {
 		"source_revision_mismatch:  true",
 		"1.4.0",
 		"v7_manifest_sha256",
+		"v8_manifest_sha256",
 		"WARNING",
 	} {
 		if !strings.Contains(out, want) {
@@ -119,6 +120,9 @@ func TestVersionCommandJSONMatchesAdvertisedCapabilities(t *testing.T) {
 		t.Fatalf("v7 manifest digest disagrees: %q vs %q",
 			got.V7ManifestSHA256, live.V7Calibration.ManifestSHA256)
 	}
+	if got.V8ManifestSHA256 != live.V8Readiness.ManifestSHA256 {
+		t.Fatalf("v8 manifest digest disagrees: %q vs %q", got.V8ManifestSHA256, live.V8Readiness.ManifestSHA256)
+	}
 	wantAdvertised := false
 	for _, version := range live.SupportedBenchVersions {
 		if version == protocol.BenchVersionV7 {
@@ -127,6 +131,13 @@ func TestVersionCommandJSONMatchesAdvertisedCapabilities(t *testing.T) {
 	}
 	if got.V7Advertised != wantAdvertised {
 		t.Fatalf("v7_advertised = %v, want %v", got.V7Advertised, wantAdvertised)
+	}
+	wantV8Advertised := false
+	for _, version := range live.SupportedBenchVersions {
+		wantV8Advertised = wantV8Advertised || version == protocol.BenchVersionV8
+	}
+	if got.V8Advertised != wantV8Advertised {
+		t.Fatalf("v8_advertised = %v, want %v", got.V8Advertised, wantV8Advertised)
 	}
 }
 

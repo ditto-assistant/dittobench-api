@@ -76,6 +76,9 @@ func TestCapabilitiesReportBoundReleaseIdentity(t *testing.T) {
 	if efficiency.ProductionReadyForVersion(7) {
 		want = append(want, 7)
 	}
+	if efficiency.ProductionReadyForVersion(8) {
+		want = append(want, 8)
+	}
 	if len(got.SupportedBenchVersions) != len(want) {
 		t.Fatalf("wrong supported versions: %v (want %v)", got.SupportedBenchVersions, want)
 	}
@@ -86,6 +89,33 @@ func TestCapabilitiesReportBoundReleaseIdentity(t *testing.T) {
 	}
 	if rr.Header().Get("Cache-Control") != "no-store" {
 		t.Fatal("capabilities response must not be cached")
+	}
+}
+
+func TestV8CapabilityIsQualityOnlyAndFailClosed(t *testing.T) {
+	if efficiency.ReadyForV8QualityOnly(efficiency.QualityOnlyContract{}) {
+		t.Fatal("missing v8 contract was accepted")
+	}
+	contract := efficiency.V8ContractSnapshot()
+	if !efficiency.ReadyForV8QualityOnly(contract) || !efficiency.ProductionReadyForVersion(8) {
+		t.Fatal("embedded v8 quality-only contract must be technically ready")
+	}
+	if contract.ScorerTokenPolicy != "quality-only" || contract.EfficiencyAuthority != "ditto-platform-relative-cohort-v1" {
+		t.Fatalf("v8 must delegate efficiency to the platform cohort: %+v", contract)
+	}
+	readiness := efficiency.V8Readiness()
+	if !efficiency.ValidV8Readiness(readiness) || readiness.Provenance != efficiency.ProvenanceReviewedContract {
+		t.Fatalf("invalid v8 readiness: %+v", readiness)
+	}
+
+	s := &server{softwareVersion: "0.10.0", sourceRevision: testSourceRevision}
+	got := capabilitiesOf(t, s)
+	found := false
+	for _, version := range got.SupportedBenchVersions {
+		found = found || version == protocol.BenchVersionV8
+	}
+	if !found {
+		t.Fatal("technically ready v8 was not advertised")
 	}
 }
 
@@ -262,7 +292,7 @@ func TestCapabilitiesRemainsBackwardCompatible(t *testing.T) {
 	// New keys, and only these.
 	added := map[string]bool{
 		"source_revision_origin": true, "source_revision_mismatch": true,
-		"software_version_origin": true,
+		"software_version_origin": true, "v8_readiness": true,
 	}
 	known := map[string]bool{
 		"software_version": true, "source_revision": true, "supported_bench_versions": true,

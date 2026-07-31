@@ -382,6 +382,22 @@ scoring scores `0.0375` under v7 — **12.7x lower** — while a correct oracle
 response set still scores `1.0` under both contracts. See
 `docs/v7-difficulty.md`.
 
+### bench_version 8: state-dependent routing
+
+V8 retains the v7 model, ticket inference boundary, quality-only token
+contract, and all v7 timeout/resource envelopes. Before tool execution the
+validator may issue one ordinary `/seed` request containing validator-internal
+prerequisite facts from the generated v8 artifact. Tool cases then run through
+the unchanged `/run` and observed-execution contracts. A seed failure is
+validator infrastructure and fails the run closed; it is never converted into
+an agent score. V7 artifacts carry no prerequisite facts and preserve their
+historical seed/tool ordering.
+
+Capability advertisement is not activation. A scorer advertises v8 only when
+its embedded quality-only manifest binds the exact dataset, route, model, and
+embedding identities. The platform's backroom-controlled benchmark target must
+separately select v8 before any v8 ticket can be dispatched.
+
 ### Prohibited: content-keyed mutation of the graded response
 
 `final_text`, `answer`, `abstain`, and the reported `tool_calls` are the graded
