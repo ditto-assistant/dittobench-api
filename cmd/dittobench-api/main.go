@@ -407,8 +407,8 @@ type v8IsolationReporter interface {
 // runtimeSupportedBenchVersions intersects the immutable scorer contract with
 // the live untrusted-execution boundary. A code-only `version` report can still
 // prove that the image contains V8, while the validator-facing capability omits
-// V8 until the configured executor verifies rootless mode. V7 stays advertised
-// during that additive migration.
+// V8 until the configured executor is reachable and satisfies its selected
+// isolation policy.
 func (s *server) runtimeSupportedBenchVersions(ctx context.Context) []int {
 	versions := supportedBenchVersions()
 	if s.sandbox == nil {

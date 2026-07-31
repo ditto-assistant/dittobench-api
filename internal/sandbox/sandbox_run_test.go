@@ -69,13 +69,21 @@ func TestAvailableRequiresRootlessWhenConfigured(t *testing.T) {
 	}
 }
 
-func TestV8IsolationReadyRequiresEnabledAndVerifiedRootless(t *testing.T) {
+func TestV8IsolationReadyAcceptsAvailableCompatibilityExecutor(t *testing.T) {
 	d := NewLocalDocker()
 	d.HostGatewayIP = "192.0.2.10"
 	d.RequireRootless = false
-	if err := d.V8IsolationReady(context.Background()); err == nil || !strings.Contains(err.Error(), "not enabled") {
-		t.Fatalf("v8 accepted an executor without mandatory rootless policy: %v", err)
+	d.dockerCommand = func(context.Context, ...string) ([]byte, error) {
+		return []byte(`["name=seccomp,profile=builtin","name=cgroupns"]`), nil
 	}
+	if err := d.V8IsolationReady(context.Background()); err != nil {
+		t.Fatalf("available compatibility executor rejected for v8: %v", err)
+	}
+}
+
+func TestV8IsolationReadyEnforcesConfiguredRootlessPolicy(t *testing.T) {
+	d := NewLocalDocker()
+	d.HostGatewayIP = "192.0.2.10"
 	d.RequireRootless = true
 	d.dockerCommand = func(context.Context, ...string) ([]byte, error) {
 		return []byte(`["name=seccomp,profile=builtin","name=rootless"]`), nil
