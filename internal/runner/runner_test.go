@@ -141,6 +141,63 @@ func TestSeed(t *testing.T) {
 	}
 }
 
+func TestHarnessWireDoesNotExposeDatasetSeed(t *testing.T) {
+	// The validator needs the dataset seed to regenerate and score a run, but the
+	// miner-controlled harness receives only the derived memories and questions.
+	// Keep a recognizable sentinel out of the complete request target, headers,
+	// and body for both harness endpoints so a later protocol change cannot turn
+	// the reproducibility input into a harness-side oracle.
+	const datasetSeed = "778899001122334455"
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read %s body: %v", r.URL.Path, err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		var wire strings.Builder
+		wire.WriteString(r.RequestURI)
+		for key, values := range r.Header {
+			wire.WriteString(key)
+			wire.WriteString(strings.Join(values, ","))
+		}
+		wire.Write(body)
+		if strings.Contains(wire.String(), datasetSeed) {
+			t.Errorf("%s request exposed the validator-only dataset seed", r.URL.Path)
+		}
+		requests++
+		switch r.URL.Path {
+		case "/seed":
+			_ = json.NewEncoder(w).Encode(protocol.SeedResponse{Pairs: 1})
+		case "/run":
+			_ = json.NewEncoder(w).Encode(protocol.RunResponse{FinalText: "ok"})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	seedReq := protocol.SeedRequest{
+		UserID: "miner",
+		Pairs: []protocol.MemoryPair{{
+			PairID: "derived-pair", Prompt: "derived memory", Response: "acknowledged",
+		}},
+	}
+	if _, err := SeedForVersion(sandboxContext(), srv.URL, seedReq, 8); err != nil {
+		t.Fatalf("seed harness: %v", err)
+	}
+	if _, err := RunCase(
+		sandboxContext(), srv.URL, "derived-case", "derived question", nil,
+		CaseOptions{BenchVersion: 8, UserID: "miner"},
+	); err != nil {
+		t.Fatalf("run harness case: %v", err)
+	}
+	if requests != 2 {
+		t.Fatalf("observed %d harness requests, want seed and run", requests)
+	}
+}
+
 func TestSeedError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)

@@ -46,3 +46,38 @@ func TestV8ChitchatCanPassConversationalSanity(t *testing.T) {
 		t.Fatalf("clean v8 conversational slices must satisfy the conjunction, got %v", sanity)
 	}
 }
+
+func TestPinnedV8DatasetExercisesConversationalAndIntegrityAxes(t *testing.T) {
+	profile, ok := gen.ProfileForVersion("full", protocol.BenchVersionV8)
+	if !ok {
+		t.Fatal("resolve full v8 profile")
+	}
+	dataset, err := gen.GenerateDataset(123456789, profile, protocol.BenchVersionV8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]int{
+		gen.QTChitchat:               3,
+		gen.QTDeclarativeAck:         3,
+		gen.QTDeclarativeBehavior:    3,
+		"world-canary":               1,
+		"world-injection-resistance": 3,
+	}
+	got := map[string]int{}
+	var conversational []protocol.CaseScore
+	for _, c := range dataset.MemoryCases {
+		got[c.QuestionType]++
+		switch c.QuestionType {
+		case gen.QTChitchat, gen.QTDeclarativeAck, gen.QTDeclarativeBehavior:
+			conversational = append(conversational, mem(c.QuestionType, true))
+		}
+	}
+	for category, count := range want {
+		if got[category] != count {
+			t.Fatalf("pinned v8 %s=%d, want %d", category, got[category], count)
+		}
+	}
+	if sanity := ConversationalSanity(conversational); sanity == nil || *sanity != 1 {
+		t.Fatalf("pinned v8 conversational slices are not scorer-visible: %v", sanity)
+	}
+}
