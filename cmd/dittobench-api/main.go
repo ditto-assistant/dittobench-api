@@ -1026,6 +1026,43 @@ func toolPrerequisiteWave(toolCases []protocol.ToolCase) (protocol.SeedRequest, 
 	return wave, nil
 }
 
+// validateV8EvidenceAvailability proves that every generator-declared memory
+// dependency is present in the ordered seed boundary for that user graph. V8's
+// tool prerequisites are the initial shared world; later memory waves extend
+// that same live harness store rather than replacing or resetting it.
+func validateV8EvidenceAvailability(toolCases []protocol.ToolCase, memoryCases []gen.StagedCase, waves []protocol.SeedRequest) error {
+	available := map[string]map[string]bool{"miner": {}}
+	add := func(user string, pairs []protocol.MemoryPair) {
+		if user == "" {
+			user = "miner"
+		}
+		if available[user] == nil {
+			available[user] = map[string]bool{}
+		}
+		for _, pair := range pairs {
+			available[user][pair.PairID] = true
+		}
+	}
+	for _, tc := range toolCases {
+		add("miner", tc.PrerequisitePairs)
+	}
+	for _, wave := range waves {
+		add(wave.UserID, wave.Pairs)
+	}
+	for _, staged := range memoryCases {
+		user := staged.UserID
+		if user == "" {
+			user = "miner"
+		}
+		for _, pairID := range staged.RequiredPairIDs {
+			if pairID == "" || !available[user][pairID] {
+				return fmt.Errorf("v8 memory evidence is unavailable through the ordered seed boundary")
+			}
+		}
+	}
+	return nil
+}
+
 // submitDirect scores a harness the miner is already running, synchronously.
 func (s *server) submitDirect(w http.ResponseWriter, r *http.Request, req submitRequest, n int) {
 	ctx := r.Context()
@@ -1326,6 +1363,13 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		return
 	}
 	memSuite.Cases = append(memSuite.Cases, iso.Cases...)
+	memWaves := gen.MergeMemoryWaves(memSuite.Waves, iso.SecondaryWave)
+	if req.BenchVersion >= protocol.BenchVersionV8 {
+		if err := validateV8EvidenceAvailability(toolCases, memSuite.Cases, memWaves); err != nil {
+			s.store.Fail(runID, "v8 memory evidence is unavailable through the ordered seed boundary")
+			return
+		}
+	}
 	para := toolPara
 	para.Add(memSuite.Stats)
 	totalPairs, totalSubjects := 0, 0
@@ -1353,7 +1397,6 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	}
 	// The hashed artifact covers the secondary isolation graph too (when present),
 	// so a dispute re-scores the exact multi-graph seeding.
-	memWaves := gen.MergeMemoryWaves(memSuite.Waves, iso.SecondaryWave)
 	artifact, artifactErr := gen.BuildArtifactForVersion(seed, req.BenchVersion, toolCases, memSuite.Cases, memWaves)
 	if artifactErr != nil {
 		s.store.Fail(runID, "dataset generation failed for requested bench_version")
@@ -1557,8 +1600,8 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	}
 	effectiveCaseConcurrency := caseConcurrencyForVersion(req.BenchVersion)
 
-	// 4. tool cases — independent of the memory haystack and of each other, so
-	//    run before seeding and with bounded per-case concurrency. Results are
+	// 4. tool cases — share V8's already-seeded world but remain independent of
+	//    each other, so run with bounded per-case concurrency. Results are
 	//    written per index so the report order is identical to sequential
 	//    execution regardless of completion order.
 	observedTool, cappedTool := 0, 0
