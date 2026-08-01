@@ -26,6 +26,9 @@ const (
 	ociImageIndexMediaType    = "application/vnd.oci.image.index.v1+json"
 	ociImageManifestMediaType = "application/vnd.oci.image.manifest.v1+json"
 	ociImageConfigMediaType   = "application/vnd.oci.image.config.v1+json"
+	ociLayerMediaType         = "application/vnd.oci.image.layer.v1.tar"
+	ociLayerGzipMediaType     = "application/vnd.oci.image.layer.v1.tar+gzip"
+	ociLayerZstdMediaType     = "application/vnd.oci.image.layer.v1.tar+zstd"
 	dockerManifestMediaType   = "application/vnd.docker.distribution.manifest.v2+json"
 	dockerConfigMediaType     = "application/vnd.docker.container.image.v1+json"
 	dockerLayerMediaType      = "application/vnd.docker.image.rootfs.diff.tar"
@@ -418,6 +421,7 @@ func validateDockerSaveArchiveWithStoreIDs(path, expectedRef, expectedID string,
 			expectedID,
 			smallBlobBytes,
 			ociBlobSizes,
+			acceptedLoadedIDs,
 		)
 		if err != nil {
 			return false, err
@@ -447,11 +451,6 @@ func validateDockerSaveArchiveWithStoreIDs(path, expectedRef, expectedID string,
 			}
 		}
 		oci = primaryCount == 1
-		if acceptedLoadedIDs != nil {
-			for digest := range runnableDigests {
-				acceptedLoadedIDs[digest] = struct{}{}
-			}
-		}
 	}
 	if !classic && !oci {
 		return false, fmt.Errorf("archive index does not bind the expected image id")
@@ -495,7 +494,13 @@ func validateDockerSaveArchiveWithStoreIDs(path, expectedRef, expectedID string,
 // image index; `--provenance=false` instead makes Docker expose the schema-2
 // image manifest itself as `.Id`. Both are content-addressed, single-image
 // roots in the surrounding OCI archive and remain bound to expectedID.
-func validatePrimaryOCIImage(data []byte, expectedID string, blobs map[string][]byte, blobSizes map[string]int64) (string, map[string]struct{}, error) {
+func validatePrimaryOCIImage(
+	data []byte,
+	expectedID string,
+	blobs map[string][]byte,
+	blobSizes map[string]int64,
+	acceptedLoadedIDs map[string]struct{},
+) (string, map[string]struct{}, error) {
 	var header struct {
 		SchemaVersion int    `json:"schemaVersion"`
 		MediaType     string `json:"mediaType"`
@@ -505,11 +510,16 @@ func validatePrimaryOCIImage(data []byte, expectedID string, blobs map[string][]
 	}
 	switch header.MediaType {
 	case ociImageIndexMediaType:
-		runnable, err := validatePrimaryOCIIndex(data, blobs)
+		runnable, err := validatePrimaryOCIIndex(data, blobs, blobSizes, acceptedLoadedIDs)
 		return ociImageIndexMediaType, runnable, err
 	case dockerManifestMediaType:
-		if err := validateDockerSchema2ImageManifest(data, blobSizes, blobs); err != nil {
+		configID, err := validateRunnableImageManifest(data, blobSizes, blobs)
+		if err != nil {
 			return "", nil, err
+		}
+		if acceptedLoadedIDs != nil {
+			acceptedLoadedIDs[expectedID] = struct{}{}
+			acceptedLoadedIDs[configID] = struct{}{}
 		}
 		return dockerManifestMediaType, map[string]struct{}{expectedID: {}}, nil
 	default:
@@ -518,34 +528,62 @@ func validatePrimaryOCIImage(data []byte, expectedID string, blobs map[string][]
 }
 
 func validateDockerSchema2ImageManifest(data []byte, blobSizes map[string]int64, verifiedBlobs map[string][]byte) error {
+	_, err := validateRunnableImageManifest(data, blobSizes, verifiedBlobs)
+	return err
+}
+
+// validateRunnableImageManifest verifies the immutable manifest-to-config
+// chain and returns the config digest Docker may expose as the local image ID.
+// Docker's classic graphdriver store identifies an imported OCI image by this
+// config digest, while containerd-backed stores may expose the manifest or
+// index digest. All are safe aliases only after the signed archive binds the
+// complete chain.
+func validateRunnableImageManifest(data []byte, blobSizes map[string]int64, verifiedBlobs map[string][]byte) (string, error) {
 	var manifest dockerSchema2Manifest
 	if err := json.Unmarshal(data, &manifest); err != nil {
-		return fmt.Errorf("decode expected Docker manifest: %w", err)
+		return "", fmt.Errorf("decode expected image manifest: %w", err)
 	}
-	if manifest.SchemaVersion != 2 || manifest.MediaType != dockerManifestMediaType ||
-		manifest.Config.MediaType != dockerConfigMediaType ||
+	if manifest.SchemaVersion != 2 ||
+		(manifest.MediaType != dockerManifestMediaType && manifest.MediaType != ociImageManifestMediaType) ||
 		!canonicalSHA256Digest(manifest.Config.Digest) || manifest.Config.Size <= 0 ||
 		len(manifest.Layers) > maxClassicImageLayers {
-		return fmt.Errorf("expected Docker manifest has invalid shape")
+		return "", fmt.Errorf("expected image manifest has invalid shape")
+	}
+	validConfigMediaType := manifest.Config.MediaType == dockerConfigMediaType
+	if manifest.MediaType == ociImageManifestMediaType {
+		validConfigMediaType = manifest.Config.MediaType == ociImageConfigMediaType
+	}
+	if !validConfigMediaType {
+		return "", fmt.Errorf("expected image manifest has invalid config media type")
 	}
 	configName := "blobs/sha256/" + strings.TrimPrefix(manifest.Config.Digest, "sha256:")
 	if blobSizes[configName] != manifest.Config.Size || verifiedBlobs[configName] == nil {
-		return fmt.Errorf("expected Docker manifest references invalid config")
+		return "", fmt.Errorf("expected image manifest references invalid config")
 	}
 	for _, layer := range manifest.Layers {
-		if (layer.MediaType != dockerLayerMediaType && layer.MediaType != dockerLayerGzipMediaType) ||
-			!canonicalSHA256Digest(layer.Digest) || layer.Size <= 0 {
-			return fmt.Errorf("expected Docker manifest contains an invalid layer descriptor")
+		validLayerMediaType := layer.MediaType == dockerLayerMediaType || layer.MediaType == dockerLayerGzipMediaType
+		if manifest.MediaType == ociImageManifestMediaType {
+			validLayerMediaType = layer.MediaType == ociLayerMediaType ||
+				layer.MediaType == ociLayerGzipMediaType ||
+				layer.MediaType == ociLayerZstdMediaType
+		}
+		if !validLayerMediaType || !canonicalSHA256Digest(layer.Digest) || layer.Size <= 0 {
+			return "", fmt.Errorf("expected image manifest contains an invalid layer descriptor")
 		}
 		name := "blobs/sha256/" + strings.TrimPrefix(layer.Digest, "sha256:")
 		if blobSizes[name] != layer.Size {
-			return fmt.Errorf("expected Docker manifest references a missing or size-mismatched layer")
+			return "", fmt.Errorf("expected image manifest references a missing or size-mismatched layer")
 		}
 	}
-	return nil
+	return manifest.Config.Digest, nil
 }
 
-func validatePrimaryOCIIndex(data []byte, blobs map[string][]byte) (map[string]struct{}, error) {
+func validatePrimaryOCIIndex(
+	data []byte,
+	blobs map[string][]byte,
+	blobSizes map[string]int64,
+	acceptedLoadedIDs map[string]struct{},
+) (map[string]struct{}, error) {
 	var index struct {
 		SchemaVersion int             `json:"schemaVersion"`
 		MediaType     string          `json:"mediaType"`
@@ -559,6 +597,7 @@ func validatePrimaryOCIIndex(data []byte, blobs map[string][]byte) (map[string]s
 		return nil, fmt.Errorf("expected OCI index has invalid shape")
 	}
 	runnable := make(map[string]struct{})
+	runnableSizes := make(map[string]int64)
 	runnableCount := 0
 	for _, descriptor := range index.Manifests {
 		if descriptor.Annotations["vnd.docker.reference.type"] == "attestation-manifest" {
@@ -570,10 +609,26 @@ func validatePrimaryOCIIndex(data []byte, blobs map[string][]byte) (map[string]s
 			return nil, fmt.Errorf("expected OCI index contains an invalid runnable descriptor")
 		}
 		runnable[descriptor.Digest] = struct{}{}
+		runnableSizes[descriptor.Digest] = descriptor.Size
 		runnableCount++
 	}
 	if runnableCount != 1 || len(runnable) != 1 {
 		return nil, fmt.Errorf("expected OCI index must contain exactly one runnable image")
+	}
+	for digest := range runnable {
+		manifestName := "blobs/sha256/" + strings.TrimPrefix(digest, "sha256:")
+		manifestBytes := blobs[manifestName]
+		if manifestBytes == nil || blobSizes[manifestName] != runnableSizes[digest] {
+			return nil, fmt.Errorf("expected OCI index references a missing or size-mismatched runnable manifest")
+		}
+		configID, err := validateRunnableImageManifest(manifestBytes, blobSizes, blobs)
+		if err != nil {
+			return nil, err
+		}
+		if acceptedLoadedIDs != nil {
+			acceptedLoadedIDs[digest] = struct{}{}
+			acceptedLoadedIDs[configID] = struct{}{}
+		}
 	}
 	for _, descriptor := range index.Manifests {
 		if descriptor.Annotations["vnd.docker.reference.type"] != "attestation-manifest" {
