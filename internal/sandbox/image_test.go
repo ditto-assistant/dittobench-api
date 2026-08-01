@@ -81,14 +81,28 @@ func makeOCIIndexArchive(t *testing.T, mutate func(*[]ociDescriptor)) ([]byte, s
 	if err != nil {
 		t.Fatal(err)
 	}
-	runnableDigest := "sha256:" + repeatHex("bb", 32)
+	runnableManifest, err := json.Marshal(map[string]any{
+		"schemaVersion": 2,
+		"mediaType":     ociImageManifestMediaType,
+		"config": map[string]any{
+			"mediaType": ociImageConfigMediaType,
+			"digest":    "sha256:" + hex.EncodeToString(configDigest[:]),
+			"size":      len(config),
+		},
+		"layers": []map[string]any{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runnableSum := sha256.Sum256(runnableManifest)
+	runnableDigest := "sha256:" + hex.EncodeToString(runnableSum[:])
 	primaryIndex, err := json.Marshal(map[string]any{
 		"schemaVersion": 2,
 		"mediaType":     ociImageIndexMediaType,
 		"manifests": []map[string]any{{
 			"mediaType": ociImageManifestMediaType,
 			"digest":    runnableDigest,
-			"size":      456,
+			"size":      len(runnableManifest),
 			"platform":  map[string]string{"architecture": "amd64", "os": "linux"},
 		}},
 	})
@@ -152,6 +166,7 @@ func makeOCIIndexArchive(t *testing.T, mutate func(*[]ociDescriptor)) ([]byte, s
 	}{
 		{configName, config},
 		{"blobs/sha256/" + strings.TrimPrefix(imageID, "sha256:"), primaryIndex},
+		{"blobs/sha256/" + strings.TrimPrefix(runnableDigest, "sha256:"), runnableManifest},
 		{"blobs/sha256/" + strings.TrimPrefix(attestationConfigID, "sha256:"), attestationConfig},
 		{"blobs/sha256/" + strings.TrimPrefix(statementID, "sha256:"), statement},
 		{"blobs/sha256/" + strings.TrimPrefix(attestationID, "sha256:"), attestationManifest},
@@ -293,6 +308,47 @@ func TestValidateDockerSaveArchiveAcceptsBoundedAttestations(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestValidateDockerSaveArchiveAcceptsOCIConfigStoreID(t *testing.T) {
+	archive, imageID := makeOCIIndexArchive(t, nil)
+	accepted := map[string]struct{}{imageID: {}}
+	if _, err := validateDockerSaveArchiveWithStoreIDs(
+		writeArchive(t, archive), testScreenedImageRef, imageID, accepted,
+	); err != nil {
+		t.Fatalf("valid OCI archive rejected: %v", err)
+	}
+	path := writeArchive(t, archive)
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	reader := tar.NewReader(file)
+	for {
+		header, err := reader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if header.Name != "manifest.json" {
+			continue
+		}
+		var manifest []struct {
+			Config string `json:"Config"`
+		}
+		if err := json.NewDecoder(reader).Decode(&manifest); err != nil {
+			t.Fatal(err)
+		}
+		configID := "sha256:" + strings.TrimPrefix(manifest[0].Config, "blobs/sha256/")
+		if _, ok := accepted[configID]; !ok {
+			t.Fatalf("Docker config store id %s was not accepted: %#v", configID, accepted)
+		}
+		return
+	}
+	t.Fatal("manifest.json missing")
 }
 
 func TestValidateDockerSaveArchiveAcceptsProvenanceDisabledDockerStoreID(t *testing.T) {
