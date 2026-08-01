@@ -5,6 +5,18 @@ the engine that runs it: per submission it generates a fresh anti-cheat dataset
 (procedural tool cases and a procedural persona memory haystack), runs a miner's
 harness over every case, and scores the result deterministically.
 
+## Ditto SN118 repositories
+
+| Repository | Purpose |
+| --- | --- |
+| [`ditto-subnet`](https://github.com/ditto-assistant/ditto-subnet) | Miner CLI, validator worker, and on-chain integration |
+| [`ditto-platform`](https://github.com/ditto-assistant/ditto-platform) | Public API, dashboard, submission coordination, and score ledger |
+| [`ditto-screener`](https://github.com/ditto-assistant/ditto-screener) | Platform-operated submission build and health gate |
+| [`ditto-harness`](https://github.com/ditto-assistant/ditto-harness) | Reference memory and agent harness library |
+| [`dittobench-starter-kit`](https://github.com/ditto-assistant/dittobench-starter-kit) | Miner starter project and local practice loop |
+| [`dittobench-api`](https://github.com/ditto-assistant/dittobench-api) | Validator scoring engine and hosted practice API |
+| [`dittobench-datagen`](https://github.com/ditto-assistant/dittobench-datagen) | Deterministic dataset generator and judge-free grader |
+
 The same binary runs in two places:
 
 - On-chain, each subnet validator runs it to score miner submissions on its own
