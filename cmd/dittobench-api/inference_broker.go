@@ -179,17 +179,18 @@ func newInferenceBrokerHTTPServer(addr string, handler http.Handler) *http.Serve
 }
 
 type inferenceBroker struct {
-	mu               sync.RWMutex
-	sessions         map[string]*brokerSession
-	tools            map[string]toolRoute
-	client           *http.Client
-	maxSessions      int
-	controlToken     string
-	platformProxyURL string
-	embeddingURL     string
-	embeddingSlots   chan struct{}
-	retry            brokerRetryConfig
-	sleep            func(context.Context, time.Duration) error
+	mu                   sync.RWMutex
+	sessions             map[string]*brokerSession
+	tools                map[string]toolRoute
+	client               *http.Client
+	maxSessions          int
+	controlToken         string
+	platformProxyURL     string
+	platformTransportURL string
+	embeddingURL         string
+	embeddingSlots       chan struct{}
+	retry                brokerRetryConfig
+	sleep                func(context.Context, time.Duration) error
 }
 
 type toolRoute struct {
@@ -564,6 +565,9 @@ func newInferenceBroker(maxSessions int, embeddingCapacity ...int) *inferenceBro
 	if len(embeddingCapacity) > 0 && embeddingCapacity[0] > 0 {
 		capacity = embeddingCapacity[0]
 	}
+	platformProxyURL := configuredPlatformProxyURL(
+		os.Getenv("DITTOBENCH_PLATFORM_INFERENCE_PROXY_URL"),
+	)
 	return &inferenceBroker{
 		sessions: make(map[string]*brokerSession),
 		tools:    make(map[string]toolRoute),
@@ -573,11 +577,12 @@ func newInferenceBroker(maxSessions int, embeddingCapacity ...int) *inferenceBro
 				return http.ErrUseLastResponse
 			},
 		},
-		maxSessions:    maxSessions * 2,
-		embeddingSlots: make(chan struct{}, capacity),
-		controlToken:   strings.TrimSpace(os.Getenv("DITTOBENCH_BROKER_CONTROL_TOKEN")),
-		platformProxyURL: configuredPlatformProxyURL(
-			os.Getenv("DITTOBENCH_PLATFORM_INFERENCE_PROXY_URL"),
+		maxSessions:      maxSessions * 2,
+		embeddingSlots:   make(chan struct{}, capacity),
+		controlToken:     strings.TrimSpace(os.Getenv("DITTOBENCH_BROKER_CONTROL_TOKEN")),
+		platformProxyURL: platformProxyURL,
+		platformTransportURL: configuredPlatformTransportURL(
+			os.Getenv("DITTOBENCH_PLATFORM_INFERENCE_TRANSPORT_URL"), platformProxyURL,
 		),
 		embeddingURL: configuredEmbeddingURL(
 			envOr("DITTOBENCH_EMBEDDING_UPSTREAM_URL", "http://host.docker.internal:11434/api/embed"),
@@ -662,6 +667,18 @@ func configuredPlatformProxyURL(raw string) string {
 		return ""
 	}
 	return value
+}
+
+// configuredPlatformTransportURL separates the signed grant identity from the
+// network route used by the trusted broker. The canonical proxy URL is still
+// compared byte-for-byte during activation; only the validator-owned HTTPS
+// client uses this independently configured direct origin. An empty override
+// preserves the historical single-URL behavior.
+func configuredPlatformTransportURL(raw, canonical string) string {
+	if strings.TrimSpace(raw) == "" {
+		return canonical
+	}
+	return configuredPlatformProxyURL(raw)
 }
 
 func (b *inferenceBroker) controlAuthorized(r *http.Request) bool {
@@ -881,13 +898,17 @@ func (b *inferenceBroker) activate(w http.ResponseWriter, r *http.Request) {
 		SlotID: activation.SlotID, TicketDeadline: activation.TicketDeadline,
 	}
 	hasRouteIdentity := activation.Provider != "" || activation.ProfileRevision != "" || activation.Model != ""
+	transportURL := b.platformTransportURL
+	if transportURL == "" {
+		transportURL = b.platformProxyURL
+	}
 	secretMatches := subtle.ConstantTimeCompare(
 		[]byte(activation.ActivationSecret), []byte(session.activationSecret),
 	) == 1
 	if !secretMatches || activation.Bearer == "" ||
 		len(activation.Bearer) > 4096 || grantErr != nil || activation.Generation < 1 ||
 		!activation.ExpiresAt.After(now) || activation.ExpiresAt.After(now.Add(brokerMaximumSessionTTL)) ||
-		b.platformProxyURL == "" || activation.ProxyURL != b.platformProxyURL ||
+		b.platformProxyURL == "" || transportURL == "" || activation.ProxyURL != b.platformProxyURL ||
 		(hasRouteIdentity && (!validBrokerTicketIdentity(ticketIdentity, now) ||
 			activation.ExpiresAt.After(activation.TicketDeadline) || activation.Provider == "" ||
 			activation.ProfileRevision == "" || activation.Model == "")) {
@@ -897,7 +918,10 @@ func (b *inferenceBroker) activate(w http.ResponseWriter, r *http.Request) {
 	session.activationSecret = ""
 	session.grantID = activation.GrantID
 	session.bearer = activation.Bearer
-	session.proxyURL = activation.ProxyURL
+	// Keep activation.ProxyURL as the authenticated identity check above, but
+	// send ticket traffic over the direct transport origin. The grant proof is
+	// still verified by the same Platform endpoint and redirects stay disabled.
+	session.proxyURL = transportURL
 	session.generation = activation.Generation
 	session.expiresAt = activation.ExpiresAt
 	session.provider = activation.Provider
