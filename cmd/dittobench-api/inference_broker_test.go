@@ -769,6 +769,7 @@ func claimAndBindBrokerSession(t *testing.T, broker *inferenceBroker, sessionID,
 func configureBrokerUpstream(broker *inferenceBroker, upstream *httptest.Server) string {
 	proxyURL := upstream.URL + platformInferenceAPIPath
 	broker.platformProxyURL = proxyURL
+	broker.platformTransportURL = proxyURL
 	broker.client.Transport = upstream.Client().Transport
 	return proxyURL
 }
@@ -824,6 +825,7 @@ func TestInferenceControlPlaneRequiresLoopbackOrBearer(t *testing.T) {
 func TestInferenceActivationRequiresConfiguredExactProxyAndBoundedExpiry(t *testing.T) {
 	broker := newInferenceBroker(1)
 	broker.platformProxyURL = "https://platform.example" + platformInferenceAPIPath
+	broker.platformTransportURL = "https://platform-origin.example" + platformInferenceAPIPath
 	prepared := prepareBrokerSession(t, broker)
 
 	recorder := activationResponse(
@@ -853,11 +855,21 @@ func TestInferenceActivationRequiresConfiguredExactProxyAndBoundedExpiry(t *test
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("valid activation status = %d: %s", recorder.Code, recorder.Body.String())
 	}
+	broker.mu.RLock()
+	session := broker.sessions[prepared["session_id"]]
+	broker.mu.RUnlock()
+	session.mu.Lock()
+	transportURL := session.proxyURL
+	session.mu.Unlock()
+	if transportURL != broker.platformTransportURL {
+		t.Fatalf("session transport URL = %q, want %q", transportURL, broker.platformTransportURL)
+	}
 }
 
 func TestInferenceActivationRequiresTicketIdentityForV7Route(t *testing.T) {
 	broker := newInferenceBroker(1)
 	broker.platformProxyURL = "https://platform.example" + platformInferenceAPIPath
+	broker.platformTransportURL = broker.platformProxyURL
 	prepared := prepareBrokerSession(t, broker)
 	body, _ := json.Marshal(brokerActivation{
 		ActivationSecret: prepared["activation_secret"],
@@ -894,6 +906,20 @@ func TestConfiguredPlatformProxyURLFailsClosed(t *testing.T) {
 		if got := configuredPlatformProxyURL(invalid); got != "" {
 			t.Errorf("unsafe proxy %q accepted as %q", invalid, got)
 		}
+	}
+}
+
+func TestConfiguredPlatformTransportURLDefaultsToCanonicalAndFailsClosed(t *testing.T) {
+	canonical := "https://platform.example" + platformInferenceAPIPath
+	direct := "https://platform-origin.example" + platformInferenceAPIPath
+	if got := configuredPlatformTransportURL("", canonical); got != canonical {
+		t.Fatalf("empty transport = %q, want canonical %q", got, canonical)
+	}
+	if got := configuredPlatformTransportURL("  "+direct+"  ", canonical); got != direct {
+		t.Fatalf("direct transport = %q, want %q", got, direct)
+	}
+	if got := configuredPlatformTransportURL("http://platform-origin.example"+platformInferenceAPIPath, canonical); got != "" {
+		t.Fatalf("unsafe transport accepted as %q", got)
 	}
 }
 
