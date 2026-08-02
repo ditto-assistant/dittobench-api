@@ -1024,7 +1024,7 @@ func TestInferenceBrokerTrustedProbeUsesControlPlaneSession(t *testing.T) {
 // single-attempt contract #97 introduced. The platform still owns the first
 // line of provider retry, but one attempt here meant a fault it could not
 // absorb discarded the whole run, so v7 now gets a tiny bounded second line.
-// The bound is the point of the test: exactly v7TransientMaxAttempts
+// The bound is the point of the test: exactly ticketTransientMaxAttempts
 // deliveries, each independently signed, and the run still fails closed once
 // they are exhausted.
 func TestV7InferenceBrokerRetriesTransientProviderFaultsBoundedly(t *testing.T) {
@@ -1057,8 +1057,8 @@ func TestV7InferenceBrokerRetriesTransientProviderFaultsBoundedly(t *testing.T) 
 	if recorder.Code != http.StatusBadGateway {
 		t.Fatalf("request status = %d, want 502: %s", recorder.Code, recorder.Body.String())
 	}
-	if requestCount != v7TransientMaxAttempts {
-		t.Fatalf("platform deliveries=%d, want %d", requestCount, v7TransientMaxAttempts)
+	if requestCount != ticketTransientMaxAttempts {
+		t.Fatalf("platform deliveries=%d, want %d", requestCount, ticketTransientMaxAttempts)
 	}
 	seen := map[string]bool{}
 	for _, nonce := range nonces {
@@ -1083,11 +1083,11 @@ func TestV7InferenceBrokerRetriesTransientProviderFaultsBoundedly(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if execution.UpstreamAttempts != v7TransientMaxAttempts ||
-		execution.Retries != v7TransientMaxAttempts-1 || execution.InfrastructureFailures != 1 {
+	if execution.UpstreamAttempts != ticketTransientMaxAttempts ||
+		execution.Retries != ticketTransientMaxAttempts-1 || execution.InfrastructureFailures != 1 {
 		t.Fatalf("provider execution accounting = %+v", execution)
 	}
-	// One logical request, three deliveries, one authoritative outcome: the
+	// One logical request, bounded deliveries, one authoritative outcome: the
 	// retries are visible in the ledger and never inflate the request count or
 	// the failure count.
 	if execution.Requests != 1 || execution.GrantDenials != 0 {
@@ -1124,7 +1124,7 @@ func TestInferenceBrokerRejectsExhaustedTransientFailures(t *testing.T) {
 		t.Fatal(err)
 	}
 	if snapshot.Requests != 1 || snapshot.Successes != 0 ||
-		snapshot.UpstreamAttempts != v7TransientMaxAttempts || snapshot.InfrastructureFailures != 1 {
+		snapshot.UpstreamAttempts != ticketTransientMaxAttempts || snapshot.InfrastructureFailures != 1 {
 		t.Fatalf("exhausted provider accounting = %+v", snapshot)
 	}
 }
@@ -1521,7 +1521,7 @@ func TestV7ChatSurvivesOneTransientProviderFault(t *testing.T) {
 // field of their scored TokenUsage must be identical; only the attempt ledger
 // may differ.
 func TestRetriedRunReportsIdenticalObservedUsageToACleanRun(t *testing.T) {
-	const retries = v7TransientMaxAttempts - 1
+	const retries = ticketTransientMaxAttempts - 1
 	run := func(t *testing.T, faults int, sourceIP string) (protocol.TokenUsage, relayExecutionSummary) {
 		t.Helper()
 		var attempts atomic.Int64
@@ -1842,7 +1842,7 @@ func TestPlatformDeclineCodeIsAdvisoryAndFailsSoft(t *testing.T) {
 // The platform now answers a full-but-healthy chat lane with 503 + Retry-After
 // instead of the 429 it reserves for a dead lease. This asserts the broker
 // treats that as backpressure end to end: it comes back, it succeeds, it does
-// NOT record a grant denial, and it does NOT charge the run's three-attempt
+// NOT record a grant denial, and it does NOT charge the run's transient
 // transient budget for waiting out a queue.
 func TestChatCapacityDeclineIsWaitedOutRatherThanKillingTheRun(t *testing.T) {
 	var attempts atomic.Int64
