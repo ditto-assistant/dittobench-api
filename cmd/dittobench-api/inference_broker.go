@@ -59,8 +59,9 @@ const (
 	embeddingSessionInputBytes = 1 << 30
 )
 
-// v7TransientMaxAttempts bounds how many times ONE logical v7 inference request
-// may be delivered to the platform proxy. It is a code constant, not an env
+// ticketTransientMaxAttempts bounds how many times ONE logical ticket-scoped
+// inference request may be delivered to the platform proxy. It is a code
+// constant, not an env
 // knob: a validator that quietly retried more than its peers would consume more
 // of the shared route than the fleet agreed to, and the value below is chosen
 // against a hard accounting cost rather than to taste.
@@ -77,10 +78,13 @@ const (
 // finite, and a large cap here could exhaust a grant mid-run and convert a
 // survivable blip into the very failure the retry exists to prevent.
 //
-// 3 attempts is therefore the smallest cap that survives a single fault the
-// platform's own 3-attempt provider loop could not absorb, and it bounds
-// worst-case grant consumption at 3x rather than unbounded.
-const v7TransientMaxAttempts = 3
+// Six attempts spread the retries across the broker's complete exponential
+// backoff window instead of concentrating all of them in its first sub-second
+// burst. Bench v8 agents routinely make about 1,000 logical chat requests; even
+// the pathological all-retry request count therefore remains below the 8,192
+// ticket budget. This is still bounded and every delivery remains independently
+// reserved, signed, and recorded.
+const ticketTransientMaxAttempts = 6
 
 type brokerTicketIdentity struct {
 	GrantID        string
@@ -1369,7 +1373,7 @@ func (b *inferenceBroker) forwardPlatformEmbeddingWithRetry(
 ) (embeddingResponse, error) {
 	var lastErr error
 	capacityWaits := 0
-	for attempt := 1; attempt <= v7TransientMaxAttempts; {
+	for attempt := 1; attempt <= ticketTransientMaxAttempts; {
 		decoded, err := b.forwardPlatformEmbedding(ctx, session, inputs)
 		if err == nil {
 			return decoded, nil
@@ -1405,7 +1409,7 @@ func (b *inferenceBroker) forwardPlatformEmbeddingWithRetry(
 			return embeddingResponse{}, err
 		}
 		attempt++
-		if attempt > v7TransientMaxAttempts {
+		if attempt > ticketTransientMaxAttempts {
 			break
 		}
 		if b.sleep(ctx, b.retry.backoff(attempt-1)) != nil {
@@ -1418,7 +1422,7 @@ func (b *inferenceBroker) forwardPlatformEmbeddingWithRetry(
 		session.mu.Unlock()
 		log.Printf(
 			"run %s: retrying v7 embedding attempt %d/%d after a transient platform fault (%v); run retry ledger=%d",
-			runID, attempt, v7TransientMaxAttempts, lastErr, retries,
+			runID, attempt, ticketTransientMaxAttempts, lastErr, retries,
 		)
 	}
 	return embeddingResponse{}, lastErr
@@ -1706,8 +1710,8 @@ func (b *inferenceBroker) proxy(w http.ResponseWriter, r *http.Request, session 
 	// multiply provider work. That is still the right default, but one attempt
 	// means a fault the platform could not absorb discards ~18 minutes of work,
 	// so v7 keeps a deliberately tiny second line of defence. See
-	// v7TransientMaxAttempts for why the cap is 3 and not larger.
-	maxAttempts := v7TransientMaxAttempts
+	// ticketTransientMaxAttempts for why the cap spans the complete backoff window.
+	maxAttempts := ticketTransientMaxAttempts
 	if legacyGateway != "" {
 		maxAttempts = b.retry.maxAttempts
 	}
@@ -1761,7 +1765,7 @@ func (b *inferenceBroker) proxy(w http.ResponseWriter, r *http.Request, session 
 		// Backpressure, not a fault: the lease is healthy and the lane was
 		// momentarily full. Handled before the transient branch below because
 		// it IS a 5xx, and waiting out a queue is not the same event as
-		// surviving a provider blip -- charging it to the three-attempt
+		// surviving a provider blip -- charging it to the transient
 		// transient budget would spend a run's whole margin on a busy minute.
 		// This is the chat-lane twin of the embedding path, which has answered
 		// backpressure this way since dittobench-api #103.
