@@ -169,6 +169,34 @@ func TestRelayFailureIsRetryableValidatorInfrastructure(t *testing.T) {
 	}
 }
 
+func TestRelayFailureForContextKeepsCancellationSeparate(t *testing.T) {
+	t.Run("caller cancellation is not infrastructure", func(t *testing.T) {
+		s := &server{store: store.New()}
+		s.store.Create("cancelled", "run_size", store.StatusRunning, 1, 1)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		s.failRelayUnavailableForContext(ctx, "cancelled", context.Canceled)
+		job, _ := s.store.Get("cancelled")
+		if job.Status != store.StatusRunning || job.Failure != nil {
+			t.Fatalf("caller cancellation was classified as infrastructure: %#v", job)
+		}
+	})
+
+	t.Run("deadline remains fail closed", func(t *testing.T) {
+		s := &server{store: store.New()}
+		s.store.Create("deadline", "run_size", store.StatusRunning, 1, 1)
+		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+		defer cancel()
+
+		s.failRelayUnavailableForContext(ctx, "deadline", context.DeadlineExceeded)
+		job, _ := s.store.Get("deadline")
+		if job.Status != store.StatusFailed || job.Failure == nil || job.Failure.Code != "model_relay_unavailable" {
+			t.Fatalf("deadline did not fail closed: %#v", job)
+		}
+	})
+}
+
 func TestTrustedEmbeddingFailureIsRetryableValidatorInfrastructure(t *testing.T) {
 	failure := trustedEmbeddingInfrastructureFailure(errors.New("/seed returned 502: embedding service unavailable"))
 	if failure == nil || failure.Kind != "validator_infrastructure" ||

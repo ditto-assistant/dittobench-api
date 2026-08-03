@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/ditto-assistant/dittobench-api/internal/store"
+	"github.com/ditto-assistant/dittobench-datagen/protocol"
 )
 
 func TestCancelRunStopsActiveJob(t *testing.T) {
@@ -32,6 +33,18 @@ func TestCancelRunStopsActiveJob(t *testing.T) {
 	job, ok := s.store.Get("run-1")
 	if !ok || job.Status != store.StatusFailed || job.Error != "run cancelled by client" {
 		t.Fatalf("unexpected cancelled job: %+v", job)
+	}
+
+	// The worker can still be unwinding when DELETE returns. Its late terminal
+	// writes must not revive the run or blame validator infrastructure.
+	s.store.FailWith("run-1", "late relay failure", &store.Failure{
+		Kind: "validator_infrastructure",
+		Code: "model_relay_unavailable",
+	})
+	s.store.Finish("run-1", protocol.ScoreReport{RunID: "run-1", Composite: 1})
+	job, _ = s.store.Get("run-1")
+	if job.Status != store.StatusFailed || job.Error != "run cancelled by client" || job.Failure != nil || job.Report != nil {
+		t.Fatalf("late worker write replaced cancellation: %+v", job)
 	}
 }
 

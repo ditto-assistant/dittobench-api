@@ -70,6 +70,7 @@ type Job struct {
 	UpdatedAt        time.Time `json:"updated_at"`
 	resumeStatus     Status
 	resumeStage      string
+	cancelled        bool
 }
 
 // Store holds jobs by run ID.
@@ -114,7 +115,12 @@ func (s *Store) Update(runID string, mutate func(*Job)) {
 
 // SetStatus is a convenience for a status-only transition.
 func (s *Store) SetStatus(runID string, status Status) {
-	s.Update(runID, func(j *Job) { j.Status = status })
+	s.Update(runID, func(j *Job) {
+		if j.cancelled {
+			return
+		}
+		j.Status = status
+	})
 }
 
 // SetRunSize records the requested run_size on a job.
@@ -132,6 +138,9 @@ func (s *Store) SetBenchVersion(runID string, version int) {
 // SetStage sets Status + the progress stage label together.
 func (s *Store) SetStage(runID string, status Status, done, total int) {
 	s.Update(runID, func(j *Job) {
+		if j.cancelled {
+			return
+		}
 		if j.Status == StatusWaitingRelay {
 			j.resumeStatus = status
 			j.resumeStage = string(status)
@@ -147,6 +156,9 @@ func (s *Store) SetStage(runID string, status Status, done, total int) {
 // SetRelayWaiting exposes a provider recovery pause without losing case progress.
 func (s *Store) SetRelayWaiting(runID string, waiting bool) {
 	s.Update(runID, func(j *Job) {
+		if j.cancelled {
+			return
+		}
 		if waiting {
 			if j.Status == StatusWaitingRelay || j.Status == StatusDone || j.Status == StatusFailed {
 				return
@@ -176,6 +188,9 @@ func (s *Store) SetRelayWaiting(runID string, waiting bool) {
 // AppendPartial adds a finished case score and advances Progress.Done.
 func (s *Store) AppendPartial(runID string, cs protocol.CaseScore) {
 	s.Update(runID, func(j *Job) {
+		if j.cancelled {
+			return
+		}
 		j.Partial = append(j.Partial, cs)
 		j.Progress.Done = len(j.Partial)
 	})
@@ -189,6 +204,9 @@ func (s *Store) Fail(runID, msg string) {
 // FailWith marks a job failed and attaches an optional sanitized classifier.
 func (s *Store) FailWith(runID, msg string, failure *Failure) {
 	s.Update(runID, func(j *Job) {
+		if j.cancelled {
+			return
+		}
 		j.Status = StatusFailed
 		j.Error = msg
 		j.Failure = failure
@@ -198,6 +216,9 @@ func (s *Store) FailWith(runID, msg string, failure *Failure) {
 // SetTranscript attaches the canonical transcript artifact and its digest.
 func (s *Store) SetTranscript(runID, sha string, body []byte) {
 	s.Update(runID, func(j *Job) {
+		if j.cancelled {
+			return
+		}
 		j.TranscriptSHA256 = sha
 		j.Transcript = body
 	})
@@ -206,10 +227,36 @@ func (s *Store) SetTranscript(runID, sha string, body []byte) {
 // Finish marks a job done and attaches its report.
 func (s *Store) Finish(runID string, report protocol.ScoreReport) {
 	s.Update(runID, func(j *Job) {
+		if j.cancelled {
+			return
+		}
 		j.Status = StatusDone
 		r := report
 		j.Report = &r
 	})
+}
+
+// CancelIfActive atomically makes client cancellation the final verdict for an
+// active run. The worker may still be unwinding concurrent sandbox or relay
+// calls, so the private cancelled bit prevents those late writes from reviving
+// the run or replacing the cancellation with an infrastructure classification.
+// A terminal run is returned unchanged, making repeated DELETEs idempotent.
+func (s *Store) CancelIfActive(runID, msg string) (Job, bool, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	j, ok := s.jobs[runID]
+	if !ok {
+		return Job{}, false, false
+	}
+	if j.Status == StatusDone || j.Status == StatusFailed {
+		return *j, true, false
+	}
+	j.cancelled = true
+	j.Status = StatusFailed
+	j.Error = msg
+	j.Failure = nil
+	j.UpdatedAt = time.Now()
+	return *j, true, true
 }
 
 // Get returns a copy of the job for id and whether it was found.

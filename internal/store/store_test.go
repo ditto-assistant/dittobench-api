@@ -39,6 +39,40 @@ func TestFail(t *testing.T) {
 	}
 }
 
+func TestCancelIfActiveMakesCancellationSticky(t *testing.T) {
+	s := New()
+	s.Create("cancelled", "run_size", StatusRunning, 1, 5)
+
+	job, found, transitioned := s.CancelIfActive("cancelled", "run cancelled by client")
+	if !found || !transitioned || job.Status != StatusFailed {
+		t.Fatalf("cancel transition = found %t transitioned %t job %+v", found, transitioned, job)
+	}
+
+	s.SetStatus("cancelled", StatusScoring)
+	s.SetStage("cancelled", StatusScoring, 5, 5)
+	s.SetRelayWaiting("cancelled", true)
+	s.AppendPartial("cancelled", protocol.CaseScore{CaseID: "late"})
+	s.FailWith("cancelled", "late infrastructure failure", &Failure{
+		Kind: "validator_infrastructure",
+		Code: "model_relay_unavailable",
+	})
+	s.SetTranscript("cancelled", "late-sha", []byte("late transcript"))
+	s.Finish("cancelled", protocol.ScoreReport{RunID: "cancelled", Composite: 1})
+
+	got, _ := s.Get("cancelled")
+	if got.Status != StatusFailed || got.Error != "run cancelled by client" || got.Failure != nil {
+		t.Fatalf("late writes replaced cancellation: %+v", got)
+	}
+	if got.Report != nil || len(got.Partial) != 0 || got.TranscriptSHA256 != "" {
+		t.Fatalf("late writes mutated cancelled job: %+v", got)
+	}
+
+	again, found, transitioned := s.CancelIfActive("cancelled", "replacement")
+	if !found || transitioned || again.Error != "run cancelled by client" {
+		t.Fatalf("repeat cancel was not idempotent: found %t transitioned %t job %+v", found, transitioned, again)
+	}
+}
+
 func TestFailWithSanitizedInfrastructureClassification(t *testing.T) {
 	s := New()
 	s.Create("r-infra", "sandbox", StatusRunning, 1, 5)
