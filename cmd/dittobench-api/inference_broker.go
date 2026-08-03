@@ -593,6 +593,10 @@ func brokerSleep(ctx context.Context, delay time.Duration) error {
 	}
 }
 
+func embeddingRequestCanceled(ctx context.Context) bool {
+	return errors.Is(ctx.Err(), context.Canceled)
+}
+
 func newInferenceBroker(maxSessions int, embeddingCapacity ...int) *inferenceBroker {
 	if maxSessions < 1 {
 		maxSessions = 1
@@ -1373,7 +1377,7 @@ func (b *inferenceBroker) handleEmbedding(w http.ResponseWriter, r *http.Request
 			var denied platformGrantDenied
 			session.mu.Lock()
 			var saturated platformEmbeddingAtCapacity
-			if errors.Is(requestContext.Err(), context.Canceled) {
+			if embeddingRequestCanceled(requestContext) {
 				// endEmbeddingPhase deliberately cancels and drains every call
 				// that a harness left in flight. A client can cancel its own
 				// request for the same reason. Neither event says anything about

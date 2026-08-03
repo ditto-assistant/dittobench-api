@@ -440,6 +440,22 @@ func TestEndEmbeddingPhaseRevokesEveryInFlightCall(t *testing.T) {
 	}
 }
 
+func TestEmbeddingRequestCancellationKeepsDeadlinesFailClosed(t *testing.T) {
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if !embeddingRequestCanceled(canceled) {
+		t.Fatal("caller cancellation was not recognized")
+	}
+
+	deadline, cancelDeadline := context.WithDeadline(
+		context.Background(), time.Now().Add(-time.Second),
+	)
+	defer cancelDeadline()
+	if embeddingRequestCanceled(deadline) {
+		t.Fatal("broker deadline was mistaken for caller cancellation")
+	}
+}
+
 // TestLegacySessionsKeepTheSingleSlotLane pins the default. A session that
 // never went through claimRun -- every prepareLegacy path -- must behave
 // byte-identically to the bool this replaced.
