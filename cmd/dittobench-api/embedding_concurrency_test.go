@@ -427,9 +427,32 @@ func TestEndEmbeddingPhaseRevokesEveryInFlightCall(t *testing.T) {
 	broker.mu.RUnlock()
 	session.mu.Lock()
 	remaining, tracked := session.embeddingInFlight, len(session.embeddingCalls)
+	failures, callerCancels := session.failures, session.callerCancels
 	session.mu.Unlock()
 	if remaining != 0 || tracked != 0 {
 		t.Fatalf("lane leaked after phase teardown: inFlight=%d tracked=%d", remaining, tracked)
+	}
+	if failures != 0 || callerCancels != inFlight {
+		t.Fatalf(
+			"phase teardown accounting: failures=%d caller_cancellations=%d, want 0 and %d",
+			failures, callerCancels, inFlight,
+		)
+	}
+}
+
+func TestEmbeddingRequestCancellationKeepsDeadlinesFailClosed(t *testing.T) {
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if !embeddingRequestCanceled(canceled) {
+		t.Fatal("caller cancellation was not recognized")
+	}
+
+	deadline, cancelDeadline := context.WithDeadline(
+		context.Background(), time.Now().Add(-time.Second),
+	)
+	defer cancelDeadline()
+	if embeddingRequestCanceled(deadline) {
+		t.Fatal("broker deadline was mistaken for caller cancellation")
 	}
 }
 
