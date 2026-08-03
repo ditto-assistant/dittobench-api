@@ -433,7 +433,7 @@ func (s *server) relayRunStart(ctx context.Context, runID string, benchVersion i
 		probeErr = probeLockedModelRelay(ctx, gateway, benchVersion)
 	}
 	if probeErr != nil {
-		s.failRelayUnavailable(runID, probeErr)
+		s.failRelayUnavailableForContext(ctx, runID, probeErr)
 		return relayHealthSnapshot{}, false
 	}
 	var snapshot relayHealthSnapshot
@@ -444,12 +444,12 @@ func (s *server) relayRunStart(ctx context.Context, runID string, benchVersion i
 		snapshot, err = readRelayHealth(ctx, gateway)
 	}
 	if err != nil {
-		s.failRelayUnavailable(runID, err)
+		s.failRelayUnavailableForContext(ctx, runID, err)
 		return relayHealthSnapshot{}, false
 	}
 	if benchVersion >= protocol.BenchVersionV5 {
 		if err := requireTokenAccounting(snapshot, benchVersion, runSize); err != nil {
-			s.failRelayUnavailable(runID, err)
+			s.failRelayUnavailableForContext(ctx, runID, err)
 			return relayHealthSnapshot{}, false
 		}
 	}
@@ -468,17 +468,17 @@ func (s *server) relayRunResult(ctx context.Context, runID string, start relayHe
 		err = relayDegradedSince(start, end)
 	}
 	if err != nil {
-		s.failRelayUnavailable(runID, err)
+		s.failRelayUnavailableForContext(ctx, runID, err)
 		return protocol.TokenUsage{}, relayExecutionSummary{}, false
 	}
 	usage, usageErr := relayUsageSince(start, end)
 	if usageErr != nil {
-		s.failRelayUnavailable(runID, usageErr)
+		s.failRelayUnavailableForContext(ctx, runID, usageErr)
 		return protocol.TokenUsage{}, relayExecutionSummary{}, false
 	}
 	execution, executionErr := relayExecutionSince(start, end)
 	if executionErr != nil {
-		s.failRelayUnavailable(runID, executionErr)
+		s.failRelayUnavailableForContext(ctx, runID, executionErr)
 		return protocol.TokenUsage{}, relayExecutionSummary{}, false
 	}
 	return usage, execution, true
@@ -637,6 +637,16 @@ func (s *server) failRelayUnavailable(runID string, err error) {
 		prefix = "harness exhausted its inference allowance: "
 	}
 	s.store.FailWith(runID, prefix+err.Error(), failure)
+}
+
+func (s *server) failRelayUnavailableForContext(ctx context.Context, runID string, err error) {
+	// DELETE /v1/runs/{id} owns context.Canceled. Do not translate that caller
+	// lifecycle signal into a validator-infrastructure verdict while the worker
+	// unwinds relay preflight or final accounting. Deadlines remain fail-closed.
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return
+	}
+	s.failRelayUnavailable(runID, err)
 }
 
 func trustedEmbeddingInfrastructureFailure(err error) *store.Failure {

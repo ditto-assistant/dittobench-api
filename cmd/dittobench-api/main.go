@@ -1440,7 +1440,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		gateway := envOr("HARNESS_GATEWAY_URL", "http://host.docker.internal:11434")
 		relay, err := readRelayHealth(ctx, gateway)
 		if err != nil {
-			s.failRelayUnavailable(runID, err)
+			s.failRelayUnavailableForContext(ctx, runID, err)
 			return
 		}
 		legacySessionID, err := s.broker.prepareLegacy(
@@ -1450,7 +1450,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 			relay,
 		)
 		if err != nil {
-			s.failRelayUnavailable(runID, err)
+			s.failRelayUnavailableForContext(ctx, runID, err)
 			return
 		}
 		inferenceSessionID = legacySessionID
@@ -2218,12 +2218,21 @@ func (s *server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
 	cancel := s.runCancels[id]
 	s.cancelMu.Unlock()
 	if cancel == nil {
+		// The worker unregisters its cancel function after publishing its terminal
+		// state. Re-read so a finish racing this DELETE remains an idempotent 200.
+		if job, ok = s.store.Get(id); ok && (job.Status == store.StatusDone || job.Status == store.StatusFailed) {
+			writeJSON(w, http.StatusOK, job)
+			return
+		}
 		writeError(w, http.StatusConflict, "run is not cancellable")
 		return
 	}
+	job, _, transitioned := s.store.CancelIfActive(id, "run cancelled by client")
+	if !transitioned {
+		writeJSON(w, http.StatusOK, job)
+		return
+	}
 	cancel()
-	s.store.Fail(id, "run cancelled by client")
-	job, _ = s.store.Get(id)
 	writeJSON(w, http.StatusAccepted, job)
 }
 
