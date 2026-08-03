@@ -1373,7 +1373,16 @@ func (b *inferenceBroker) handleEmbedding(w http.ResponseWriter, r *http.Request
 			var denied platformGrantDenied
 			session.mu.Lock()
 			var saturated platformEmbeddingAtCapacity
-			if errors.As(err, &denied) {
+			if errors.Is(requestContext.Err(), context.Canceled) {
+				// endEmbeddingPhase deliberately cancels and drains every call
+				// that a harness left in flight. A client can cancel its own
+				// request for the same reason. Neither event says anything about
+				// provider health, so keep it in the same caller-cancellation
+				// ledger the chat lane already uses. Counting this as an upstream
+				// failure made a concurrent harness fail closed at finalization
+				// after all of its delivered requests had succeeded.
+				session.callerCancels++
+			} else if errors.As(err, &denied) {
 				session.grantDenials++
 				attribution := "platform fault: the lease is gone"
 				if declineIsAgentFault(denied.code) {
