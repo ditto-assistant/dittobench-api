@@ -616,6 +616,7 @@ def run(args: argparse.Namespace) -> None:
             "limit": args.limit,
         },
         "adapter": {
+            "bench_version": getattr(args, "bench_version", 8),
             "retrieval_mode": retrieval_mode,
             "system_prompt": system_prompt,
             "advertised_tools": [tool["name"] for tool in advertised_tools],
@@ -630,6 +631,7 @@ def run(args: argparse.Namespace) -> None:
             "has_answer_labels_sent_to_harness": False,
         },
         "answer_model_profile": getattr(args, "answer_model_profile", ""),
+        "answer_model": getattr(args, "answer_model", ""),
         "agent_label": args.agent_label,
         "started_at": started_at,
         "finished_at": utc_now(),
@@ -663,6 +665,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--manifest")
     parser.add_argument("--agent-label", required=True)
     parser.add_argument(
+        "--bench-version",
+        type=int,
+        default=8,
+        help="Agent benchmark generation recorded in the research manifest",
+    )
+    parser.add_argument(
+        "--answer-model",
+        default="",
+        help="Upstream reader model recorded in the research manifest",
+    )
+    parser.add_argument(
         "--answer-model-profile",
         default="",
         help="Auditable label for the shared reader model/proxy condition",
@@ -694,6 +707,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--offset must be non-negative and --limit must be positive")
     if args.seed_wave_pairs < 1 or args.attempts < 1 or args.timeout <= 0 or args.shards < 1:
         parser.error("wave size, attempts, and timeout must be positive")
+    if args.bench_version < 1:
+        parser.error("--bench-version must be positive")
     if args.harness_url_template and "{shard}" not in args.harness_url_template:
         parser.error("--harness-url-template must contain {shard}")
     if args.shards != 1 and not args.harness_url_template:

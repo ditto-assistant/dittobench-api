@@ -13,6 +13,7 @@ from longmemeval_adapter import (
     entry_to_pairs,
     normalize_timestamp,
     iter_json_array,
+    parse_args,
     retrieval_condition,
     run,
     sha256_file,
@@ -265,6 +266,9 @@ class EndToEndTests(unittest.TestCase):
                 output=str(output),
                 manifest=None,
                 agent_label="test-agent",
+                bench_version=8,
+                answer_model="anthropic/claude-sonnet-4",
+                answer_model_profile="longmemeval-v8-claude-sonnet-4-v1",
                 offset=0,
                 limit=None,
                 seed_wave_pairs=2,
@@ -289,6 +293,35 @@ class EndToEndTests(unittest.TestCase):
                 ],
             )
             self.assertEqual(json.loads(output.read_text()), {"question_id": "q-1", "hypothesis": "Lisbon"})
+            manifest = json.loads(Path(str(output) + ".manifest.json").read_text())
+            self.assertEqual(manifest["adapter"]["bench_version"], 8)
+            self.assertEqual(manifest["answer_model"], "anthropic/claude-sonnet-4")
+            self.assertEqual(
+                manifest["answer_model_profile"],
+                "longmemeval-v8-claude-sonnet-4-v1",
+            )
+
+    def test_cli_defaults_to_v8_and_accepts_an_audited_reader_model(self):
+        args = parse_args(
+            [
+                "--dataset",
+                "dataset.json",
+                "--dataset-sha256",
+                "0" * 64,
+                "--harness-url",
+                "http://127.0.0.1:8080",
+                "--output",
+                "results.jsonl",
+                "--agent-label",
+                "agent",
+                "--answer-model",
+                "google/gemini-2.5-pro",
+                "--answer-model-profile",
+                "longmemeval-v8-gemini-2-5-pro-v1",
+            ]
+        )
+        self.assertEqual(args.bench_version, 8)
+        self.assertEqual(args.answer_model, "google/gemini-2.5-pro")
 
     def test_client_requires_final_text(self):
         client = HarnessClient(f"http://127.0.0.1:{self.server.server_port}", attempts=1)

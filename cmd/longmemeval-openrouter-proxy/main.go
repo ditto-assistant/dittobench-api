@@ -33,6 +33,8 @@ type profile struct {
 	Revision      string
 	AcceptedModel string
 	UpstreamModel string
+	ProviderOrder []string
+	AllowFallback bool
 	DefaultPort   int
 	AllowedPaths  map[string]bool
 	HTTPReferer   string
@@ -44,7 +46,8 @@ func profileFor(name string) (profile, error) {
 	case "reader":
 		return profile{
 			Name: "reader", Revision: readerRevision, AcceptedModel: readerModel,
-			UpstreamModel: readerModel, DefaultPort: 18437,
+			UpstreamModel: readerModel, ProviderOrder: []string{"openai"},
+			AllowFallback: false, DefaultPort: 18437,
 			AllowedPaths: map[string]bool{"/v1/chat/completions": true, "/chat/completions": true},
 			HTTPReferer:  "https://github.com/ditto-assistant/dittobench-api",
 			Title:        "Ditto top-five LongMemEval reader",
@@ -52,7 +55,8 @@ func profileFor(name string) (profile, error) {
 	case "judge":
 		return profile{
 			Name: "judge", Revision: judgeRevision, AcceptedModel: officialJudgeModel,
-			UpstreamModel: openRouterJudgeModel, DefaultPort: 18436,
+			UpstreamModel: openRouterJudgeModel, ProviderOrder: []string{"openai"},
+			AllowFallback: false, DefaultPort: 18436,
 			AllowedPaths: map[string]bool{"/v1/chat/completions": true},
 			HTTPReferer:  "https://github.com/xiaowu0162/LongMemEval",
 			Title:        "LongMemEval official evaluator",
@@ -60,6 +64,60 @@ func profileFor(name string) (profile, error) {
 	default:
 		return profile{}, errors.New("LONGMEMEVAL_PROXY_PROFILE must be reader or judge")
 	}
+}
+
+func configuredReaderProfile(
+	selected profile,
+	acceptedModel, upstreamModel, providerOrder, revision string,
+	allowFallback bool,
+) (profile, error) {
+	if selected.Name != "reader" {
+		return profile{}, errors.New("only the reader profile is configurable")
+	}
+	acceptedModel = strings.TrimSpace(acceptedModel)
+	upstreamModel = strings.TrimSpace(upstreamModel)
+	revision = strings.TrimSpace(revision)
+	if acceptedModel == "" || upstreamModel == "" || revision == "" {
+		return profile{}, errors.New("reader accepted model, upstream model, and revision are required")
+	}
+
+	var providers []string
+	providerOrder = strings.TrimSpace(providerOrder)
+	if providerOrder != "" && providerOrder != "auto" {
+		seen := make(map[string]bool)
+		for _, raw := range strings.Split(providerOrder, ",") {
+			provider := strings.TrimSpace(raw)
+			if provider == "" || seen[provider] {
+				return profile{}, errors.New("reader provider order must contain unique non-empty names")
+			}
+			seen[provider] = true
+			providers = append(providers, provider)
+		}
+	}
+
+	changed := acceptedModel != selected.AcceptedModel || upstreamModel != selected.UpstreamModel ||
+		!slicesEqual(providers, selected.ProviderOrder) || allowFallback != selected.AllowFallback
+	if changed && revision == selected.Revision {
+		return profile{}, errors.New("a custom reader configuration requires a distinct revision")
+	}
+	selected.AcceptedModel = acceptedModel
+	selected.UpstreamModel = upstreamModel
+	selected.ProviderOrder = providers
+	selected.AllowFallback = allowFallback
+	selected.Revision = revision
+	return selected, nil
+}
+
+func slicesEqual(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 type proxy struct {
@@ -99,10 +157,14 @@ func rewriteRequest(selected profile, raw []byte) ([]byte, error) {
 	}
 	request["model"] = selected.UpstreamModel
 	request["stream"] = false
-	request["provider"] = map[string]any{
-		"only": []string{"openai"}, "allow_fallbacks": false,
+	provider := map[string]any{
+		"allow_fallbacks": selected.AllowFallback,
 		"data_collection": "deny",
 	}
+	if len(selected.ProviderOrder) > 0 {
+		provider["only"] = selected.ProviderOrder
+	}
+	request["provider"] = provider
 	return json.Marshal(request)
 }
 
@@ -166,8 +228,10 @@ func (p *proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"status": "ok", "profile_revision": p.profile.Revision,
 			"profile": p.profile.Name, "accepted_model": p.profile.AcceptedModel,
-			"upstream_model": p.profile.UpstreamModel, "provider": "openai",
-			"requests": p.requests.Load(), "successes": p.successes.Load(),
+			"upstream_model":  p.profile.UpstreamModel,
+			"provider_order":  p.profile.ProviderOrder,
+			"allow_fallbacks": p.profile.AllowFallback,
+			"requests":        p.requests.Load(), "successes": p.successes.Load(),
 			"failures": p.failures.Load(), "prompt_tokens": p.promptTokens.Load(),
 			"completion_tokens": p.completionTokens.Load(), "provider_latency_ms": p.latencyMS.Load(),
 		})
@@ -228,10 +292,39 @@ func envOr(name, fallback string) string {
 	return fallback
 }
 
+func envBool(name string, fallback bool) (bool, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, fmt.Errorf("%s must be true or false", name)
+	}
+	return parsed, nil
+}
+
 func main() {
 	selected, err := profileFor(envOr("LONGMEMEVAL_PROXY_PROFILE", "reader"))
 	if err != nil {
 		log.Fatal(err)
+	}
+	if selected.Name == "reader" {
+		allowFallback, boolErr := envBool("LONGMEMEVAL_ALLOW_FALLBACKS", selected.AllowFallback)
+		if boolErr != nil {
+			log.Fatal(boolErr)
+		}
+		selected, err = configuredReaderProfile(
+			selected,
+			envOr("LONGMEMEVAL_ACCEPTED_MODEL", selected.AcceptedModel),
+			envOr("LONGMEMEVAL_UPSTREAM_MODEL", selected.UpstreamModel),
+			envOr("LONGMEMEVAL_PROVIDER_ORDER", strings.Join(selected.ProviderOrder, ",")),
+			envOr("LONGMEMEVAL_READER_REVISION", selected.Revision),
+			allowFallback,
+		)
+		if err != nil {
+			log.Fatal(err)
+		}
 	}
 	apiKey := strings.TrimSpace(os.Getenv("OPENROUTER_API_KEY"))
 	if apiKey == "" {
