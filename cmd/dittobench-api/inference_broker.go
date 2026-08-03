@@ -59,12 +59,11 @@ const (
 	embeddingSessionInputBytes = 1 << 30
 )
 
-// ticketTransientMaxAttempts bounds how many times ONE logical ticket-scoped
-// inference request may be delivered to the platform proxy. It is a code
-// constant, not an env
-// knob: a validator that quietly retried more than its peers would consume more
-// of the shared route than the fleet agreed to, and the value below is chosen
-// against a hard accounting cost rather than to taste.
+// ticketTransientMaxAttempts bounds the embedding lane's short retry window.
+// Chat uses ticketChatFastMaxAttempts because one Platform response already
+// represents exhausted throughput and reliability phases; repeating that whole
+// stack six more times before announcing a wait would multiply provider work
+// without giving the heartbeat a chance to explain the pause.
 //
 // Why so small. Each broker-level attempt is a NEW nonce and therefore a NEW
 // platform reservation (ditto-platform ditto/db/queries/inference.py:460-474:
@@ -78,13 +77,16 @@ const (
 // finite, and a large cap here could exhaust a grant mid-run and convert a
 // survivable blip into the very failure the retry exists to prevent.
 //
-// Six attempts spread the retries across the broker's complete exponential
-// backoff window instead of concentrating all of them in its first sub-second
-// burst. Bench v8 agents routinely make about 1,000 logical chat requests; even
-// the pathological all-retry request count therefore remains below the 8,192
-// ticket budget. This is still bounded and every delivery remains independently
-// reserved, signed, and recorded.
-const ticketTransientMaxAttempts = 6
+// Each extra broker delivery is a NEW reservation. Chat therefore makes one
+// fast delivery, then at most four slow recovery deliveries. Even a pathological
+// all-retry run stays below the 8,192-request ticket budget, while every
+// delivery remains independently reserved, signed, and recorded.
+const (
+	ticketTransientMaxAttempts = 6
+	ticketChatFastMaxAttempts  = 1
+	ticketRecoveryMaxAttempts  = 4
+	ticketRecoveryBackoff      = 15 * time.Second
+)
 
 type brokerTicketIdentity struct {
 	GrantID        string
@@ -157,6 +159,13 @@ type brokerSession struct {
 	// a distinct code purely so an operator can tell a saturated rail apart
 	// from an unreachable relay without reading logs.
 	capacityExhaustions uint64
+	// recoveryWaits counts logical chat calls that exhausted the fast retry
+	// window and entered the slower provider-recovery window. Multiple calls can
+	// wait concurrently; recoveryWaiters keeps the public run status paused
+	// until the last one resumes.
+	recoveryWaits       uint64
+	recoveryExhaustions uint64
+	recoveryWaiters     int
 	promptTokens        uint64
 	promptBytes         uint64
 	completionTokens    uint64
@@ -191,6 +200,33 @@ type inferenceBroker struct {
 	embeddingSlots       chan struct{}
 	retry                brokerRetryConfig
 	sleep                func(context.Context, time.Duration) error
+	relayWait            func(string, bool)
+}
+
+func (b *inferenceBroker) beginRelayWait(session *brokerSession) func() {
+	session.mu.Lock()
+	session.recoveryWaits++
+	session.recoveryWaiters++
+	first := session.recoveryWaiters == 1
+	runID := session.boundRunID
+	if first && b.relayWait != nil && runID != "" {
+		b.relayWait(runID, true)
+	}
+	session.mu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			session.mu.Lock()
+			session.recoveryWaiters--
+			last := session.recoveryWaiters == 0
+			runID := session.boundRunID
+			if last && b.relayWait != nil && runID != "" {
+				b.relayWait(runID, false)
+			}
+			session.mu.Unlock()
+		})
+	}
 }
 
 type toolRoute struct {
@@ -1639,6 +1675,8 @@ func (b *inferenceBroker) health(w http.ResponseWriter, session *brokerSession) 
 		GrantAgentDeclines:     session.grantAgentDeclines,
 		AgentRequestRejections: session.agentRequestRejections,
 		CapacityExhaustions:    session.capacityExhaustions,
+		RecoveryWaits:          session.recoveryWaits,
+		RecoveryExhaustions:    session.recoveryExhaustions,
 		EmbeddingRetries:       session.embeddingRetries,
 		CallerCancellations:    session.callerCancels,
 		UpstreamAttempts:       session.upstreamAttempts,
@@ -1735,7 +1773,7 @@ func (b *inferenceBroker) proxy(w http.ResponseWriter, r *http.Request, session 
 	// means a fault the platform could not absorb discards ~18 minutes of work,
 	// so v7 keeps a deliberately tiny second line of defence. See
 	// ticketTransientMaxAttempts for why the cap spans the complete backoff window.
-	maxAttempts := ticketTransientMaxAttempts
+	maxAttempts := ticketChatFastMaxAttempts + ticketRecoveryMaxAttempts
 	if legacyGateway != "" {
 		maxAttempts = b.retry.maxAttempts
 	}
@@ -1743,9 +1781,24 @@ func (b *inferenceBroker) proxy(w http.ResponseWriter, r *http.Request, session 
 		maxAttempts = 1
 	}
 	capacityWaits := 0
+	var endRelayWait func()
+	defer func() {
+		if endRelayWait != nil {
+			endRelayWait()
+		}
+	}()
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		if attempt > 1 && b.sleep(requestCtx, b.retry.backoff(attempt-1)) != nil {
-			break
+		if attempt > 1 {
+			delay := b.retry.backoff(attempt - 1)
+			if legacyGateway == "" && attempt > ticketChatFastMaxAttempts {
+				if endRelayWait == nil {
+					endRelayWait = b.beginRelayWait(session)
+				}
+				delay = ticketRecoveryBackoff
+			}
+			if b.sleep(requestCtx, delay) != nil {
+				break
+			}
 		}
 		nonce := uuid.NewString()
 		requested := time.Now().UTC().Format("2006-01-02T15:04:05.000000+00:00")
@@ -1904,6 +1957,9 @@ func (b *inferenceBroker) proxy(w http.ResponseWriter, r *http.Request, session 
 	if responseStatus < 200 || responseStatus >= 300 || len(responseBody) == 0 {
 		session.mu.Lock()
 		session.failures++
+		if endRelayWait != nil {
+			session.recoveryExhaustions++
+		}
 		session.providerLatency += totalLatency
 		session.mu.Unlock()
 		writeError(w, http.StatusBadGateway, "inference provider unavailable")
@@ -1991,6 +2047,8 @@ func (b *inferenceBroker) snapshot(id string) (relayHealthSnapshot, error) {
 		GrantAgentDeclines:     session.grantAgentDeclines,
 		AgentRequestRejections: session.agentRequestRejections,
 		CapacityExhaustions:    session.capacityExhaustions,
+		RecoveryWaits:          session.recoveryWaits,
+		RecoveryExhaustions:    session.recoveryExhaustions,
 		CallerCancellations:    session.callerCancels, UpstreamAttempts: session.upstreamAttempts,
 		Provider: session.provider, ProfileRevision: session.profileRevision,
 		Model: session.model, UsageAvailable: session.usageAvailable,

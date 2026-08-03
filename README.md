@@ -247,7 +247,8 @@ tool and memory case, grade deterministically, and aggregate. No key needed.
 Target a reachable `harness_url`, or `git_url` for the Docker-build path (local
 or on-chain only). Asynchronous; returns `202` and a `run_id`. Poll
 `GET /v1/runs/{id}` for `queued`, `building`, `generating`, `seeding`,
-`running`, `scoring`, then `done` or `failed`, with live `progress` and
+`running`, a transient `waiting_for_relay` recovery pause, `scoring`, then
+`done` or `failed`, with live `progress` and
 `partial` per-case scores.
 
 ```sh

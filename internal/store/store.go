@@ -19,14 +19,15 @@ import (
 type Status string
 
 const (
-	StatusQueued     Status = "queued"     // accepted, not yet started
-	StatusBuilding   Status = "building"   // docker build in progress (sandbox mode)
-	StatusGenerating Status = "generating" // generating the fresh anti-cheat dataset
-	StatusSeeding    Status = "seeding"    // pushing the fresh haystack to the harness
-	StatusRunning    Status = "running"    // harness up, dataset executing
-	StatusScoring    Status = "scoring"    // computing the score report
-	StatusDone       Status = "done"       // Report is populated
-	StatusFailed     Status = "failed"     // Error is populated
+	StatusQueued       Status = "queued"            // accepted, not yet started
+	StatusBuilding     Status = "building"          // docker build in progress (sandbox mode)
+	StatusGenerating   Status = "generating"        // generating the fresh anti-cheat dataset
+	StatusSeeding      Status = "seeding"           // pushing the fresh haystack to the harness
+	StatusRunning      Status = "running"           // harness up, dataset executing
+	StatusWaitingRelay Status = "waiting_for_relay" // paused between provider attempts
+	StatusScoring      Status = "scoring"           // computing the score report
+	StatusDone         Status = "done"              // Report is populated
+	StatusFailed       Status = "failed"            // Error is populated
 )
 
 // Progress is the coarse stage progress surfaced to a polling UI.
@@ -67,6 +68,8 @@ type Job struct {
 	Transcript       []byte    `json:"-"`
 	CreatedAt        time.Time `json:"created_at"`
 	UpdatedAt        time.Time `json:"updated_at"`
+	resumeStatus     Status
+	resumeStage      string
 }
 
 // Store holds jobs by run ID.
@@ -129,8 +132,44 @@ func (s *Store) SetBenchVersion(runID string, version int) {
 // SetStage sets Status + the progress stage label together.
 func (s *Store) SetStage(runID string, status Status, done, total int) {
 	s.Update(runID, func(j *Job) {
+		if j.Status == StatusWaitingRelay {
+			j.resumeStatus = status
+			j.resumeStage = string(status)
+			j.Progress.Done = done
+			j.Progress.Total = total
+			return
+		}
 		j.Status = status
 		j.Progress = Progress{Stage: string(status), Done: done, Total: total}
+	})
+}
+
+// SetRelayWaiting exposes a provider recovery pause without losing case progress.
+func (s *Store) SetRelayWaiting(runID string, waiting bool) {
+	s.Update(runID, func(j *Job) {
+		if waiting {
+			if j.Status == StatusWaitingRelay || j.Status == StatusDone || j.Status == StatusFailed {
+				return
+			}
+			j.resumeStatus = j.Status
+			j.resumeStage = j.Progress.Stage
+			j.Status = StatusWaitingRelay
+			j.Progress.Stage = string(StatusWaitingRelay)
+			return
+		}
+		if j.Status != StatusWaitingRelay {
+			return
+		}
+		j.Status = j.resumeStatus
+		if j.Status == "" {
+			j.Status = StatusRunning
+		}
+		j.Progress.Stage = j.resumeStage
+		if j.Progress.Stage == "" {
+			j.Progress.Stage = string(j.Status)
+		}
+		j.resumeStatus = ""
+		j.resumeStage = ""
 	})
 }
 

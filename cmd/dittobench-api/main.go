@@ -276,6 +276,7 @@ func main() {
 		broker:                 newInferenceBroker(maxConcurrentRuns, cap(memorySlots)),
 		runCancels:             make(map[string]context.CancelFunc),
 	}
+	s.broker.relayWait = s.store.SetRelayWaiting
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.handleHealth)
@@ -1297,8 +1298,9 @@ func runScope(req submitRequest) scorer.Scope {
 }
 
 // runSizeJob is the full SN118 pipeline: building → generating → seeding →
-// running (appending partials) → scoring → done. Every stage is deterministic;
-// the only LLM in the loop is the locked model the harness itself talks to.
+// running (with a reversible relay-wait pause) → scoring → done. Every stage is
+// deterministic; the only LLM in the loop is the locked model the harness
+// itself talks to.
 func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest, prof gen.Profile, seed int64) {
 	defer func() { <-s.runSlots }() // release the concurrency slot
 	defer s.unregisterRunCancel(runID)

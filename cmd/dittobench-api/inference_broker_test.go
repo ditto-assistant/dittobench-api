@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -1050,9 +1051,9 @@ func TestInferenceBrokerTrustedProbeUsesControlPlaneSession(t *testing.T) {
 // single-attempt contract #97 introduced. The platform still owns the first
 // line of provider retry, but one attempt here meant a fault it could not
 // absorb discarded the whole run, so v7 now gets a tiny bounded second line.
-// The bound is the point of the test: exactly ticketTransientMaxAttempts
-// deliveries, each independently signed, and the run still fails closed once
-// they are exhausted.
+// The bound is the point of the test: the fast window plus the slower recovery
+// window, each delivery independently signed, and the run still fails closed
+// once both are exhausted.
 func TestV7InferenceBrokerRetriesTransientProviderFaultsBoundedly(t *testing.T) {
 	const profile = "openrouter-route-0123456789abcdef-v1"
 	requestCount := 0
@@ -1066,6 +1067,8 @@ func TestV7InferenceBrokerRetriesTransientProviderFaultsBoundedly(t *testing.T) 
 
 	broker := newInferenceBroker(1)
 	broker.sleep = func(context.Context, time.Duration) error { return nil }
+	var waitEvents []bool
+	broker.relayWait = func(_ string, waiting bool) { waitEvents = append(waitEvents, waiting) }
 	proxyURL := configureBrokerUpstream(broker, upstream)
 	prepared := prepareBrokerSession(t, broker)
 	activateBrokerSessionFor(t, broker, prepared, proxyURL, "groq", profile, llm.V7HarnessModel)
@@ -1083,8 +1086,12 @@ func TestV7InferenceBrokerRetriesTransientProviderFaultsBoundedly(t *testing.T) 
 	if recorder.Code != http.StatusBadGateway {
 		t.Fatalf("request status = %d, want 502: %s", recorder.Code, recorder.Body.String())
 	}
-	if requestCount != ticketTransientMaxAttempts {
-		t.Fatalf("platform deliveries=%d, want %d", requestCount, ticketTransientMaxAttempts)
+	totalAttempts := ticketChatFastMaxAttempts + ticketRecoveryMaxAttempts
+	if requestCount != totalAttempts {
+		t.Fatalf("platform deliveries=%d, want %d", requestCount, totalAttempts)
+	}
+	if !reflect.DeepEqual(waitEvents, []bool{true, false}) {
+		t.Fatalf("relay wait events = %v, want [true false]", waitEvents)
 	}
 	seen := map[string]bool{}
 	for _, nonce := range nonces {
@@ -1109,8 +1116,9 @@ func TestV7InferenceBrokerRetriesTransientProviderFaultsBoundedly(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if execution.UpstreamAttempts != ticketTransientMaxAttempts ||
-		execution.Retries != ticketTransientMaxAttempts-1 || execution.InfrastructureFailures != 1 {
+	if execution.UpstreamAttempts != uint64(totalAttempts) ||
+		execution.Retries != uint64(totalAttempts-1) || execution.InfrastructureFailures != 1 ||
+		execution.RecoveryWaits != 1 || execution.RecoveryExhaustions != 1 {
 		t.Fatalf("provider execution accounting = %+v", execution)
 	}
 	// One logical request, bounded deliveries, one authoritative outcome: the
@@ -1121,6 +1129,57 @@ func TestV7InferenceBrokerRetriesTransientProviderFaultsBoundedly(t *testing.T) 
 	}
 	if err := requireCompleteV7Usage(protocol.BenchVersionV7, usage, relayExecutionSummary{}); err == nil {
 		t.Fatal("v7 accepted a run with a provider infrastructure failure")
+	}
+}
+
+func TestV7InferenceBrokerWaitsForRelayThenResumes(t *testing.T) {
+	var attempts atomic.Int64
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if attempts.Add(1) <= ticketChatFastMaxAttempts {
+			http.Error(w, "transient", http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte(`{"usage":{"prompt_tokens":2,"completion_tokens":1},"choices":[{"message":{"content":"OK"}}]}`))
+	}))
+	defer upstream.Close()
+
+	broker := newInferenceBroker(1)
+	broker.sleep = func(context.Context, time.Duration) error { return nil }
+	var waitEvents []bool
+	broker.relayWait = func(_ string, waiting bool) { waitEvents = append(waitEvents, waiting) }
+	proxyURL := configureBrokerUpstream(broker, upstream)
+	prepared := prepareBrokerSession(t, broker)
+	activateBrokerSessionFor(t, broker, prepared, proxyURL, "openrouter", "openrouter-route-0123456789abcdef-v1", llm.V7HarnessModel)
+	claimAndBindBrokerSession(t, broker, prepared["session_id"], "192.0.2.33", protocol.BenchVersionV7)
+	start, err := broker.snapshot(prepared["session_id"])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/inference/id/v1/chat/completions", bytes.NewBufferString(`{"model":"openai/gpt-oss-20b"}`))
+	request.RemoteAddr = "192.0.2.33:4321"
+	request.SetPathValue("rest", "v1/chat/completions")
+	recorder := httptest.NewRecorder()
+	broker.handle(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("request status = %d, want 200: %s", recorder.Code, recorder.Body.String())
+	}
+	if !reflect.DeepEqual(waitEvents, []bool{true, false}) {
+		t.Fatalf("relay wait events = %v, want [true false]", waitEvents)
+	}
+	end, err := broker.snapshot(prepared["session_id"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := relayDegradedSince(start, end); err != nil {
+		t.Fatalf("recovered relay wait failed the run: %v", err)
+	}
+	execution, err := relayExecutionSince(start, end)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if execution.RecoveryWaits != 1 || execution.RecoveryExhaustions != 0 || execution.Successes != 1 {
+		t.Fatalf("recovery execution = %+v", execution)
 	}
 }
 
@@ -1150,7 +1209,8 @@ func TestInferenceBrokerRejectsExhaustedTransientFailures(t *testing.T) {
 		t.Fatal(err)
 	}
 	if snapshot.Requests != 1 || snapshot.Successes != 0 ||
-		snapshot.UpstreamAttempts != ticketTransientMaxAttempts || snapshot.InfrastructureFailures != 1 {
+		snapshot.UpstreamAttempts != ticketChatFastMaxAttempts+ticketRecoveryMaxAttempts ||
+		snapshot.InfrastructureFailures != 1 || snapshot.RecoveryExhaustions != 1 {
 		t.Fatalf("exhausted provider accounting = %+v", snapshot)
 	}
 }
@@ -1547,7 +1607,7 @@ func TestV7ChatSurvivesOneTransientProviderFault(t *testing.T) {
 // field of their scored TokenUsage must be identical; only the attempt ledger
 // may differ.
 func TestRetriedRunReportsIdenticalObservedUsageToACleanRun(t *testing.T) {
-	const retries = ticketTransientMaxAttempts - 1
+	const retries = ticketChatFastMaxAttempts + ticketRecoveryMaxAttempts - 1
 	run := func(t *testing.T, faults int, sourceIP string) (protocol.TokenUsage, relayExecutionSummary) {
 		t.Helper()
 		var attempts atomic.Int64

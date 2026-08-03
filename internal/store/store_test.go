@@ -98,6 +98,35 @@ func TestRunSizeProgressAndPartial(t *testing.T) {
 	}
 }
 
+func TestRelayWaitPreservesAndRestoresRunningProgress(t *testing.T) {
+	s := New()
+	s.Create("relay", "run_size", StatusQueued, 5, 12)
+	s.SetStage("relay", StatusRunning, 4, 12)
+
+	s.SetRelayWaiting("relay", true)
+	waiting, _ := s.Get("relay")
+	if waiting.Status != StatusWaitingRelay || waiting.Progress.Stage != string(StatusWaitingRelay) {
+		t.Fatalf("relay wait not surfaced: %+v", waiting)
+	}
+	if waiting.Progress.Done != 4 || waiting.Progress.Total != 12 {
+		t.Fatalf("relay wait lost progress: %+v", waiting.Progress)
+	}
+	s.SetStage("relay", StatusScoring, 12, 12)
+	stillWaiting, _ := s.Get("relay")
+	if stillWaiting.Status != StatusWaitingRelay || stillWaiting.Progress.Stage != string(StatusWaitingRelay) {
+		t.Fatalf("stage update hid active relay wait: %+v", stillWaiting)
+	}
+
+	s.SetRelayWaiting("relay", false)
+	resumed, _ := s.Get("relay")
+	if resumed.Status != StatusScoring || resumed.Progress.Stage != string(StatusScoring) {
+		t.Fatalf("relay wait did not restore latest stage: %+v", resumed)
+	}
+	if resumed.Progress.Done != 12 || resumed.Progress.Total != 12 {
+		t.Fatalf("relay resume lost progress: %+v", resumed.Progress)
+	}
+}
+
 func TestConcurrentAccess(t *testing.T) {
 	s := New()
 	s.Create("r", "direct", StatusRunning, 0, 0)

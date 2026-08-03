@@ -53,6 +53,10 @@ type relayHealthSnapshot struct {
 	// InfrastructureFailures so a saturated rail is legible, but deliberately
 	// still INFRASTRUCTURE: a miner cannot provision the lane.
 	CapacityExhaustions uint64 `json:"capacity_exhaustions"`
+	// RecoveryWaits counts logical calls that paused after the fast retry
+	// window. RecoveryExhaustions is the subset that still could not complete.
+	RecoveryWaits       uint64 `json:"recovery_waits"`
+	RecoveryExhaustions uint64 `json:"recovery_exhaustions"`
 	// EmbeddingRetries is the v7 embedding lane's retry ledger, the counterpart
 	// of UpstreamAttempts-minus-Requests on the chat lane.
 	EmbeddingRetries    uint64 `json:"embedding_retries"`
@@ -87,6 +91,8 @@ type relayExecutionSummary struct {
 	GrantAgentDeclines     uint64 `json:"grant_agent_declines,omitempty"`
 	AgentRequestRejections uint64 `json:"agent_request_rejections,omitempty"`
 	CapacityExhaustions    uint64 `json:"capacity_exhaustions,omitempty"`
+	RecoveryWaits          uint64 `json:"recovery_waits,omitempty"`
+	RecoveryExhaustions    uint64 `json:"recovery_exhaustions,omitempty"`
 	CallerCancellations    uint64 `json:"caller_cancellations"`
 	UpstreamAttempts       uint64 `json:"upstream_attempts"`
 	Retries                uint64 `json:"retries"`
@@ -324,6 +330,12 @@ func relayDegradedSince(start, end relayHealthSnapshot) error {
 			errInferenceLaneSaturated, end.CapacityExhaustions-start.CapacityExhaustions,
 		)
 	}
+	if end.RecoveryExhaustions > start.RecoveryExhaustions {
+		return fmt.Errorf(
+			"%w: %d inference call(s) exhausted the slow provider-recovery window",
+			errRelayRecoveryExhausted, end.RecoveryExhaustions-start.RecoveryExhaustions,
+		)
+	}
 	if end.InfrastructureFailures > start.InfrastructureFailures {
 		return fmt.Errorf("relay recorded %d upstream failure(s) during benchmark", end.InfrastructureFailures-start.InfrastructureFailures)
 	}
@@ -341,6 +353,8 @@ func relayRestarted(start, end relayHealthSnapshot) bool {
 		end.GrantAgentDeclines < start.GrantAgentDeclines ||
 		end.AgentRequestRejections < start.AgentRequestRejections ||
 		end.CapacityExhaustions < start.CapacityExhaustions ||
+		end.RecoveryWaits < start.RecoveryWaits ||
+		end.RecoveryExhaustions < start.RecoveryExhaustions ||
 		end.EmbeddingRetries < start.EmbeddingRetries ||
 		end.CallerCancellations < start.CallerCancellations ||
 		end.UpstreamAttempts < start.UpstreamAttempts ||
@@ -361,6 +375,8 @@ func relayExecutionSince(start, end relayHealthSnapshot) (relayExecutionSummary,
 		GrantAgentDeclines:     end.GrantAgentDeclines - start.GrantAgentDeclines,
 		AgentRequestRejections: end.AgentRequestRejections - start.AgentRequestRejections,
 		CapacityExhaustions:    end.CapacityExhaustions - start.CapacityExhaustions,
+		RecoveryWaits:          end.RecoveryWaits - start.RecoveryWaits,
+		RecoveryExhaustions:    end.RecoveryExhaustions - start.RecoveryExhaustions,
 		EmbeddingRetries:       end.EmbeddingRetries - start.EmbeddingRetries,
 		CallerCancellations:    end.CallerCancellations - start.CallerCancellations,
 		UpstreamAttempts:       end.UpstreamAttempts - start.UpstreamAttempts,
@@ -524,6 +540,7 @@ func (s *server) handleRelayPreflight(w http.ResponseWriter, r *http.Request) {
 var (
 	errAgentInferenceDeclined = errors.New("agent-attributable inference decline")
 	errInferenceLaneSaturated = errors.New("platform inference lane saturated")
+	errRelayRecoveryExhausted = errors.New("provider recovery exhausted")
 )
 
 // relayFinalizeFailure classifies a finalize-path relay failure.
@@ -588,6 +605,15 @@ func relayFinalizeFailure(err error) *store.Failure {
 			Retryable: true,
 			Diagnostics: map[string]any{
 				"relay_cause": "inference_lane_saturated",
+			},
+		}
+	case errors.Is(err, errRelayRecoveryExhausted):
+		return &store.Failure{
+			Kind:      "validator_infrastructure",
+			Code:      "model_relay_unavailable",
+			Retryable: true,
+			Diagnostics: map[string]any{
+				"relay_cause": "provider_recovery_exhausted",
 			},
 		}
 	default:
