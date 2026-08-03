@@ -287,6 +287,25 @@ func TestLaneSaturationStaysNoFault(t *testing.T) {
 	}
 }
 
+func TestProviderRecoveryExhaustionStaysNoFaultAndIsNamed(t *testing.T) {
+	start := relayHealthSnapshot{Requests: 10, Successes: 10}
+	end := relayHealthSnapshot{
+		Requests: 11, Successes: 10, InfrastructureFailures: 1,
+		RecoveryWaits: 1, RecoveryExhaustions: 1,
+	}
+	err := relayDegradedSince(start, end)
+	if !errors.Is(err, errRelayRecoveryExhausted) {
+		t.Fatalf("recovery exhaustion was not named: %v", err)
+	}
+	failure := relayFinalizeFailure(err)
+	if failure.Kind != "validator_infrastructure" || failure.Code != "model_relay_unavailable" || !failure.Retryable {
+		t.Fatalf("recovery exhaustion was charged to the miner: %+v", failure)
+	}
+	if failure.Diagnostics["relay_cause"] != "provider_recovery_exhausted" {
+		t.Fatalf("recovery exhaustion diagnostics = %+v", failure.Diagnostics)
+	}
+}
+
 // Pre-reservation 4xx: the platform refused the harness's request bytes without
 // reserving capacity or contacting a provider. Which runs FAIL is unchanged --
 // the predicate is still efficiency.ValidUsage -- only who is charged moves.
