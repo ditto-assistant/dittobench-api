@@ -315,6 +315,18 @@ func main() {
 			log.Fatalf("inference broker error: %v", err)
 		}
 	}()
+	openRouterShimCABundlePath := strings.TrimSpace(os.Getenv("DITTOBENCH_OPENROUTER_SHIM_CA_BUNDLE_PATH"))
+	if openRouterShimCABundlePath != "" {
+		openRouterShimPort := envIntDefault("DITTOBENCH_OPENROUTER_SHIM_PORT", 11437)
+		if openRouterShimPort < 1024 || openRouterShimPort > 65535 ||
+			openRouterShimPort == *port || openRouterShimPort == brokerPort {
+			log.Fatalf("invalid DITTOBENCH_OPENROUTER_SHIM_PORT: must be an unprivileged port distinct from API and broker ports")
+		}
+		if err := startOpenRouterShim(s.broker, openRouterShimCABundlePath, openRouterShimPort); err != nil {
+			log.Fatalf("OpenRouter compatibility shim unavailable: %v", err)
+		}
+		log.Printf("OpenRouter compatibility shim listening on :%d", openRouterShimPort)
+	}
 
 	addr := ":" + strconv.Itoa(*port)
 	log.Printf("dittobench-api (off-chain practice validator) listening on %s", addr)

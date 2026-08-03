@@ -314,6 +314,44 @@ func TestRunArgs_EgressProxyInjectsEnv(t *testing.T) {
 	}
 }
 
+func TestRunArgs_OpenRouterShimUsesHostGatewayAndPublicCABundle(t *testing.T) {
+	d := NewLocalDocker()
+	d.RequireRootless = true
+	d.HostGatewayIP = "192.0.2.44"
+	d.OpenRouterShimCABundleHostPath = "/var/lib/dittobench-openrouter-shim/ca-bundle.pem"
+	d.EgressProxy = "http://egress:3128"
+	args := d.runArgs("img:latest", map[string]string{
+		"SSL_CERT_FILE":      "/attacker/ca.pem",
+		"REQUESTS_CA_BUNDLE": "/attacker/requests.pem",
+	})
+
+	if !hasFlagPair(args, "--add-host", "openrouter.ai:192.0.2.44") {
+		t.Fatalf("hardcoded OpenRouter did not resolve to the trusted gateway: %v", args)
+	}
+	wantMount := "type=bind,src=/var/lib/dittobench-openrouter-shim/ca-bundle.pem," +
+		"dst=" + OpenRouterShimCABundlePath + ",readonly"
+	if !hasFlagPair(args, "--mount", wantMount) {
+		t.Fatalf("shim CA bundle was not mounted read-only: %v", args)
+	}
+	for _, key := range []string{
+		"SSL_CERT_FILE",
+		"REQUESTS_CA_BUNDLE",
+		"CURL_CA_BUNDLE",
+		"NODE_EXTRA_CA_CERTS",
+	} {
+		if !hasFlagPair(args, "-e", key+"="+OpenRouterShimCABundlePath) {
+			t.Fatalf("%s did not use the validator CA bundle: %v", key, args)
+		}
+	}
+	if slices.Contains(args, "SSL_CERT_FILE=/attacker/ca.pem") ||
+		slices.Contains(args, "REQUESTS_CA_BUNDLE=/attacker/requests.pem") {
+		t.Fatalf("caller overrode the shim trust root: %v", args)
+	}
+	if !hasFlagPair(args, "-e", "NO_PROXY=host.docker.internal,localhost,127.0.0.1,openrouter.ai") {
+		t.Fatalf("hardcoded OpenRouter did not bypass the public egress proxy: %v", args)
+	}
+}
+
 func TestCleanupStaleRemovesOnlyOwnedExplicitResources(t *testing.T) {
 	d := NewLocalDocker()
 	var calls [][]string
