@@ -1171,6 +1171,34 @@ func (b *inferenceBroker) handle(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "inference route not found")
 		return
 	}
+	b.handleChat(w, r, session)
+}
+
+// handleOpenRouterShim is the HTTPS compatibility door for harnesses that
+// compile https://openrouter.ai/api/v1 into their source and therefore cannot
+// consume the injected ticket broker URL. Docker resolves only that hostname
+// to the validator gateway and preserves the sandbox source IP through the
+// local REDIRECT, so this reaches the same source-bound session and the same
+// locked-model/accounting path as the documented broker endpoint.
+func (b *inferenceBroker) handleOpenRouterShim(w http.ResponseWriter, r *http.Request) {
+	host := strings.ToLower(strings.TrimSpace(r.Host))
+	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+		host = parsedHost
+	}
+	if host != "openrouter.ai" || r.Method != http.MethodPost || r.URL.Path != "/api/v1/chat/completions" {
+		writeError(w, http.StatusNotFound, "inference route not found")
+		return
+	}
+	b.pruneExpired(time.Now())
+	session := b.sessionForSource(sourceIP(r.RemoteAddr))
+	if session == nil {
+		writeError(w, http.StatusUnauthorized, "inference session unavailable")
+		return
+	}
+	b.handleChat(w, r, session)
+}
+
+func (b *inferenceBroker) handleChat(w http.ResponseWriter, r *http.Request, session *brokerSession) {
 	session.mu.Lock()
 	if session.inFlight >= brokerPerSourceConcurrency {
 		session.mu.Unlock()

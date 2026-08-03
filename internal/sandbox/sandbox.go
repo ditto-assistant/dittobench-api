@@ -39,6 +39,15 @@ import (
 	"github.com/ditto-assistant/dittobench-datagen/protocol"
 )
 
+const (
+	// OpenRouterShimCABundlePath is the read-only path mounted into an untrusted
+	// harness when the validator enables the hardcoded-OpenRouter compatibility
+	// shim. It contains public roots plus the validator-local shim CA; no private
+	// key ever enters the sandbox.
+	OpenRouterShimCABundlePath = "/run/dittobench/openrouter-shim-ca.pem"
+	openRouterShimHost         = "openrouter.ai"
+)
+
 // Sandbox builds a submission into a runnable image and runs it as an
 // addressable harness serving the /run + /health contract.
 type Sandbox interface {
@@ -188,6 +197,12 @@ type LocalDocker struct {
 	// outbound calls are forced through the allowlisting forward proxy (loopback +
 	// the host gateway bypass it via NO_PROXY). Env DITTOBENCH_SANDBOX_EGRESS_PROXY.
 	EgressProxy string
+	// OpenRouterShimCABundleHostPath is the validator-owned CA bundle path as
+	// seen by the nested Docker daemon. When set, hardcoded openrouter.ai resolves
+	// to the host gateway and standard TLS clients trust only the additional
+	// validator-local certificate mounted from this path. The corresponding TLS
+	// listener remains source-bound by the inference broker.
+	OpenRouterShimCABundleHostPath string
 	// dockerCommand is injectable only for deterministic command/parse tests.
 	dockerCommand func(context.Context, ...string) ([]byte, error)
 }
@@ -217,6 +232,9 @@ func NewLocalDocker() *LocalDocker {
 		HostGatewayIP:   strings.TrimSpace(os.Getenv("DITTOBENCH_SANDBOX_HOST_GATEWAY_IP")),
 		EgressNetwork:   strings.TrimSpace(os.Getenv("DITTOBENCH_SANDBOX_EGRESS_NETWORK")),
 		EgressProxy:     strings.TrimSpace(os.Getenv("DITTOBENCH_SANDBOX_EGRESS_PROXY")),
+		OpenRouterShimCABundleHostPath: strings.TrimSpace(
+			os.Getenv("DITTOBENCH_OPENROUTER_SHIM_CA_BUNDLE_PATH"),
+		),
 	}
 }
 
@@ -566,19 +584,53 @@ func (d *LocalDocker) runArgsForNetwork(image string, env map[string]string, net
 		"--add-host", "host.docker.internal:"+hostGateway,
 		"--publish", "127.0.0.1:0:"+d.HarnessPort, // random host port, loopback only
 	)
+	shimEnabled := d.OpenRouterShimCABundleHostPath != ""
+	if shimEnabled {
+		args = append(args,
+			"--add-host", openRouterShimHost+":"+hostGateway,
+			"--mount", "type=bind,src="+d.OpenRouterShimCABundleHostPath+
+				",dst="+OpenRouterShimCABundlePath+",readonly",
+		)
+	}
 	for k, v := range env {
+		if shimEnabled && openRouterShimTLSKey(k) {
+			continue
+		}
 		args = append(args, "-e", k+"="+v)
+	}
+	if shimEnabled {
+		for _, key := range []string{
+			"SSL_CERT_FILE",
+			"REQUESTS_CA_BUNDLE",
+			"CURL_CA_BUNDLE",
+			"NODE_EXTRA_CA_CERTS",
+		} {
+			args = append(args, "-e", key+"="+OpenRouterShimCABundlePath)
+		}
 	}
 	if d.EgressProxy != "" {
 		// Force the harness's outbound calls through the allowlisting proxy; the
 		// ticket broker and loopback bypass it via NO_PROXY.
+		noProxy := "host.docker.internal,localhost,127.0.0.1"
+		if shimEnabled {
+			noProxy += "," + openRouterShimHost
+		}
 		args = append(args,
 			"-e", "HTTPS_PROXY="+d.EgressProxy,
 			"-e", "HTTP_PROXY="+d.EgressProxy,
-			"-e", "NO_PROXY=host.docker.internal,localhost,127.0.0.1",
+			"-e", "NO_PROXY="+noProxy,
 		)
 	}
 	return append(args, image)
+}
+
+func openRouterShimTLSKey(key string) bool {
+	switch key {
+	case "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "NODE_EXTRA_CA_CERTS":
+		return true
+	default:
+		return false
+	}
 }
 
 func (d *LocalDocker) sandboxHostGateway() (string, error) {
