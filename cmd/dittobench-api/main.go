@@ -277,6 +277,7 @@ func main() {
 		runCancels:             make(map[string]context.CancelFunc),
 	}
 	s.broker.relayWait = s.store.SetRelayWaiting
+	s.broker.terminalAgentFailure = s.failAgentInferenceRun
 
 	mux := s.newControlPlaneMux()
 
@@ -2203,6 +2204,29 @@ func (s *server) unregisterRunCancel(runID string) {
 	s.cancelMu.Lock()
 	defer s.cancelMu.Unlock()
 	delete(s.runCancels, runID)
+}
+
+// failAgentInferenceRun ends the benchmark as soon as the platform's typed
+// response proves the harness spent its immutable request/token allowance.
+// Waiting for final relay accounting used to let every remaining case send the
+// same doomed request, producing hundreds of declines and occupying a scorer
+// slot long after the run could no longer succeed.
+func (s *server) failAgentInferenceRun(runID string) {
+	failure := relayFinalizeFailure(errAgentInferenceDeclined)
+	_, _, transitioned := s.store.FailIfActive(
+		runID,
+		"harness exhausted its inference allowance: the platform refused an agent-attributable inference request",
+		failure,
+	)
+	if !transitioned {
+		return
+	}
+	s.cancelMu.Lock()
+	cancel := s.runCancels[runID]
+	s.cancelMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 }
 
 func (s *server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
