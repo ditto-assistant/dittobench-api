@@ -404,6 +404,8 @@ func TestBudgetDeclineIsAttributedToTheAgentEndToEnd(t *testing.T) {
 				defer upstream.Close()
 
 				broker := newInferenceBroker(1)
+				terminalFailures := 0
+				broker.terminalAgentFailure = func(string) { terminalFailures++ }
 				broker.sleep = func(context.Context, time.Duration) error { return nil }
 				proxyURL := configureBrokerUpstream(broker, upstream)
 				prepared := prepareBrokerSession(t, broker)
@@ -459,6 +461,9 @@ func TestBudgetDeclineIsAttributedToTheAgentEndToEnd(t *testing.T) {
 				if end.GrantAgentDeclines != wantAgent {
 					t.Fatalf("agent attribution=%d, want %d: %+v", end.GrantAgentDeclines, wantAgent, end)
 				}
+				if terminalFailures != int(wantAgent) {
+					t.Fatalf("terminal callbacks=%d, want %d", terminalFailures, wantAgent)
+				}
 
 				degraded := relayDegradedSince(start, end)
 				if degraded == nil {
@@ -479,6 +484,25 @@ func TestBudgetDeclineIsAttributedToTheAgentEndToEnd(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestTerminalAgentFailureNotificationIsOncePerRun(t *testing.T) {
+	broker := newInferenceBroker(1)
+	notifications := 0
+	broker.terminalAgentFailure = func(runID string) {
+		if runID != "run-1" {
+			t.Fatalf("notified run %q, want run-1", runID)
+		}
+		notifications++
+	}
+	session := &brokerSession{boundRunID: "run-1"}
+
+	broker.notifyTerminalAgentFailure(session)
+	broker.notifyTerminalAgentFailure(session)
+
+	if notifications != 1 {
+		t.Fatalf("terminal notifications=%d, want 1", notifications)
 	}
 }
 

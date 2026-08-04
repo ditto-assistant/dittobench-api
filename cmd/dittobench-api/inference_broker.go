@@ -146,6 +146,10 @@ type brokerSession struct {
 	// and wire value, so which runs FAIL is unchanged and only who is CHARGED
 	// moves. See relayFinalizeFailure for the tie-break.
 	grantAgentDeclines uint64
+	// terminalAgentFailureNotified makes the first typed agent-attributable
+	// allowance decline end the benchmark exactly once. Once the platform says
+	// the grant is spent, every later case can only receive the same refusal.
+	terminalAgentFailureNotified bool
 	// agentRequestRejections counts pre-reservation 4xx (a 400 the platform's
 	// schema refused, a 403 on a model, an oversized body) -- the platform
 	// rejecting the harness's request without ever reserving capacity. These
@@ -201,6 +205,29 @@ type inferenceBroker struct {
 	retry                brokerRetryConfig
 	sleep                func(context.Context, time.Duration) error
 	relayWait            func(string, bool)
+	terminalAgentFailure func(string)
+}
+
+// notifyTerminalAgentFailure ends a run after its first typed allowance
+// decline. The platform has already refused the reservation, so no provider was
+// contacted for that request and no later request can recover on this grant.
+// Keeping the callback outside the session lock lets the server cancel the run
+// and tear the session down without a lock inversion.
+func (b *inferenceBroker) notifyTerminalAgentFailure(session *brokerSession) {
+	if b.terminalAgentFailure == nil {
+		return
+	}
+	session.mu.Lock()
+	if session.terminalAgentFailureNotified {
+		session.mu.Unlock()
+		return
+	}
+	session.terminalAgentFailureNotified = true
+	runID := session.boundRunID
+	session.mu.Unlock()
+	if runID != "" {
+		b.terminalAgentFailure(runID)
+	}
 }
 
 func (b *inferenceBroker) beginRelayWait(session *brokerSession) func() {
@@ -1403,6 +1430,7 @@ func (b *inferenceBroker) handleEmbedding(w http.ResponseWriter, r *http.Request
 			// to be discovered here first -- which is exactly how a platform
 			// eviction came to be reported as "1 upstream failure".
 			var denied platformGrantDenied
+			agentDecline := false
 			session.mu.Lock()
 			var saturated platformEmbeddingAtCapacity
 			if embeddingRequestCanceled(requestContext) {
@@ -1419,6 +1447,7 @@ func (b *inferenceBroker) handleEmbedding(w http.ResponseWriter, r *http.Request
 				attribution := "platform fault: the lease is gone"
 				if declineIsAgentFault(denied.code) {
 					session.grantAgentDeclines++
+					agentDecline = true
 					attribution = "AGENT fault: the harness spent its own allowance"
 				}
 				log.Printf(
@@ -1438,6 +1467,9 @@ func (b *inferenceBroker) handleEmbedding(w http.ResponseWriter, r *http.Request
 				session.failures++
 			}
 			session.mu.Unlock()
+			if agentDecline {
+				b.notifyTerminalAgentFailure(session)
+			}
 		}
 		writeError(w, http.StatusBadGateway, "embedding service unavailable")
 		return
@@ -1972,13 +2004,18 @@ func (b *inferenceBroker) proxy(w http.ResponseWriter, r *http.Request, session 
 		session.providerLatency += totalLatency
 		declineCode := platformDeclineCode(responseBody)
 		attribution := "platform fault: the lease is gone"
+		agentDecline := false
 		if declineIsAgentFault(declineCode) {
 			session.grantAgentDeclines++
+			agentDecline = true
 			attribution = "AGENT fault: the harness spent its own allowance"
 		}
 		denials, agentDenials := session.grantDenials, session.grantAgentDeclines
 		runID, deadline := session.boundRunID, session.ticketDeadline
 		session.mu.Unlock()
+		if agentDecline {
+			b.notifyTerminalAgentFailure(session)
+		}
 		// The code, when the platform sends one, is the difference between "the
 		// validator lost this lease" and "the agent spent its allowance" -- two
 		// findings that call for opposite follow-up, and which until now were
