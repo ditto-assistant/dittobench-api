@@ -127,6 +127,43 @@ miner harness (starter-kit)              scoring engine (this repo)
   GET  /health                              health check + score
 ```
 
+## Control-plane authentication
+
+The API port serves the validator's operator control plane. Every route on it
+except `GET /health` requires a credential:
+
+```
+Authorization: Bearer $DITTOBENCH_BROKER_CONTROL_TOKEN
+```
+
+The credential is the same bearer the validator already presents on the
+inference-session routes, so there is one secret per host rather than a second
+scheme. `DITTOBENCH_CONTROL_TOKEN` overrides it if a deployment wants the
+control-plane secret separated from the inference-broker one.
+
+`GET /health` is the only route served without a credential. It returns a
+constant `{"status":"ok"}` and reads nothing off the server, which is what makes
+it safe to leave open for a container healthcheck. Any route added to the mux
+later is protected by default — the public set is an allowlist, and a test
+fails the build if a new route lands outside it unclassified.
+
+### Rollout
+
+`DITTOBENCH_CONTROL_AUTH_MODE` selects the posture:
+
+| Mode | Behavior |
+|---|---|
+| `shadow` (default) | Checks the credential, logs what enforcement *would* reject, serves the request anyway. |
+| `enforce` | Rejects with `401` when the credential is absent, malformed, or unrecognized. |
+
+Shadow is the default so upgrading this service alone changes no behavior.
+Before switching a deployment to `enforce`, watch for
+`control-plane auth (shadow, would reject)` lines and confirm they have stopped
+— those are the calls that will start failing. Under `enforce` the process
+refuses to start without a credential rather than 401ing every caller, and the
+published Compose default token is treated as unset, so enforcement requires a
+real per-host secret.
+
 ## Endpoints
 
 ### `GET /health`
