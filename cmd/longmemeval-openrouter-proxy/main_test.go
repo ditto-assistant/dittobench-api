@@ -33,6 +33,9 @@ func TestProfilesRewriteOnlyFrozenModels(t *testing.T) {
 			if provider["allow_fallbacks"] != false || provider["data_collection"] != "deny" {
 				t.Fatalf("provider=%#v", provider)
 			}
+			if only, _ := provider["only"].([]any); len(only) != 1 || only[0] != "openai" {
+				t.Fatalf("provider order=%#v", provider["only"])
+			}
 			if _, err := rewriteRequest(selected, []byte(`{"model":"other","messages":[]}`)); err == nil {
 				t.Fatal("unreviewed model accepted")
 			}
@@ -40,6 +43,58 @@ func TestProfilesRewriteOnlyFrozenModels(t *testing.T) {
 				t.Fatal("streaming accepted")
 			}
 		})
+	}
+}
+
+func TestReaderProfileCanMapV8HarnessModelToAnyOpenRouterModel(t *testing.T) {
+	base, err := profileFor("reader")
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected, err := configuredReaderProfile(
+		base,
+		"openai/gpt-oss-20b",
+		"anthropic/claude-sonnet-4",
+		"auto",
+		"longmemeval-v8-claude-sonnet-4-v1",
+		true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := rewriteRequest(selected, []byte(`{
+		"model":"openai/gpt-oss-20b","messages":[],"stream":false
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var request map[string]any
+	if json.Unmarshal(body, &request) != nil {
+		t.Fatal("rewritten request is not JSON")
+	}
+	if request["model"] != "anthropic/claude-sonnet-4" {
+		t.Fatalf("upstream model=%#v", request["model"])
+	}
+	provider, _ := request["provider"].(map[string]any)
+	if _, constrained := provider["only"]; constrained {
+		t.Fatalf("automatic routing unexpectedly constrained: %#v", provider)
+	}
+	if provider["allow_fallbacks"] != true || provider["data_collection"] != "deny" {
+		t.Fatalf("provider=%#v", provider)
+	}
+}
+
+func TestCustomReaderProfileRequiresDistinctRevision(t *testing.T) {
+	base, _ := profileFor("reader")
+	if _, err := configuredReaderProfile(
+		base,
+		"openai/gpt-oss-20b",
+		"anthropic/claude-sonnet-4",
+		"auto",
+		base.Revision,
+		true,
+	); err == nil {
+		t.Fatal("custom reader configuration reused the historical revision")
 	}
 }
 

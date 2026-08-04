@@ -41,7 +41,9 @@ python3 integrations/longmemeval/longmemeval_adapter.py \
   --dataset-sha256 <sha256> \
   --harness-url http://127.0.0.1:18081 \
   --agent-label agent-1 \
+  --bench-version 8 \
   --retrieval-mode native-memory-tools \
+  --answer-model openai/gpt-4.1 \
   --answer-model-profile longmemeval-openrouter-gpt41-reader-v1 \
   --output /private/results/agent-1.jsonl
 ```
@@ -119,6 +121,60 @@ profiles as a static Go binary for scratch or minimal trusted containers. Set
 `LONGMEMEVAL_PROXY_PROFILE=reader` (default port 18437) or `judge` (default
 port 18436); both modes accept `OPENROUTER_API_KEY` and expose only aggregate
 health/provenance counters.
+
+## V8 agents and configurable reader models
+
+The adapter itself speaks only the public `/health`, `/seed`, and `/run`
+contract, so it can evaluate a v8-compatible harness without asking the
+production Platform for a scoring ticket. The trusted reader proxy can map the
+model identity a v8 harness was built to request (`openai/gpt-oss-20b`) to any
+explicit OpenRouter chat model. The model, route, fallback policy, and custom
+profile revision stay outside the miner container and are recorded alongside
+the hypotheses:
+
+```bash
+export LONGMEMEVAL_PROXY_PROFILE=reader
+export LONGMEMEVAL_ACCEPTED_MODEL=openai/gpt-oss-20b
+export LONGMEMEVAL_UPSTREAM_MODEL='<openrouter-model-id>'
+export LONGMEMEVAL_PROVIDER_ORDER=auto
+export LONGMEMEVAL_ALLOW_FALLBACKS=true
+export LONGMEMEVAL_READER_REVISION='<audited-condition-name>-v1'
+export OPENROUTER_API_KEY='<trusted-host-secret>'
+go run ./cmd/longmemeval-openrouter-proxy
+```
+
+`LONGMEMEVAL_PROVIDER_ORDER` also accepts a comma-separated OpenRouter provider
+order. Set `LONGMEMEVAL_ALLOW_FALLBACKS=false` for a single-route experiment.
+Any change from the historical GPT-4.1 profile requires a distinct revision;
+the proxy refuses to start rather than mislabel a new model condition as the
+old result.
+
+Launch an already-screened v8 image with the reader and embedding endpoints as
+trusted host services. The placeholder keys below never leave the local Docker
+network and are not provider credentials:
+
+```bash
+docker run --rm --read-only --user 65532:65532 \
+  --cap-drop ALL --security-opt no-new-privileges \
+  --tmpfs /tmp:rw,noexec,nosuid,size=4g \
+  --add-host host.docker.internal:host-gateway \
+  -p 127.0.0.1:18081:8080 \
+  -e DITTOBENCH_PROVIDER=chutes \
+  -e DITTOBENCH_MODEL=openai/gpt-oss-20b \
+  -e CHUTES_BASE_URL=http://host.docker.internal:18437/v1 \
+  -e CHUTES_API_KEY=longmemeval \
+  -e DITTOBENCH_INFERENCE_BASE_URL=http://host.docker.internal:18437/v1 \
+  -e OLLAMA_BASE_URL=http://host.docker.internal:11434 \
+  -e DITTOBENCH_DB=/tmp/dittobench.db \
+  '<screened-v8-image>'
+```
+
+Then run the adapter with matching `--bench-version 8`, `--answer-model`, and
+`--answer-model-profile` values. This produces an offline research comparison,
+not a canonical DittoBench score, KOTH candidate, or payout input. Compare
+agents only within an identical recorded reader/embedding condition. The local
+recipe is for already-screened images; use the production sandbox boundary for
+untrusted source or unadmitted images.
 
 ## Official judging
 
