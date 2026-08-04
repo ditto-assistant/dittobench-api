@@ -3,8 +3,6 @@ package main
 import (
 	"errors"
 	"testing"
-
-	"github.com/ditto-assistant/dittobench-datagen/protocol"
 )
 
 func TestValidateScreenedImage(t *testing.T) {
@@ -55,28 +53,16 @@ func TestValidateScreenedImageAccess(t *testing.T) {
 		t.Fatalf("validator sandbox rejected screened image: %s", msg)
 	}
 	if msg := validateScreenedImageAccess(submitRequest{}, false); msg != "" {
-		t.Fatalf("legacy source-build request rejected: %s", msg)
+		t.Fatalf("request without a screened-image bypass rejected: %s", msg)
 	}
 }
 
 func TestValidateBenchmarkImageContract(t *testing.T) {
-	if msg := validateBenchmarkImageContract(submitRequest{BenchVersion: 3, TarballURL: "https://example.com/source.tgz"}); msg == "" {
-		t.Fatal("benchmark v3 allowed an untrusted source build")
+	if msg := validateBenchmarkImageContract(submitRequest{BenchVersion: 8, TarballURL: "https://example.com/source.tgz"}); msg == "" {
+		t.Fatal("benchmark v8 allowed an untrusted source build")
 	}
-	if msg := validateBenchmarkImageContract(submitRequest{BenchVersion: 3, ScreenedImageURL: "https://example.com/image.tar"}); msg != "" {
-		t.Fatalf("benchmark v3 screened image rejected: %s", msg)
-	}
-	if msg := validateBenchmarkImageContract(submitRequest{BenchVersion: 2, TarballURL: "https://example.com/source.tgz"}); msg != "" {
-		t.Fatalf("benchmark v2 source build rejected: %s", msg)
-	}
-	// v4 is the current production contract: it must be gated exactly like v3, not
-	// exempted by a single-version check. A v4 lease with no image previously fell
-	// through to a validator-side docker build (the "Building harness" regression).
-	if msg := validateBenchmarkImageContract(submitRequest{BenchVersion: protocol.BenchVersionV4, TarballURL: "https://example.com/source.tgz"}); msg == "" {
-		t.Fatal("benchmark v4 allowed an untrusted source build")
-	}
-	if msg := validateBenchmarkImageContract(submitRequest{BenchVersion: protocol.BenchVersionV4, ScreenedImageURL: "https://example.com/image.tar"}); msg != "" {
-		t.Fatalf("benchmark v4 screened image rejected: %s", msg)
+	if msg := validateBenchmarkImageContract(submitRequest{BenchVersion: 8, ScreenedImageURL: "https://example.com/image.tar"}); msg != "" {
+		t.Fatalf("benchmark v8 screened image rejected: %s", msg)
 	}
 }
 

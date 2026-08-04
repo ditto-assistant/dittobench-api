@@ -341,7 +341,7 @@ func TestPreReservationRejectionsAreTheAgents(t *testing.T) {
 		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			err := requireCompleteV7Usage(protocol.BenchVersionV7, incomplete, testCase.execution)
+			err := requireCompleteV7Usage(protocol.BenchVersionV8, incomplete, testCase.execution)
 			if err == nil {
 				t.Fatalf("incomplete usage was allowed to score (%s)", testCase.why)
 			}
@@ -360,7 +360,7 @@ func TestACleanRunIsUnaffected(t *testing.T) {
 		PromptTokens: 100, CompletionTokens: 10, TotalTokens: 110,
 	}
 	noisy := relayExecutionSummary{AgentRequestRejections: 5, GrantAgentDeclines: 5}
-	if err := requireCompleteV7Usage(protocol.BenchVersionV7, complete, noisy); err != nil {
+	if err := requireCompleteV7Usage(protocol.BenchVersionV8, complete, noisy); err != nil {
 		t.Fatalf("a run with complete usage was failed: %v", err)
 	}
 	if err := requireCompleteV7Usage(protocol.BenchVersionV6, protocol.TokenUsage{}, noisy); err != nil {
@@ -412,7 +412,7 @@ func TestBudgetDeclineIsAttributedToTheAgentEndToEnd(t *testing.T) {
 				if lane == "embedding" {
 					sourceIP = "192.0.2.102"
 				}
-				runID := claimAndBindBrokerSession(t, broker, prepared["session_id"], sourceIP, protocol.BenchVersionV7)
+				runID := claimAndBindBrokerSession(t, broker, prepared["session_id"], sourceIP, protocol.BenchVersionV8)
 				start, err := broker.snapshot(prepared["session_id"])
 				if err != nil {
 					t.Fatal(err)
@@ -498,7 +498,7 @@ func TestPreReservationRejectionIsAttributedToTheAgentEndToEnd(t *testing.T) {
 			prepared := prepareBrokerSession(t, broker)
 			activateBrokerSessionFor(t, broker, prepared, proxyURL, "openrouter", "openrouter-route-0123456789abcdef-v1", llm.V7HarnessModel)
 			sourceIP := "192.0.2.103"
-			claimAndBindBrokerSession(t, broker, prepared["session_id"], sourceIP, protocol.BenchVersionV7)
+			claimAndBindBrokerSession(t, broker, prepared["session_id"], sourceIP, protocol.BenchVersionV8)
 			start, err := broker.snapshot(prepared["session_id"])
 			if err != nil {
 				t.Fatal(err)
@@ -536,7 +536,7 @@ func TestPreReservationRejectionIsAttributedToTheAgentEndToEnd(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			usageErr := requireCompleteV7Usage(protocol.BenchVersionV7, usage, execution)
+			usageErr := requireCompleteV7Usage(protocol.BenchVersionV8, usage, execution)
 			if usageErr == nil {
 				t.Fatal("a run with a rejected request was allowed to score")
 			}
@@ -565,7 +565,7 @@ func TestCapacityExhaustionIsNamedButKeepsItsGrantEndToEnd(t *testing.T) {
 	prepared := prepareBrokerSession(t, broker)
 	activateBrokerSessionFor(t, broker, prepared, proxyURL, "openrouter", "openrouter-route-0123456789abcdef-v1", llm.V7HarnessModel)
 	sourceIP := "192.0.2.104"
-	runID := claimAndBindBrokerSession(t, broker, prepared["session_id"], sourceIP, protocol.BenchVersionV7)
+	runID := claimAndBindBrokerSession(t, broker, prepared["session_id"], sourceIP, protocol.BenchVersionV8)
 	start, err := broker.snapshot(prepared["session_id"])
 	if err != nil {
 		t.Fatal(err)

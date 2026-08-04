@@ -1029,7 +1029,7 @@ func (b *inferenceBroker) claimRun(id, runID string, identity brokerTicketIdenti
 	// Ollama container this host runs, so they keep the single-slot lane they
 	// have always had; leaving embeddingConcurrency at zero is that lane.
 	if benchVersion >= 7 {
-		session.embeddingConcurrency = v7EmbeddingSessionConcurrency
+		session.embeddingConcurrency = v8EmbeddingSessionConcurrency
 	}
 	return true
 }
@@ -1593,9 +1593,7 @@ func (b *inferenceBroker) forwardPlatformEmbedding(ctx context.Context, session 
 		return embeddingResponse{}, err
 	}
 	session.mu.Lock()
-	if (session.benchVersion != protocol.BenchVersionV7 &&
-		session.benchVersion != protocol.BenchVersionV8) ||
-		!session.activeLocked(time.Now()) {
+	if session.benchVersion != protocol.BenchVersionV8 || !session.activeLocked(time.Now()) {
 		session.mu.Unlock()
 		return embeddingResponse{}, fmt.Errorf("embedding session unavailable")
 	}
@@ -2060,7 +2058,7 @@ func (b *inferenceBroker) trustedProbe(ctx context.Context, id string) error {
 	session.mu.Lock()
 	benchVersion := session.benchVersion
 	session.mu.Unlock()
-	if benchVersion == 7 {
+	if benchVersion == protocol.BenchVersionV8 {
 		embedding, err := b.forwardPlatformEmbedding(ctx, session, []string{"validator embedding preflight"})
 		if err != nil {
 			return fmt.Errorf("ticket embedding probe failed: %w", err)
