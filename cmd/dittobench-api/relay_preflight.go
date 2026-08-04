@@ -275,8 +275,14 @@ func requireTokenAccounting(snapshot relayHealthSnapshot, benchVersion int, runS
 // Any provider-side gap at all, and the run keeps its grant -- the same
 // infrastructure-wins-ties rule relayDegradedSince applies to grant denials.
 func requireCompleteV7Usage(benchVersion int, usage protocol.TokenUsage, execution relayExecutionSummary) error {
-	if benchVersion < protocol.BenchVersionV7 || efficiency.ValidUsage(usage) || validUnusedV8Usage(benchVersion, usage, execution) {
+	if benchVersion < protocol.BenchVersionV7 || efficiency.ValidUsage(usage) {
 		return nil
+	}
+	if unusedV8ChatLane(benchVersion, usage, execution) {
+		return fmt.Errorf(
+			"%w: benchmark v8 requires at least one authoritative model call",
+			errAgentModelUseMissing,
+		)
 	}
 	if execution.AgentRequestRejections > 0 && execution.AgentRequestRejections >= usage.UsageUnavailable {
 		return fmt.Errorf(
@@ -287,18 +293,19 @@ func requireCompleteV7Usage(benchVersion int, usage protocol.TokenUsage, executi
 	return fmt.Errorf("benchmark v7 requires complete provider token usage")
 }
 
-// validUnusedV8Usage accepts the one complete accounting shape that
-// efficiency.ValidUsage intentionally rejects: a Bench v8 harness that made no
-// chat requests at all. V8 is quality-only and permits agents to answer with
-// deterministic or embedding-only retrieval. Treating an all-zero chat delta
-// as missing provider accounting mislabeled those agents as relay failures and
-// minted an unbounded series of no-fault retries.
+// unusedV8ChatLane identifies the one complete accounting shape that
+// efficiency.ValidUsage intentionally rejects without explaining why: a Bench
+// v8 harness that made no authoritative chat request at all. Policy v9 requires
+// the scored response path to use a real model; deterministic or embedding-only
+// answers are not a valid scored run.
 //
 // This stays deliberately narrower than "zero tokens": the relay snapshot
 // must call the interval complete, and both the usage and execution deltas must
-// prove that no chat request was attempted. A rejected, cancelled, failed, or
+// prove that no chat request was attempted. That lets the caller classify the
+// run as terminal and agent-attributable instead of minting a retry under the
+// generic relay-infrastructure fallback. A rejected, cancelled, failed, or
 // usage-less request still goes through the existing fail-closed classifier.
-func validUnusedV8Usage(benchVersion int, usage protocol.TokenUsage, execution relayExecutionSummary) bool {
+func unusedV8ChatLane(benchVersion int, usage protocol.TokenUsage, execution relayExecutionSummary) bool {
 	return benchVersion >= protocol.BenchVersionV8 &&
 		usage.Status == "complete" &&
 		usage.Requests == 0 &&
@@ -570,6 +577,7 @@ func (s *server) handleRelayPreflight(w http.ResponseWriter, r *http.Request) {
 //     grant -- which is precisely why it is a sentinel and not a substring.
 var (
 	errAgentInferenceDeclined = errors.New("agent-attributable inference decline")
+	errAgentModelUseMissing   = errors.New("agent made no authoritative model call")
 	errInferenceLaneSaturated = errors.New("platform inference lane saturated")
 	errRelayRecoveryExhausted = errors.New("provider recovery exhausted")
 )
@@ -595,6 +603,12 @@ var (
 // output, harness error text, or an unrecognised platform code can.
 func relayFinalizeFailure(err error) *store.Failure {
 	switch {
+	case errors.Is(err, errAgentModelUseMissing):
+		return &store.Failure{
+			Kind:      "sandbox_failure",
+			Code:      "model_inference_required",
+			Retryable: false,
+		}
 	case errors.Is(err, errAgentInferenceDeclined):
 		// Terminal and the agent's: retrying cannot help, because the harness
 		// would spend the same allowance the same way on a fresh grant. This is

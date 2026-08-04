@@ -392,7 +392,7 @@ func TestV7RequiresCompleteProviderUsage(t *testing.T) {
 	}
 }
 
-func TestV8AcceptsACompleteUnusedChatLane(t *testing.T) {
+func TestV8RejectsACompleteUnusedChatLaneAsAgentFailure(t *testing.T) {
 	unused := protocol.TokenUsage{
 		Status:            "complete",
 		AccountingVersion: 2,
@@ -400,11 +400,16 @@ func TestV8AcceptsACompleteUnusedChatLane(t *testing.T) {
 		ProfileRevision:   "openrouter-route-0123456789abcdef-v1",
 		Model:             llm.V7HarnessModel,
 	}
-	if err := requireCompleteV7Usage(protocol.BenchVersionV8, unused, relayExecutionSummary{}); err != nil {
-		t.Fatalf("v8 rejected a complete zero-chat interval: %v", err)
+	err := requireCompleteV7Usage(protocol.BenchVersionV8, unused, relayExecutionSummary{})
+	if !errors.Is(err, errAgentModelUseMissing) {
+		t.Fatalf("v8 zero-chat interval error = %v, want model-use sentinel", err)
 	}
 	if err := requireCompleteV7Usage(protocol.BenchVersionV7, unused, relayExecutionSummary{}); err == nil {
 		t.Fatal("the retired v7 contract was widened along with v8")
+	}
+	failure := relayFinalizeFailure(err)
+	if failure.Kind != "sandbox_failure" || failure.Code != "model_inference_required" || failure.Retryable {
+		t.Fatalf("zero-chat failure classification = %+v", failure)
 	}
 }
 
