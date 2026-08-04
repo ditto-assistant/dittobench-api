@@ -392,6 +392,41 @@ func TestV7RequiresCompleteProviderUsage(t *testing.T) {
 	}
 }
 
+func TestV8AcceptsACompleteUnusedChatLane(t *testing.T) {
+	unused := protocol.TokenUsage{
+		Status:            "complete",
+		AccountingVersion: 2,
+		Provider:          "openrouter",
+		ProfileRevision:   "openrouter-route-0123456789abcdef-v1",
+		Model:             llm.V7HarnessModel,
+	}
+	if err := requireCompleteV7Usage(protocol.BenchVersionV8, unused, relayExecutionSummary{}); err != nil {
+		t.Fatalf("v8 rejected a complete zero-chat interval: %v", err)
+	}
+	if err := requireCompleteV7Usage(protocol.BenchVersionV7, unused, relayExecutionSummary{}); err == nil {
+		t.Fatal("the retired v7 contract was widened along with v8")
+	}
+}
+
+func TestV8ZeroUsageStillFailsClosedAfterAChatAttempt(t *testing.T) {
+	unused := protocol.TokenUsage{
+		Status:            "complete",
+		AccountingVersion: 2,
+		Provider:          "openrouter",
+		ProfileRevision:   "openrouter-route-0123456789abcdef-v1",
+		Model:             llm.V7HarnessModel,
+	}
+	for _, execution := range []relayExecutionSummary{
+		{Requests: 1, CallerCancellations: 1},
+		{Requests: 1, InfrastructureFailures: 1},
+		{Requests: 1, AgentRequestRejections: 1},
+	} {
+		if err := requireCompleteV7Usage(protocol.BenchVersionV8, unused, execution); err == nil {
+			t.Fatalf("v8 accepted inconsistent zero usage after a chat attempt: %+v", execution)
+		}
+	}
+}
+
 func TestRelayCountersCatchMaskedTwoHundredEmptyHarnessResponse(t *testing.T) {
 	var failures uint64
 	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

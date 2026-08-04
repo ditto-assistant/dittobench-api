@@ -275,7 +275,7 @@ func requireTokenAccounting(snapshot relayHealthSnapshot, benchVersion int, runS
 // Any provider-side gap at all, and the run keeps its grant -- the same
 // infrastructure-wins-ties rule relayDegradedSince applies to grant denials.
 func requireCompleteV7Usage(benchVersion int, usage protocol.TokenUsage, execution relayExecutionSummary) error {
-	if benchVersion < protocol.BenchVersionV7 || efficiency.ValidUsage(usage) {
+	if benchVersion < protocol.BenchVersionV7 || efficiency.ValidUsage(usage) || validUnusedV8Usage(benchVersion, usage, execution) {
 		return nil
 	}
 	if execution.AgentRequestRejections > 0 && execution.AgentRequestRejections >= usage.UsageUnavailable {
@@ -285,6 +285,37 @@ func requireCompleteV7Usage(benchVersion int, usage protocol.TokenUsage, executi
 		)
 	}
 	return fmt.Errorf("benchmark v7 requires complete provider token usage")
+}
+
+// validUnusedV8Usage accepts the one complete accounting shape that
+// efficiency.ValidUsage intentionally rejects: a Bench v8 harness that made no
+// chat requests at all. V8 is quality-only and permits agents to answer with
+// deterministic or embedding-only retrieval. Treating an all-zero chat delta
+// as missing provider accounting mislabeled those agents as relay failures and
+// minted an unbounded series of no-fault retries.
+//
+// This stays deliberately narrower than "zero tokens": the relay snapshot
+// must call the interval complete, and both the usage and execution deltas must
+// prove that no chat request was attempted. A rejected, cancelled, failed, or
+// usage-less request still goes through the existing fail-closed classifier.
+func validUnusedV8Usage(benchVersion int, usage protocol.TokenUsage, execution relayExecutionSummary) bool {
+	return benchVersion >= protocol.BenchVersionV8 &&
+		usage.Status == "complete" &&
+		usage.Requests == 0 &&
+		usage.Successes == 0 &&
+		usage.UsageAvailable == 0 &&
+		usage.UsageUnavailable == 0 &&
+		usage.PromptTokens == 0 &&
+		usage.CompletionTokens == 0 &&
+		usage.TotalTokens == 0 &&
+		execution.Requests == 0 &&
+		execution.Successes == 0 &&
+		execution.InfrastructureFailures == 0 &&
+		execution.GrantDenials == 0 &&
+		execution.AgentRequestRejections == 0 &&
+		execution.CapacityExhaustions == 0 &&
+		execution.RecoveryExhaustions == 0 &&
+		execution.CallerCancellations == 0
 }
 
 // relayDegradedSince keeps #97's fail-closed rule: a run must never be scored
