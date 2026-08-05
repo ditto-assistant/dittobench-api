@@ -23,12 +23,14 @@ func TestV8HarnessEnvironmentUsesPlatformAdapter(t *testing.T) {
 	if got := env["OLLAMA_BASE_URL"]; got != "http://host.docker.internal:11436" {
 		t.Fatalf("embedding gateway = %q", got)
 	}
-	for _, compatibilityKey := range []string{
-		"CHUTES_API_KEY", "CHUTES_BASE_URL", "OPENAI_API_KEY", "OPENAI_BASE_URL",
-		"OPENAI_API_BASE", "OPENROUTER_API_KEY", "OPENROUTER_BASE_URL",
-	} {
-		if _, ok := env[compatibilityKey]; ok {
-			t.Fatalf("compatibility selector %s injected before a failed route probe", compatibilityKey)
+	for _, baseURLKey := range append([]string{"CHUTES_BASE_URL"}, v8CompatBaseURLKeys...) {
+		if got := env[baseURLKey]; got != "http://host.docker.internal:11436/v1/inference" {
+			t.Fatalf("%s = %q, want ticket broker", baseURLKey, got)
+		}
+	}
+	for _, key := range []string{"CHUTES_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY"} {
+		if got := env[key]; got != brokerPlaceholderKey {
+			t.Fatalf("%s = %q, want non-secret broker placeholder", key, got)
 		}
 	}
 	for key, value := range env {

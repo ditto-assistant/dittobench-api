@@ -2249,17 +2249,19 @@ func harnessSandboxEnvForProvider(reqEnv map[string]string, benchVersion int, pr
 	// enters the sandbox; the source-bound broker route is the capability.
 	env["DITTOBENCH_PROVIDER"] = provider
 	env["DITTOBENCH_INFERENCE_BASE_URL"] = gateway
-	if provider == v8CompatLockedProvider {
-		// Compatibility aliases are the same locked route, not alternate
-		// providers. The placeholder keys authorize nothing.
-		env["CHUTES_BASE_URL"] = gateway
-		env["CHUTES_API_KEY"] = brokerPlaceholderKey
-		for _, key := range v8CompatBaseURLKeys {
-			env[key] = gateway
-		}
-		env["OPENAI_API_KEY"] = brokerPlaceholderKey
-		env["OPENROUTER_API_KEY"] = brokerPlaceholderKey
+	// Expose every historical OpenAI-compatible environment spelling in both
+	// selector modes. They are aliases of the same source-bound ticket broker,
+	// not additional providers, and the placeholder keys authorize nothing.
+	// This lets harnesses that read generic SDK env directly route correctly on
+	// the first boot; only images that actually branch on the singular provider
+	// selector need the bounded compatibility restart below.
+	env["CHUTES_BASE_URL"] = gateway
+	env["CHUTES_API_KEY"] = brokerPlaceholderKey
+	for _, key := range v8CompatBaseURLKeys {
+		env[key] = gateway
 	}
+	env["OPENAI_API_KEY"] = brokerPlaceholderKey
+	env["OPENROUTER_API_KEY"] = brokerPlaceholderKey
 	env["DITTOBENCH_MODEL"] = llm.HarnessModelForVersion(benchVersion)
 	env["OLLAMA_BASE_URL"] = embeddingGateway
 	// The production sandbox has a read-only root and exposes exactly one
