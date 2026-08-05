@@ -78,6 +78,17 @@ func TestSandboxStartInfraFailure(t *testing.T) {
 	if failure.Kind != "validator_infrastructure" || !failure.Retryable || failure.Code != "sandbox_network_unavailable" {
 		t.Fatalf("unexpected infra classification: %+v", failure)
 	}
+	// The scorer creates dittobench-sub tags itself. If one disappears before a
+	// compatibility restart, that is likewise validator infrastructure and must
+	// never consume the miner's retry budget as a scoring error.
+	imageErr := errors.New("docker run failed: Unable to find image 'dittobench-sub:agent-image-123' locally; pull access denied for dittobench-sub")
+	failure = sandboxStartInfraFailure(imageErr)
+	if failure == nil {
+		t.Fatal("missing request-scoped image was not classified as infrastructure")
+	}
+	if failure.Kind != "validator_infrastructure" || !failure.Retryable || failure.Code != "sandbox_image_unavailable" {
+		t.Fatalf("unexpected missing-image classification: %+v", failure)
+	}
 	// An ordinary harness crash stays a submission failure (nil classifier).
 	if got := sandboxStartInfraFailure(errors.New("exit status 1: panic in harness")); got != nil {
 		t.Fatalf("harness crash misclassified as infrastructure: %+v", got)
