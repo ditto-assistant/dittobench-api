@@ -1270,6 +1270,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		s.store.Fail(runID, "harness never became healthy: "+healthErr.Error())
 		return
 	}
+	tools := catalog.CatalogForVersion(req.BenchVersion)
 
 	// V8 harnesses may embed before any model turn, including the route probe
 	// below. Admit the ticket-bound embedding lane before probing so a working
@@ -1310,7 +1311,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 	// the compatibility selector. The CAS source move keeps the ticket bound to
 	// one stopped-or-live container throughout.
 	if image != "" && scope == scorer.ScopeScored && req.BenchVersion == protocol.BenchVersionV8 {
-		afterProbe, routed, probeErr := s.probeHarnessModelRoute(ctx, harnessURL, inferenceSessionID, relayStart, req.BenchVersion)
+		afterProbe, routed, probeErr := s.probeHarnessModelRoute(ctx, harnessURL, inferenceSessionID, relayStart, tools, req.BenchVersion)
 		if probeErr != nil {
 			s.failRelayUnavailableForContext(ctx, runID, probeErr)
 			return
@@ -1335,7 +1336,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 				s.store.Fail(runID, "compatibility harness never became healthy: "+err.Error())
 				return
 			}
-			afterProbe, routed, probeErr = s.probeHarnessModelRoute(ctx, harnessURL, inferenceSessionID, relayStart, req.BenchVersion)
+			afterProbe, routed, probeErr = s.probeHarnessModelRoute(ctx, harnessURL, inferenceSessionID, relayStart, tools, req.BenchVersion)
 			if probeErr != nil {
 				s.failRelayUnavailableForContext(ctx, runID, probeErr)
 				return
@@ -1353,7 +1354,6 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		relayStart = afterProbe // route probes are not benchmark usage
 	}
 
-	tools := catalog.CatalogForVersion(req.BenchVersion)
 	perCase := make([]protocol.CaseScore, 0, total)
 
 	// Observed tool execution: stand up the validator's mock tool
@@ -2281,6 +2281,7 @@ func (s *server) probeHarnessModelRoute(
 	harnessURL string,
 	inferenceSessionID string,
 	start relayHealthSnapshot,
+	tools []protocol.ToolDefinition,
 	benchVersion int,
 ) (relayHealthSnapshot, bool, error) {
 	_, _, _ = runner.RunCaseWithTelemetry(
@@ -2288,7 +2289,7 @@ func (s *server) probeHarnessModelRoute(
 		harnessURL,
 		"__dittobench_model_route_preflight__",
 		"Use the configured chat model and reply with exactly OK.",
-		nil,
+		tools,
 		runner.CaseOptions{UserID: "__dittobench_model_route_preflight__", BenchVersion: benchVersion},
 	)
 	end, err := s.broker.snapshot(inferenceSessionID)
