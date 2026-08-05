@@ -650,6 +650,16 @@ func sandboxStartInfraFailure(err error) *store.Failure {
 		return nil
 	}
 	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "dittobench-sub:") &&
+		(strings.Contains(msg, "unable to find image") ||
+			strings.Contains(msg, "no such image") ||
+			strings.Contains(msg, "pull access denied for dittobench-sub")) {
+		return &store.Failure{
+			Kind:      "validator_infrastructure",
+			Code:      "sandbox_image_unavailable",
+			Retryable: true,
+		}
+	}
 	if !strings.Contains(msg, "network") || !strings.Contains(msg, "not found") {
 		return nil
 	}
@@ -658,6 +668,21 @@ func sandboxStartInfraFailure(err error) *store.Failure {
 		Code:      "sandbox_network_unavailable",
 		Retryable: true,
 	}
+}
+
+// stopSandboxForRestart removes the current compatibility container and its
+// private network while retaining Build's request-scoped image tag. Stop owns
+// that tag by default, but the v8 adapter fallback must start the same verified
+// image a second time. The replacement handle resumes normal ownership and
+// releases the tag at the end of the run; Run also releases it on restart
+// failure, so every exit remains bounded.
+func (s *server) stopSandboxForRestart(handle *sandbox.Handle) {
+	if handle == nil {
+		return
+	}
+	containerOnly := *handle
+	containerOnly.ImageRef = ""
+	s.sandbox.Stop(context.Background(), &containerOnly)
 }
 
 // screenedImageInfraFailure classifies a build-path error that is the
@@ -1318,7 +1343,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		}
 		if !routed {
 			oldHandle := handle
-			s.sandbox.Stop(context.Background(), oldHandle)
+			s.stopSandboxForRestart(oldHandle)
 			handle = nil
 			compatEnv := harnessSandboxEnvForProvider(req.Env, req.BenchVersion, v8CompatLockedProvider, inferenceSessionID)
 			replacement, err := s.sandbox.Run(ctx, image, compatEnv)
