@@ -1233,7 +1233,13 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 			s.store.FailWith(runID, "container start failed: "+runErr.Error(), sandboxStartInfraFailure(runErr))
 			return
 		}
-		defer s.finishSandboxRun(runID, handle)
+		// Capture the variable, not the initial pointer: a v8 compatibility
+		// probe may replace this container exactly once before scoring begins.
+		defer func() {
+			if handle != nil {
+				s.finishSandboxRun(runID, handle)
+			}
+		}()
 		if inferenceSessionID != "" {
 			if !s.broker.bindSource(inferenceSessionID, runID, handle.SourceIP) {
 				s.store.Fail(runID, "inference session is unavailable")
@@ -1264,8 +1270,90 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		s.store.Fail(runID, "harness never became healthy: "+healthErr.Error())
 		return
 	}
-
 	tools := catalog.CatalogForVersion(req.BenchVersion)
+
+	// V8 harnesses may embed before any model turn, including the route probe
+	// below. Admit the ticket-bound embedding lane before probing so a working
+	// adapter is not mistaken for a zero-call adapter merely because its
+	// retrieval prelude was denied.
+	endEmbeddingPhase := func() {}
+	if req.BenchVersion >= protocol.BenchVersionV7 {
+		endMemoryPhase, admitted := s.beginMemoryPhase(ctx, inferenceSessionID, runID, false)
+		if !admitted {
+			if ctx.Err() == nil {
+				s.store.Fail(runID, "embedding phase admission failed")
+			}
+			return
+		}
+		endEmbeddingPhase = endMemoryPhase
+		defer endEmbeddingPhase()
+	}
+
+	// Probe the independent validator relay dependency before spending the
+	// dataset, then snapshot its monotonic health counters. The end snapshot
+	// prevents a mid-run provider outage from being persisted as an indefensible
+	// low score even when a harness masks that outage behind HTTP 200 + an empty
+	// response.
+	var relayStart relayHealthSnapshot
+	if scope == scorer.ScopeScored {
+		var ok bool
+		relayStart, ok = s.relayRunStart(ctx, runID, req.BenchVersion, req.RunSize, harnessGateway(inferenceSessionID), inferenceSessionID)
+		if !ok {
+			return
+		}
+	}
+
+	// v0.44 originally selected only the new `platform` adapter. Older v8
+	// images passed admission under the generic OpenAI-compatible adapter, so
+	// they stayed healthy and answered all 351 cases without ever reaching the
+	// broker. Detect that incompatibility with one discarded, isolated probe
+	// before seeding or scoring, then restart the same screened image once with
+	// the compatibility selector. The CAS source move keeps the ticket bound to
+	// one stopped-or-live container throughout.
+	if image != "" && scope == scorer.ScopeScored && req.BenchVersion == protocol.BenchVersionV8 {
+		afterProbe, routed, probeErr := s.probeHarnessModelRoute(ctx, harnessURL, inferenceSessionID, relayStart, tools, req.BenchVersion)
+		if probeErr != nil {
+			s.failRelayUnavailableForContext(ctx, runID, probeErr)
+			return
+		}
+		if !routed {
+			oldHandle := handle
+			s.sandbox.Stop(context.Background(), oldHandle)
+			handle = nil
+			compatEnv := harnessSandboxEnvForProvider(req.Env, req.BenchVersion, v8CompatLockedProvider, inferenceSessionID)
+			replacement, err := s.sandbox.Run(ctx, image, compatEnv)
+			if err != nil {
+				s.store.FailWith(runID, "compatibility container start failed: "+err.Error(), sandboxStartInfraFailure(err))
+				return
+			}
+			handle = replacement
+			if !s.broker.replaceBoundSource(inferenceSessionID, runID, oldHandle.SourceIP, replacement.SourceIP) {
+				s.store.Fail(runID, "inference session could not move to compatibility sandbox")
+				return
+			}
+			harnessURL = replacement.BaseURL
+			if err := s.waitSandboxHealthy(ctx, replacement, sandboxHealthTimeout); err != nil {
+				s.store.Fail(runID, "compatibility harness never became healthy: "+err.Error())
+				return
+			}
+			afterProbe, routed, probeErr = s.probeHarnessModelRoute(ctx, harnessURL, inferenceSessionID, relayStart, tools, req.BenchVersion)
+			if probeErr != nil {
+				s.failRelayUnavailableForContext(ctx, runID, probeErr)
+				return
+			}
+			if !routed {
+				s.store.FailWith(
+					runID,
+					"benchmark v8 requires the harness response path to use the locked model",
+					relayFinalizeFailure(errAgentModelUseMissing),
+				)
+				return
+			}
+			log.Printf("run %s selected v8 compatibility inference adapter after zero-call platform probe", runID)
+		}
+		relayStart = afterProbe // route probes are not benchmark usage
+	}
+
 	perCase := make([]protocol.CaseScore, 0, total)
 
 	// Observed tool execution: stand up the validator's mock tool
@@ -1308,35 +1396,6 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 		log.Printf("run %s: tool_endpoint not advertised (remote harness unreachable); observable tool cases scored capped (practice)", runID)
 	}
 
-	// Probe the independent validator relay dependency before spending the
-	// dataset, then snapshot its monotonic health counters. The end snapshot
-	// prevents a mid-run provider outage from being persisted as an indefensible
-	// low score even when a harness masks that outage behind HTTP 200 + an empty
-	// response.
-	var relayStart relayHealthSnapshot
-	if scope == scorer.ScopeScored {
-		var ok bool
-		relayStart, ok = s.relayRunStart(ctx, runID, req.BenchVersion, req.RunSize, harnessGateway(inferenceSessionID), inferenceSessionID)
-		if !ok {
-			return
-		}
-	}
-
-	// V7 harnesses may embed before any model turn, including tool-only cases.
-	// Admit the ticket-bound embedding lane for the whole scored case sequence;
-	// the old post-tool boundary made native retrieval fail before chat began.
-	endEmbeddingPhase := func() {}
-	if req.BenchVersion >= protocol.BenchVersionV7 {
-		endMemoryPhase, admitted := s.beginMemoryPhase(ctx, inferenceSessionID, runID, false)
-		if !admitted {
-			if ctx.Err() == nil {
-				s.store.Fail(runID, "embedding phase admission failed")
-			}
-			return
-		}
-		endEmbeddingPhase = endMemoryPhase
-		defer endEmbeddingPhase()
-	}
 	// V8 tool routing is intentionally derived from fresh, seed-bound state.
 	// Load only the validator-internal prerequisite facts before tool execution;
 	// they are absent from v7 artifacts, so the frozen v7 ordering and bytes are
@@ -2102,7 +2161,22 @@ func (s *server) waitSandboxHealthy(
 	return fmt.Errorf("harness not healthy after %s: %w", timeout, last)
 }
 
-const platformLockedProvider = "platform"
+const (
+	platformLockedProvider = "platform"
+	// v8CompatLockedProvider is the pre-cutover starter harness's generic
+	// OpenAI-compatible adapter name. Older already-admitted Bench v8 images
+	// implement this arm, while current images implement `platform`.
+	// The name does not select the public Chutes service: every URL below points
+	// at the ticket-bound local broker and the key is a non-secret placeholder.
+	v8CompatLockedProvider = "chutes"
+	brokerPlaceholderKey   = "ticket"
+)
+
+var v8CompatBaseURLKeys = []string{
+	"OPENAI_BASE_URL",
+	"OPENAI_API_BASE",
+	"OPENROUTER_BASE_URL",
+}
 
 // lockedEnvKeys are the sandbox env vars the model lock owns. A caller-supplied
 // req.Env may not set any of these — otherwise a miner could route around the
@@ -2147,8 +2221,16 @@ func sandboxRuntimeEnv(reqEnv map[string]string) map[string]string {
 // are applied AFTER the caller-supplied env and the caller's attempts to set any
 // lockedEnvKey are dropped, so req.Env can never override the lock.
 //
-// V8 uses the starter kit's explicit platform adapter and ticket-bound broker.
+// V8 starts with the current starter kit's explicit platform adapter. The
+// scored path may retry the SAME screened image once with the compatibility
+// adapter when a bounded model-route probe proves the image made zero broker
+// calls. That preserves already-admitted v8 images without restoring any
+// pre-v8 benchmark path.
 func harnessSandboxEnv(reqEnv map[string]string, benchVersion int, inferenceSessionID ...string) map[string]string {
+	return harnessSandboxEnvForProvider(reqEnv, benchVersion, platformLockedProvider, inferenceSessionID...)
+}
+
+func harnessSandboxEnvForProvider(reqEnv map[string]string, benchVersion int, provider string, inferenceSessionID ...string) map[string]string {
 	embeddingGateway := envOr("HARNESS_EMBED_URL", "http://host.docker.internal:11434")
 	gateway := envOr("HARNESS_GATEWAY_URL", "http://host.docker.internal:11434")
 	if len(inferenceSessionID) > 0 && inferenceSessionID[0] != "" {
@@ -2165,8 +2247,21 @@ func harnessSandboxEnv(reqEnv map[string]string, benchVersion int, inferenceSess
 	}
 	// The lock is applied last so it wins over caller env. No platform credential
 	// enters the sandbox; the source-bound broker route is the capability.
-	env["DITTOBENCH_PROVIDER"] = platformLockedProvider
+	env["DITTOBENCH_PROVIDER"] = provider
 	env["DITTOBENCH_INFERENCE_BASE_URL"] = gateway
+	// Expose every historical OpenAI-compatible environment spelling in both
+	// selector modes. They are aliases of the same source-bound ticket broker,
+	// not additional providers, and the placeholder keys authorize nothing.
+	// This lets harnesses that read generic SDK env directly route correctly on
+	// the first boot; only images that actually branch on the singular provider
+	// selector need the bounded compatibility restart below.
+	env["CHUTES_BASE_URL"] = gateway
+	env["CHUTES_API_KEY"] = brokerPlaceholderKey
+	for _, key := range v8CompatBaseURLKeys {
+		env[key] = gateway
+	}
+	env["OPENAI_API_KEY"] = brokerPlaceholderKey
+	env["OPENROUTER_API_KEY"] = brokerPlaceholderKey
 	env["DITTOBENCH_MODEL"] = llm.HarnessModelForVersion(benchVersion)
 	env["OLLAMA_BASE_URL"] = embeddingGateway
 	// The production sandbox has a read-only root and exposes exactly one
@@ -2175,6 +2270,38 @@ func harnessSandboxEnv(reqEnv map[string]string, benchVersion int, inferenceSess
 	// the validator's unprivileged UID.
 	env["DITTOBENCH_DB"] = "/tmp/dittobench.db"
 	return env
+}
+
+// probeHarnessModelRoute sends one isolated, discarded request through the
+// harness and asks the ticket broker whether the harness actually reached it.
+// A healthy /run response is not sufficient: the regression this guards
+// against returned plausible deterministic answers while making zero model
+// calls. The broker counters are validator-owned, so miner output cannot forge
+// a positive route result.
+func (s *server) probeHarnessModelRoute(
+	ctx context.Context,
+	harnessURL string,
+	inferenceSessionID string,
+	start relayHealthSnapshot,
+	tools []protocol.ToolDefinition,
+	benchVersion int,
+) (relayHealthSnapshot, bool, error) {
+	_, _, _ = runner.RunCaseWithTelemetry(
+		ctx,
+		harnessURL,
+		"__dittobench_model_route_preflight__",
+		"Use the configured chat model and reply with exactly OK.",
+		tools,
+		runner.CaseOptions{UserID: "__dittobench_model_route_preflight__", BenchVersion: benchVersion},
+	)
+	end, err := s.broker.snapshot(inferenceSessionID)
+	if err != nil {
+		return relayHealthSnapshot{}, false, fmt.Errorf("model-route broker snapshot unavailable: %w", err)
+	}
+	if err := relayDegradedSince(start, end); err != nil {
+		return relayHealthSnapshot{}, false, err
+	}
+	return end, end.Requests > start.Requests, nil
 }
 
 func harnessGateway(inferenceSessionID string) string {

@@ -179,6 +179,34 @@ func embeddingBrokerSession(t *testing.T, broker *inferenceBroker, source string
 	return id, runID
 }
 
+func TestBrokerReplacesBoundSourceOnceByCompareAndSwap(t *testing.T) {
+	broker := newInferenceBroker(1)
+	id, runID := embeddingBrokerSession(t, broker, "192.0.2.50")
+
+	if !broker.replaceBoundSource(id, runID, "192.0.2.50", "192.0.2.51") {
+		t.Fatal("same-run compatibility source replacement was rejected")
+	}
+	if broker.replaceBoundSource(id, runID, "192.0.2.50", "192.0.2.52") {
+		t.Fatal("stale source replaced the current binding")
+	}
+	if broker.replaceBoundSource(id, uuid.NewString(), "192.0.2.51", "192.0.2.52") {
+		t.Fatal("another run replaced the source binding")
+	}
+	if broker.replaceBoundSource(id, runID, "192.0.2.51", "not-an-ip") {
+		t.Fatal("invalid replacement source was accepted")
+	}
+
+	broker.mu.RLock()
+	session := broker.sessions[id]
+	broker.mu.RUnlock()
+	session.mu.Lock()
+	got := session.expectedSourceIP
+	session.mu.Unlock()
+	if got != "192.0.2.51" {
+		t.Fatalf("bound source = %q, want replacement", got)
+	}
+}
+
 func admittedEmbeddingBrokerSession(t *testing.T, broker *inferenceBroker, source string) (string, string) {
 	t.Helper()
 	id, runID := embeddingBrokerSession(t, broker, source)

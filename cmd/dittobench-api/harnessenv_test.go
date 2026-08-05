@@ -23,12 +23,14 @@ func TestV8HarnessEnvironmentUsesPlatformAdapter(t *testing.T) {
 	if got := env["OLLAMA_BASE_URL"]; got != "http://host.docker.internal:11436" {
 		t.Fatalf("embedding gateway = %q", got)
 	}
-	for _, retired := range []string{
-		"CHUTES_API_KEY", "CHUTES_BASE_URL", "OPENAI_API_KEY", "OPENAI_BASE_URL",
-		"OPENAI_API_BASE", "OPENROUTER_API_KEY", "OPENROUTER_BASE_URL",
-	} {
-		if _, ok := env[retired]; ok {
-			t.Fatalf("retired compatibility selector %s is still injected", retired)
+	for _, baseURLKey := range append([]string{"CHUTES_BASE_URL"}, v8CompatBaseURLKeys...) {
+		if got := env[baseURLKey]; got != "http://host.docker.internal:11436/v1/inference" {
+			t.Fatalf("%s = %q, want ticket broker", baseURLKey, got)
+		}
+	}
+	for _, key := range []string{"CHUTES_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY"} {
+		if got := env[key]; got != brokerPlaceholderKey {
+			t.Fatalf("%s = %q, want non-secret broker placeholder", key, got)
 		}
 	}
 	for key, value := range env {
@@ -68,6 +70,23 @@ func TestV8HarnessEnvironmentCannotBeOverridden(t *testing.T) {
 	for key, value := range env {
 		if strings.Contains(value, "attacker") && key != "BENIGN" {
 			t.Fatalf("hostile value survived in %s: %q", key, value)
+		}
+	}
+}
+
+func TestV8CompatibilityEnvironmentRoutesEveryAliasToBroker(t *testing.T) {
+	env := harnessSandboxEnvForProvider(nil, protocol.BenchVersionV8, v8CompatLockedProvider, "session-route")
+	if env["DITTOBENCH_PROVIDER"] != v8CompatLockedProvider {
+		t.Fatalf("provider = %q, want %q", env["DITTOBENCH_PROVIDER"], v8CompatLockedProvider)
+	}
+	for _, baseURLKey := range append([]string{"CHUTES_BASE_URL"}, v8CompatBaseURLKeys...) {
+		if got := env[baseURLKey]; got != "http://host.docker.internal:11436/v1/inference" {
+			t.Fatalf("%s = %q, want ticket broker", baseURLKey, got)
+		}
+	}
+	for _, key := range []string{"CHUTES_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY"} {
+		if got := env[key]; got != brokerPlaceholderKey {
+			t.Fatalf("%s = %q, want non-secret broker placeholder", key, got)
 		}
 	}
 }
