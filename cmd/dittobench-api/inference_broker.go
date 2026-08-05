@@ -1078,6 +1078,27 @@ func (b *inferenceBroker) bindSource(id, runID, sourceIP string) bool {
 	return true
 }
 
+// replaceBoundSource atomically moves one ticket-bound run to a replacement
+// sandbox after the old container has been stopped. It is intentionally a CAS:
+// only the same run and exact prior source may replace the binding, so the
+// compatibility restart cannot widen the ticket to two live containers.
+func (b *inferenceBroker) replaceBoundSource(id, runID, oldSourceIP, newSourceIP string) bool {
+	b.mu.RLock()
+	session := b.sessions[id]
+	b.mu.RUnlock()
+	if session == nil || net.ParseIP(oldSourceIP) == nil || net.ParseIP(newSourceIP) == nil {
+		return false
+	}
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	if session.boundRunID != runID || session.expectedSourceIP != oldSourceIP ||
+		(session.bearer == "" && session.legacyGateway == "") || !session.expiresAt.After(time.Now()) {
+		return false
+	}
+	session.expectedSourceIP = newSourceIP
+	return true
+}
+
 // embeddingLaneLocked is how many embedding calls this session may have in
 // flight. Caller holds session.mu.
 //
