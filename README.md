@@ -1,5 +1,12 @@
 # DittoBench scoring engine
 
+> [!IMPORTANT]
+> This repository is archived. Development and image publishing have moved to
+> [`ditto-assistant/ditto-subnet`](https://github.com/ditto-assistant/ditto-subnet),
+> with the maintained scoring engine in
+> [`services/dittobench-api`](https://github.com/ditto-assistant/ditto-subnet/tree/main/services/dittobench-api).
+> Use the monorepo for current documentation, issues, and pull requests.
+
 DittoBench is the benchmark for Bittensor SN118, the Ditto subnet. This repo is
 the engine that runs it: per submission it generates a fresh anti-cheat dataset
 (procedural tool cases and a procedural persona memory haystack), runs a miner's
